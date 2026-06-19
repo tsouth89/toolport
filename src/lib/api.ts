@@ -1,0 +1,163 @@
+import { invoke } from "@tauri-apps/api/core";
+import type {
+  AuditEntry,
+  AuthInfo,
+  CatalogEntry,
+  DetectedClient,
+  MigrateResult,
+  ProbeResult,
+  Registry,
+  ServerEntry,
+  WriteOutcome,
+} from "./types";
+
+/** The hand-verified popular catalog (offline, instant). */
+export function popularCatalog(): Promise<CatalogEntry[]> {
+  return invoke<CatalogEntry[]>("popular_catalog");
+}
+
+/** Search the catalog (your picks + curated, then the MCP Registry). */
+export function searchCatalog(query: string): Promise<CatalogEntry[]> {
+  return invoke<CatalogEntry[]>("search_catalog", { query });
+}
+
+/** Promote one of your registry servers into your personal catalog. */
+export function promoteToCatalog(serverId: string): Promise<void> {
+  return invoke<void>("promote_to_catalog", { serverId });
+}
+
+/** Remove an entry from your personal catalog by name. */
+export function unpromoteFromCatalog(name: string): Promise<void> {
+  return invoke<void>("unpromote_from_catalog", { name });
+}
+
+/** Recent tool-call audit entries (newest first). */
+export function getAuditLog(limit = 200): Promise<AuditEntry[]> {
+  return invoke<AuditEntry[]>("get_audit_log", { limit });
+}
+
+/** Connect to each enabled server and report health + tool count. */
+export function probeServers(): Promise<ProbeResult[]> {
+  return invoke<ProbeResult[]>("probe_servers");
+}
+
+/** Probe every supported MCP client and read its current server configuration. */
+export function detectClients(): Promise<DetectedClient[]> {
+  return invoke<DetectedClient[]>("detect_clients");
+}
+
+/** Install the Conduit gateway into a client's config, optionally scoped to a
+ * profile (by name). Omit profile to expose all enabled servers. */
+export function installGateway(
+  clientId: string,
+  profile?: string,
+): Promise<WriteOutcome> {
+  return invoke<WriteOutcome>("install_gateway", {
+    clientId,
+    profile: profile ?? null,
+  });
+}
+
+/** Remove the Conduit gateway from a client's config. */
+export function uninstallGateway(clientId: string): Promise<WriteOutcome> {
+  return invoke<WriteOutcome>("uninstall_gateway", { clientId });
+}
+
+/** Import a client's servers into Conduit, then leave the client with only the
+ * Conduit gateway (optionally scoped to a profile). Backs up the config first. */
+export function migrateClient(
+  clientId: string,
+  profile?: string,
+): Promise<MigrateResult> {
+  return invoke<MigrateResult>("migrate_client", {
+    clientId,
+    profile: profile ?? null,
+  });
+}
+
+/** Store a secret env value in the OS keychain. */
+export function setSecret(
+  serverId: string,
+  key: string,
+  value: string,
+): Promise<Registry> {
+  return invoke<Registry>("set_secret", { serverId, key, value });
+}
+
+/** Remove a secret from the keychain and the server entry. */
+export function deleteSecret(serverId: string, key: string): Promise<Registry> {
+  return invoke<Registry>("delete_secret", { serverId, key });
+}
+
+/** For each env key, whether a value is currently vaulted. */
+export function secretStatus(
+  serverId: string,
+  keys: string[],
+): Promise<[string, boolean][]> {
+  return invoke<[string, boolean][]>("secret_status", { serverId, keys });
+}
+
+/** Store a bearer token for a remote (http) server. */
+export function setAuthToken(serverId: string, token: string): Promise<void> {
+  return invoke<void>("set_auth_token", { serverId, token });
+}
+
+export function clearAuthToken(serverId: string): Promise<void> {
+  return invoke<void>("clear_auth_token", { serverId });
+}
+
+export function hasAuthToken(serverId: string): Promise<boolean> {
+  return invoke<boolean>("has_auth_token", { serverId });
+}
+
+/** Run the OAuth 2.1 browser flow for a remote server; vaults the access token. */
+export function authenticateOauth(serverId: string, url: string): Promise<void> {
+  return invoke<void>("authenticate_oauth", { serverId, url });
+}
+
+/** Detect what a remote server needs to connect (none/oauth/token) + guidance. */
+export function probeAuth(url: string): Promise<AuthInfo> {
+  return invoke<AuthInfo>("probe_auth", { url });
+}
+
+/** Load Conduit's registry (servers + profiles). */
+export function getRegistry(): Promise<Registry> {
+  return invoke<Registry>("get_registry");
+}
+
+/** Pull servers from every detected client into the registry. */
+export function importServers(): Promise<Registry> {
+  return invoke<Registry>("import_servers");
+}
+
+export function addServer(entry: ServerEntry): Promise<Registry> {
+  return invoke<Registry>("add_server", { entry });
+}
+
+export function updateServer(entry: ServerEntry): Promise<Registry> {
+  return invoke<Registry>("update_server", { entry });
+}
+
+export function removeServer(id: string): Promise<Registry> {
+  return invoke<Registry>("remove_server", { id });
+}
+
+export function setServerEnabled(
+  profileId: string,
+  serverId: string,
+  enabled: boolean,
+): Promise<Registry> {
+  return invoke<Registry>("set_server_enabled", { profileId, serverId, enabled });
+}
+
+export function createProfile(name: string): Promise<Registry> {
+  return invoke<Registry>("create_profile", { name });
+}
+
+export function deleteProfile(id: string): Promise<Registry> {
+  return invoke<Registry>("delete_profile", { id });
+}
+
+export function setActiveProfile(id: string): Promise<Registry> {
+  return invoke<Registry>("set_active_profile", { id });
+}
