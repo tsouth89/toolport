@@ -96,7 +96,10 @@ Phase 2 - Client integration
 - [x] Migrate-on-connect: import a client's servers, leave it gateway-only
 - [x] Live propagation (registry mtime bump -> gateway rebuild -> tools/list_changed)
 - [x] Registry path anchored to a non-virtualized home path (MSIX desync fix)
-- [ ] Bundle conduit-gateway as a sidecar so the installed path survives in production
+- [x] Bundle conduit-gateway as a sidecar so the installed path survives in
+      production (externalBin via merge config `tauri.bundle.conf.json`, staged by
+      `scripts/prepare-sidecar.mjs`; `resolve_gateway_path` finds the dev name or
+      the packaged `-<triple>` name). Full `tauri build` installer run still TODO.
 
 Phase 3 - Scaling & UX
 - [x] Lazy discovery: `CONDUIT_DISCOVERY=lazy` exposes 3 meta-tools (search/call)
@@ -108,10 +111,13 @@ Phase 3 - Scaling & UX
 ## Next (tiered)
 
 Tier 2 - feature completeness (in progress)
-- [ ] Per-tool enable/disable + destructive-tool deny-list
-- [ ] Tool playground: invoke any tool from the app and see the result
-- [ ] Proxy resources + prompts (then sampling / elicitation passthrough)
-- [ ] Observability: per-tool/server latency, success/error rates, filters
+- [x] Per-tool enable/disable + destructive-tool deny-list (UI toggles; gateway
+      hides+blocks; global destructiveHint switch)
+- [x] Tool playground: invoke any tool from the app and see the result
+- [x] Proxy resources + prompts (capability-gated discovery, namespaced prompts,
+      uri-routed resources); sampling / elicitation passthrough still TODO
+- [x] Observability: per-server latency (avg/p95), success/error rates (Activity
+      dashboard); per-tool breakdown + filters still TODO
 
 Tier 3 - launch prep
 - [ ] Bundle/sign the gateway sidecar; signed installer + auto-update; CI audits

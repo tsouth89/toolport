@@ -32,6 +32,13 @@ drowning every agent in hundreds of tool definitions. Conduit fixes that:
   official MCP Registry, then authenticate through the same flow.
 - **No secrets in client configs.** Clients only ever say "talk to Conduit." Keys
   live in the OS keychain and are injected at runtime.
+- **Governance built in.** Toggle any tool on or off, or flip one switch to hide
+  every destructive tool from every client at once. Every tool call is recorded
+  in an audit log, with per-server latency and error rates.
+- **Full MCP, not just tools.** Tools, resources, and prompts are all proxied.
+- **Test before you wire it up.** A built-in playground invokes any tool with a
+  form generated from its schema, so you can confirm a server works without
+  configuring a client first.
 
 ## How it works
 
@@ -63,17 +70,26 @@ Cursor, Claude Desktop, Claude Code, Codex, Google Antigravity, VS Code,
 Windsurf, Gemini CLI, Cline, Roo Code. Conduit detects each one, installs the
 gateway with one click, and can import a client's existing servers.
 
-## Configuration (gateway env vars)
+## Configuration
 
-The gateway is configured per client via env vars on its entry, set for you when
-you connect a client:
+Lazy discovery and the destructive-tool policy are global settings, stored in the
+registry and toggled in the app, so they apply to every client (lazy discovery is
+on by default). Per-client behavior is set via env vars on the gateway entry,
+written for you when you connect a client:
 
-- `CONDUIT_DISCOVERY=lazy` - expose the three meta-tools instead of the full
-  catalog (recommended; keeps context small). Unset = full direct catalog.
 - `CONDUIT_PROFILE=<name>` - scope this client to one profile's servers. Unset =
   the active profile.
+- `CONDUIT_DISCOVERY=lazy|full` - optional per-client override of the global lazy
+  setting. Rarely needed; the gateway reads the registry default otherwise.
 - `CONDUIT_REGISTRY=<path>` - override the registry file location. Defaults to a
   stable per-user path so packaged and unpackaged clients agree.
+
+## Install
+
+Prebuilt installers are published on the
+[Releases](https://github.com/tsouth89/conduit/releases) page. Conduit currently
+targets **Windows**; macOS and Linux support is in progress. To run from source,
+see Development below.
 
 ## Development
 
@@ -90,19 +106,24 @@ Other useful commands:
 cd src-tauri
 cargo test             # Rust unit tests (lib + gateway)
 cargo build --bin conduit-gateway   # build just the gateway binary
+
+# from the repo root: build a Windows installer (NSIS) with the gateway bundled
+npm run tauri:bundle
 ```
 
 The frontend is typechecked with `npx tsc --noEmit`.
 
 ## Status
 
-Conduit is in active development. The core is working end to end: gateway,
-lazy discovery, per-agent scoping, auth with live propagation, the catalog, and
-client import/migrate. See [docs/ROADMAP.md](docs/ROADMAP.md) for what is done
-and what is planned.
+Conduit is in active development (Windows-first). Working end to end: the
+gateway, lazy discovery, per-agent scoping, OAuth/key auth with live propagation,
+the catalog, client import/migrate, per-tool and destructive-tool governance, an
+audit log with latency/error stats, resources + prompts proxying, and a tool
+playground. See [docs/ROADMAP.md](docs/ROADMAP.md) for what is done and planned.
 
 ## License
 
-Open core. The gateway and local manager are intended to be free and open
-source; team/enterprise features (shared/hosted gateway, RBAC/SSO, policy, audit
-export, secret-vault integrations) are the planned paid layer.
+[MIT](LICENSE). The gateway and local manager are free and open source under an
+open-core model; planned team/enterprise features (shared/hosted gateway,
+RBAC/SSO, policy, audit export, secret-vault integrations) are a separate paid
+layer.
