@@ -1,0 +1,42 @@
+name: Release
+
+# Push a version tag (e.g. `v0.2.0`) and this builds the Windows installer and
+# creates a DRAFT GitHub release with it + auto-generated notes. Review the draft,
+# then publish it. Bump the version in src-tauri/tauri.conf.json (and Cargo.toml /
+# package.json) to match the tag before tagging.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer (NSIS, gateway bundled as sidecar)
+        run: npm run tauri:bundle
+
+      - name: Draft release with the installer
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: src-tauri/target/release/bundle/nsis/*-setup.exe
