@@ -14,8 +14,6 @@ use base64::Engine;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const REDIRECT_PORT: u16 = 41789;
-
 pub struct Tokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -478,13 +476,13 @@ pub fn authenticate(mcp_url: &str) -> Result<AuthResult, String> {
         endpoints.scope
     ));
     // Bind the callback listener BEFORE registering/opening the browser, so a
-    // fast redirect can't arrive before we're listening AND we know the real
-    // port. Prefer the stable port, but fall back to an OS-assigned one when it's
-    // busy - a prior auth attempt's listener can still be in its 180s wait window,
-    // which otherwise fails the new bind with "os error 10048". DCR registers the
-    // exact redirect_uri for this flow, so a variable loopback port is fine.
-    let listener = TcpListener::bind(("127.0.0.1", REDIRECT_PORT))
-        .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))
+    // fast redirect can't arrive before we're listening AND we know the real port.
+    // Always bind a fresh OS-assigned port: DCR registers the exact redirect_uri
+    // for THIS attempt, so the port can vary, and a per-attempt port means two
+    // overlapping attempts never share one. Previously a fixed port let a prior
+    // attempt's still-waiting listener intercept a newer attempt's callback, which
+    // failed the state check ("state mismatch").
+    let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|e| format!("could not bind a loopback callback port: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
