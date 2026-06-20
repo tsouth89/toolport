@@ -49,6 +49,17 @@ jobs:
 
       - name: Build installer
         run: npx tauri build --config src-tauri/tauri.bundle.conf.json --bundles ${{ matrix.bundles }}
+        env:
+          # macOS code signing + notarization. Empty/ignored on Windows and Linux;
+          # Tauri only acts on these when building the macOS bundle. Set these as
+          # repository secrets to produce a signed, notarized .dmg (see
+          # docs/SIGNING.md). Without them the macOS build is unsigned.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Draft release with the installers
         uses: softprops/action-gh-release@v2
