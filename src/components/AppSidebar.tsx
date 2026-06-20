@@ -7,6 +7,7 @@ import {
   Link2,
   Puzzle,
   ScrollText,
+  Share2,
   Store,
 } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
@@ -19,6 +20,7 @@ import {
 import { latestRelease, openDataDir } from "@/lib/api";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProfileBar } from "@/components/ProfileBar";
+import { ShareDialog } from "@/components/ShareDialog";
 
 /** True if `latest` is a higher semver than `current` (tolerates a leading "v"). */
 function isNewer(latest: string, current: string): boolean {
@@ -34,7 +36,7 @@ function isNewer(latest: string, current: string): boolean {
 
 /** Footer showing the running version, and an update link when a newer release
  * exists. The update check is best-effort: any failure just shows the version. */
-function VersionFooter() {
+function VersionFooter({ onImport }: { onImport: (r: Registry) => void }) {
   const [version, setVersion] = useState("");
   const [update, setUpdate] = useState<string | null>(null);
 
@@ -70,14 +72,28 @@ function VersionFooter() {
       ) : (
         <span className="text-muted-foreground">Conduit v{version}</span>
       )}
-      <button
-        onClick={() => openDataDir().catch(() => {})}
-        title="Open data folder (config, logs)"
-        aria-label="Open data folder"
-        className="shrink-0 text-muted-foreground transition hover:text-foreground"
-      >
-        <FolderOpen className="size-3.5" />
-      </button>
+      <div className="flex shrink-0 items-center gap-2">
+        <ShareDialog
+          onImported={onImport}
+          trigger={
+            <button
+              title="Share or import a setup"
+              aria-label="Share setup"
+              className="text-muted-foreground transition hover:text-foreground"
+            >
+              <Share2 className="size-3.5" />
+            </button>
+          }
+        />
+        <button
+          onClick={() => openDataDir().catch(() => {})}
+          title="Open data folder (config, logs)"
+          aria-label="Open data folder"
+          className="text-muted-foreground transition hover:text-foreground"
+        >
+          <FolderOpen className="size-3.5" />
+        </button>
+      </div>
     </div>
   );
 }
@@ -293,7 +309,7 @@ export function AppSidebar({
         </nav>
       </div>
 
-      <VersionFooter />
+      <VersionFooter onImport={onRegistryChange} />
     </aside>
   );
 }

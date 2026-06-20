@@ -664,6 +664,55 @@ fn open_data_dir() -> Result<(), String> {
     Ok(())
 }
 
+/// Serialize the user's servers into a shareable setup (server definitions only,
+/// never secret values). A teammate imports this and adds their own keys, so a
+/// curated server set can be shared without leaking any credentials.
+#[tauri::command]
+fn export_config(state: State<RegistryState>) -> Result<String, String> {
+    let reg = state.lock().unwrap();
+    let servers: Vec<ServerEntry> = reg
+        .servers
+        .iter()
+        .filter(|s| !clients::is_gateway_server(s))
+        .map(|s| {
+            let mut s = s.clone();
+            s.id = String::new();
+            for e in &mut s.env {
+                e.value = None; // never share env values
+            }
+            s
+        })
+        .collect();
+    let doc = serde_json::json!({ "kind": "conduit-setup", "version": 1, "servers": servers });
+    serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
+}
+
+/// Import a shared setup. Adds servers not already present (by name); secret
+/// values are never included, so each new server is left for the user to vault.
+#[tauri::command]
+fn import_config(state: State<RegistryState>, json: String) -> Result<Registry, String> {
+    #[derive(serde::Deserialize)]
+    struct Doc {
+        servers: Vec<ServerEntry>,
+    }
+    let doc: Doc = serde_json::from_str(&json)
+        .map_err(|e| format!("That doesn't look like a Conduit setup: {e}"))?;
+    let mut reg = state.lock().unwrap();
+    for mut s in doc.servers {
+        if reg.servers.iter().any(|e| e.name.eq_ignore_ascii_case(&s.name)) {
+            continue;
+        }
+        s.id = String::new();
+        for e in &mut s.env {
+            e.value = None;
+        }
+        s.source = Some("shared".to_string());
+        reg.add_server(s);
+    }
+    registry::save(&reg)?;
+    Ok(reg.clone())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let registry = registry::load().unwrap_or_default();
@@ -709,6 +758,8 @@ pub fn run() {
             latest_release,
             open_data_dir,
             set_all_enabled,
+            export_config,
+            import_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

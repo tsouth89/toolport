@@ -171,6 +171,16 @@ export function openDataDir(): Promise<void> {
   return invoke<void>("open_data_dir");
 }
 
+/** Serialize the user's servers into a shareable setup (no secret values). */
+export function exportConfig(): Promise<string> {
+  return invoke<string>("export_config");
+}
+
+/** Import a shared setup, adding servers not already present. */
+export function importConfig(json: string): Promise<Registry> {
+  return invoke<Registry>("import_config", { json });
+}
+
 /** Enable or disable every server in a profile at once. */
 export function setAllEnabled(
   profileId: string,
