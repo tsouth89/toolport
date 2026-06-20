@@ -29,6 +29,7 @@ import {
   type ServerEntry,
 } from "@/lib/types";
 import { AppSidebar } from "@/components/AppSidebar";
+import { Onboarding } from "@/components/Onboarding";
 import { RegistryServerCard } from "@/components/RegistryServerCard";
 import { ClientDetail } from "@/components/ClientDetail";
 import { ActivityView } from "@/components/ActivityView";
@@ -54,6 +55,10 @@ function App() {
   const [health, setHealth] = useState<Record<string, ProbeResult>>({});
   const [probing, setProbing] = useState(false);
   const [query, setQuery] = useState("");
+  const [onboarded, setOnboarded] = useState(
+    () => localStorage.getItem("conduit.onboarded") === "1",
+  );
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   const lastProbeRef = useRef(0);
   const probingRef = useRef(false);
@@ -169,6 +174,23 @@ function App() {
   const selectedClient = selectedClientId
     ? clients.find((c) => c.id === selectedClientId)
     : undefined;
+
+  // Show the first-run wizard once, only on a genuinely fresh setup: no servers
+  // and no client connected yet. Latched in its own state so a mid-flow connect
+  // (which flips gatewayInstalled) doesn't unmount the dialog. Existing users,
+  // and anyone who has dismissed it, never see it.
+  useEffect(() => {
+    if (onboarded || showOnboarding || loading || !registry) return;
+    const fresh =
+      servers.length === 0 && !clients.some((c) => c.gatewayInstalled);
+    if (fresh) setShowOnboarding(true);
+  }, [onboarded, showOnboarding, loading, registry, servers.length, clients]);
+
+  function finishOnboarding() {
+    localStorage.setItem("conduit.onboarded", "1");
+    setOnboarded(true);
+    setShowOnboarding(false);
+  }
 
   async function handleToggle(serverId: string, enabled: boolean) {
     if (!profileId) return;
@@ -424,6 +446,19 @@ function App() {
           </ScrollArea>
         </main>
       </div>
+      {showOnboarding && registry && (
+        <Onboarding
+          clients={clients}
+          registry={registry}
+          onRegistryChange={setRegistry}
+          onClientsRefresh={load}
+          onBrowseCatalog={() => {
+            finishOnboarding();
+            selectView("catalog");
+          }}
+          onFinish={finishOnboarding}
+        />
+      )}
       <Toaster position="bottom-right" />
     </TooltipProvider>
   );
