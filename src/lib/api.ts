@@ -171,14 +171,39 @@ export function openDataDir(): Promise<void> {
   return invoke<void>("open_data_dir");
 }
 
-/** Serialize the user's servers into a shareable setup (no secret values). */
-export function exportConfig(): Promise<string> {
-  return invoke<string>("export_config");
+/** Serialize the user's servers into a shareable setup (no secret values),
+ * optionally labelled with a name + description. */
+export function exportConfig(
+  name?: string,
+  description?: string,
+): Promise<string> {
+  return invoke<string>("export_config", {
+    name: name ?? null,
+    description: description ?? null,
+  });
+}
+
+/** Write the shareable setup to a file on disk (path from a save dialog). */
+export function exportConfigToPath(
+  path: string,
+  name?: string,
+  description?: string,
+): Promise<void> {
+  return invoke<void>("export_config_to_path", {
+    path,
+    name: name ?? null,
+    description: description ?? null,
+  });
 }
 
 /** Import a shared setup, adding servers not already present. */
 export function importConfig(json: string): Promise<Registry> {
   return invoke<Registry>("import_config", { json });
+}
+
+/** Import a shared setup from a file on disk (path from an open dialog). */
+export function importConfigFromPath(path: string): Promise<Registry> {
+  return invoke<Registry>("import_config_from_path", { path });
 }
 
 /** Enable or disable every server in a profile at once. */
@@ -201,6 +226,21 @@ export function importServers(): Promise<Registry> {
 
 export function addServer(entry: ServerEntry): Promise<Registry> {
   return invoke<Registry>("add_server", { entry });
+}
+
+/** Add a catalog entry as a registry server (the user vaults any keys after). */
+export function addCatalogServer(entry: CatalogEntry): Promise<Registry> {
+  const server: ServerEntry = {
+    id: "",
+    name: entry.name,
+    transport: entry.transport,
+    command: entry.command,
+    args: entry.args,
+    env: entry.envKeys.map((key) => ({ key, value: null, secret: true })),
+    url: entry.url,
+    source: `catalog:${entry.source}`,
+  };
+  return addServer(server);
 }
 
 export function updateServer(entry: ServerEntry): Promise<Registry> {

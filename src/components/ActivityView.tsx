@@ -1,12 +1,82 @@
-import { useEffect, useState } from "react";
-import { CheckCircle2, ScrollText, XCircle } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { CheckCircle2, ChevronRight, ScrollText, XCircle } from "lucide-react";
 import { getAuditLog, getAuditStats } from "@/lib/api";
-import type { AuditEntry, AuditStats } from "@/lib/types";
+import type { AuditEntry, AuditStats, ServerStat } from "@/lib/types";
 
 /** Compact latency string: "180 ms" or "1.2 s", or a dash when unmeasured. */
 function fmtMs(ms: number | null): string {
   if (ms == null) return "—";
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${ms} ms`;
+}
+
+function errCell(errors: number, errorRate: number) {
+  return errors > 0 ? `${(errorRate * 100).toFixed(0)}%` : "0";
+}
+
+/** One server row that expands to reveal its per-tool breakdown. */
+function ServerRow({ s }: { s: ServerStat }) {
+  const [open, setOpen] = useState(false);
+  const tools = s.tools ?? [];
+  const expandable = tools.length > 0;
+  return (
+    <>
+      <tr
+        className={`border-b last:border-0 ${expandable ? "cursor-pointer hover:bg-muted/30" : ""}`}
+        onClick={() => expandable && setOpen((o) => !o)}
+      >
+        <td className="px-3 py-2 font-medium">
+          <span className="flex items-center gap-1.5">
+            {expandable ? (
+              <ChevronRight
+                className={`size-3.5 text-muted-foreground transition-transform ${open ? "rotate-90" : ""}`}
+              />
+            ) : (
+              <span className="inline-block size-3.5" />
+            )}
+            {s.server}
+          </span>
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">{s.calls}</td>
+        <td
+          className={`px-3 py-2 text-right tabular-nums ${
+            s.errors > 0 ? "text-destructive" : "text-muted-foreground"
+          }`}
+        >
+          {errCell(s.errors, s.errorRate)}
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+          {fmtMs(s.avgMs)}
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+          {fmtMs(s.p95Ms)}
+        </td>
+      </tr>
+      {open &&
+        tools.map((t) => (
+          <tr key={t.tool} className="border-b border-border/40 bg-muted/20 last:border-0">
+            <td className="py-1.5 pr-3 pl-9 font-mono text-xs text-muted-foreground">
+              {t.tool}
+            </td>
+            <td className="px-3 py-1.5 text-right text-xs tabular-nums text-muted-foreground">
+              {t.calls}
+            </td>
+            <td
+              className={`px-3 py-1.5 text-right text-xs tabular-nums ${
+                t.errors > 0 ? "text-destructive" : "text-muted-foreground"
+              }`}
+            >
+              {errCell(t.errors, t.errorRate)}
+            </td>
+            <td className="px-3 py-1.5 text-right text-xs tabular-nums text-muted-foreground">
+              {fmtMs(t.avgMs)}
+            </td>
+            <td className="px-3 py-1.5 text-right text-xs tabular-nums text-muted-foreground">
+              {fmtMs(t.p95Ms)}
+            </td>
+          </tr>
+        ))}
+    </>
+  );
 }
 
 function StatsPanel({ stats }: { stats: AuditStats }) {
@@ -43,27 +113,14 @@ function StatsPanel({ stats }: { stats: AuditStats }) {
           </thead>
           <tbody>
             {stats.servers.map((s) => (
-              <tr key={s.server} className="border-b last:border-0">
-                <td className="px-3 py-2 font-medium">{s.server}</td>
-                <td className="px-3 py-2 text-right tabular-nums">{s.calls}</td>
-                <td
-                  className={`px-3 py-2 text-right tabular-nums ${
-                    s.errors > 0 ? "text-destructive" : "text-muted-foreground"
-                  }`}
-                >
-                  {s.errors > 0 ? `${(s.errorRate * 100).toFixed(0)}%` : "0"}
-                </td>
-                <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                  {fmtMs(s.avgMs)}
-                </td>
-                <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                  {fmtMs(s.p95Ms)}
-                </td>
-              </tr>
+              <ServerRow key={s.server} s={s} />
             ))}
           </tbody>
         </table>
       </div>
+      <p className="text-xs text-muted-foreground/70">
+        Click a server to see its per-tool breakdown.
+      </p>
     </div>
   );
 }
@@ -71,6 +128,8 @@ function StatsPanel({ stats }: { stats: AuditStats }) {
 export function ActivityView({ refreshKey }: { refreshKey: number }) {
   const [entries, setEntries] = useState<AuditEntry[] | null>(null);
   const [stats, setStats] = useState<AuditStats | null>(null);
+  const [serverFilter, setServerFilter] = useState<string>("");
+  const [errorsOnly, setErrorsOnly] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -84,6 +143,16 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
       alive = false;
     };
   }, [refreshKey]);
+
+  const servers = useMemo(
+    () => [...new Set((entries ?? []).map((e) => e.server))].sort(),
+    [entries],
+  );
+
+  const visible = (entries ?? []).filter(
+    (e) =>
+      (!serverFilter || e.server === serverFilter) && (!errorsOnly || !e.ok),
+  );
 
   if (entries === null) {
     return (
@@ -111,24 +180,59 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
   return (
     <div>
       {stats && <StatsPanel stats={stats} />}
-      <div className="flex flex-col gap-1">
-      {(entries ?? []).map((e, i) => (
-        <div
-          key={i}
-          className="flex items-center gap-3 rounded-md border border-border/50 px-3 py-2 text-sm"
+
+      <div className="mb-2 flex items-center gap-2">
+        <select
+          value={serverFilter}
+          onChange={(e) => setServerFilter(e.target.value)}
+          className="h-8 rounded-md border bg-background px-2 text-sm"
         >
-          {e.ok ? (
-            <CheckCircle2 className="size-4 shrink-0 text-emerald-400" />
-          ) : (
-            <XCircle className="size-4 shrink-0 text-destructive" />
-          )}
-          <span className="font-medium">{e.server}</span>
-          <span className="font-mono text-xs text-muted-foreground">{e.tool}</span>
-          <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-            {new Date(e.ts).toLocaleString()}
-          </span>
-        </div>
-      ))}
+          <option value="">All servers</option>
+          {servers.map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={() => setErrorsOnly((v) => !v)}
+          className={`h-8 rounded-md border px-2.5 text-sm transition-colors ${
+            errorsOnly
+              ? "border-destructive/50 bg-destructive/10 text-destructive"
+              : "text-muted-foreground hover:bg-accent"
+          }`}
+        >
+          Errors only
+        </button>
+        <span className="ml-auto text-xs text-muted-foreground">
+          {visible.length} of {entries.length}
+        </span>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        {visible.length === 0 ? (
+          <p className="py-12 text-center text-sm text-muted-foreground">
+            No calls match this filter.
+          </p>
+        ) : (
+          visible.map((e, i) => (
+            <div
+              key={i}
+              className="flex items-center gap-3 rounded-md border border-border/50 px-3 py-2 text-sm"
+            >
+              {e.ok ? (
+                <CheckCircle2 className="size-4 shrink-0 text-emerald-400" />
+              ) : (
+                <XCircle className="size-4 shrink-0 text-destructive" />
+              )}
+              <span className="font-medium">{e.server}</span>
+              <span className="font-mono text-xs text-muted-foreground">{e.tool}</span>
+              <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                {new Date(e.ts).toLocaleString()}
+              </span>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );

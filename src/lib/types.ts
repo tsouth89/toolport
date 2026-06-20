@@ -80,6 +80,17 @@ export interface ToolCallResult {
   [k: string]: unknown;
 }
 
+/** Per-tool aggregate within a server (calls, error rate, latency). */
+export interface ToolStat {
+  tool: string;
+  calls: number;
+  errors: number;
+  errorRate: number;
+  avgMs: number | null;
+  p95Ms: number | null;
+  lastTs: number;
+}
+
 /** Per-server aggregate from the audit log (calls, error rate, latency). */
 export interface ServerStat {
   server: string;
@@ -89,6 +100,8 @@ export interface ServerStat {
   avgMs: number | null;
   p95Ms: number | null;
   lastTs: number;
+  /** Per-tool breakdown, busiest first. */
+  tools: ToolStat[];
 }
 
 export interface AuditStats {

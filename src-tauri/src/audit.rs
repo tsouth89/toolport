@@ -140,11 +140,20 @@ fn aggregate(entries: &[Value]) -> Value {
     use std::collections::HashMap;
 
     #[derive(Default)]
+    struct ToolAgg {
+        calls: u64,
+        errors: u64,
+        durs: Vec<u64>,
+        last_ts: u64,
+    }
+
+    #[derive(Default)]
     struct Agg {
         calls: u64,
         errors: u64,
         durs: Vec<u64>,
         last_ts: u64,
+        tools: HashMap<String, ToolAgg>,
     }
 
     let mut by_server: HashMap<String, Agg> = HashMap::new();
@@ -153,6 +162,7 @@ fn aggregate(entries: &[Value]) -> Value {
 
     for e in entries {
         let server = e.get("server").and_then(|v| v.as_str()).unwrap_or("?");
+        let tool = e.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
         let ok = e.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
         let ts = e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
         let dur = e.get("durationMs").and_then(|v| v.as_u64());
@@ -170,12 +180,44 @@ fn aggregate(entries: &[Value]) -> Value {
             a.durs.push(d);
         }
         a.last_ts = a.last_ts.max(ts);
+
+        let t = a.tools.entry(tool.to_string()).or_default();
+        t.calls += 1;
+        if !ok {
+            t.errors += 1;
+        }
+        if let Some(d) = dur {
+            t.durs.push(d);
+        }
+        t.last_ts = t.last_ts.max(ts);
     }
 
     let mut servers: Vec<Value> = by_server
         .into_iter()
         .map(|(server, mut a)| {
             let (avg, p95) = latency(&mut a.durs);
+            // Per-tool breakdown, busiest tool first.
+            let mut tools: Vec<Value> = a
+                .tools
+                .into_iter()
+                .map(|(tool, mut t)| {
+                    let (tavg, tp95) = latency(&mut t.durs);
+                    json!({
+                        "tool": tool,
+                        "calls": t.calls,
+                        "errors": t.errors,
+                        "errorRate": if t.calls > 0 { t.errors as f64 / t.calls as f64 } else { 0.0 },
+                        "avgMs": tavg,
+                        "p95Ms": tp95,
+                        "lastTs": t.last_ts,
+                    })
+                })
+                .collect();
+            tools.sort_by(|x, y| {
+                y.get("calls")
+                    .and_then(|v| v.as_u64())
+                    .cmp(&x.get("calls").and_then(|v| v.as_u64()))
+            });
             json!({
                 "server": server,
                 "calls": a.calls,
@@ -184,6 +226,7 @@ fn aggregate(entries: &[Value]) -> Value {
                 "avgMs": avg,
                 "p95Ms": p95,
                 "lastTs": a.last_ts,
+                "tools": tools,
             })
         })
         .collect();
@@ -238,6 +281,24 @@ mod tests {
         assert_eq!(servers[0]["avgMs"], 20); // only the two durations: (10+30)/2
         assert_eq!(servers[1]["server"], "stripe");
         assert_eq!(servers[1]["calls"], 1);
+    }
+
+    #[test]
+    fn aggregate_breaks_down_by_tool() {
+        let entries = vec![
+            json!({"server":"github","tool":"search","ok":true,"ts":10,"durationMs":10}),
+            json!({"server":"github","tool":"search","ok":false,"ts":20,"durationMs":30}),
+            json!({"server":"github","tool":"create_issue","ok":true,"ts":15,"durationMs":50}),
+        ];
+        let s = aggregate(&entries);
+        let tools = s["servers"][0]["tools"].as_array().unwrap();
+        // Busiest tool first: search (2 calls) before create_issue (1).
+        assert_eq!(tools[0]["tool"], "search");
+        assert_eq!(tools[0]["calls"], 2);
+        assert_eq!(tools[0]["errors"], 1);
+        assert_eq!(tools[0]["avgMs"], 20); // (10+30)/2
+        assert_eq!(tools[1]["tool"], "create_issue");
+        assert_eq!(tools[1]["calls"], 1);
     }
 
     #[test]

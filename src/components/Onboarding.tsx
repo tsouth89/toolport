@@ -1,17 +1,24 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   Check,
   Download,
   Link2,
   Loader2,
+  Plus,
   Store,
   Waypoints,
 } from "lucide-react";
 import { toast } from "sonner";
-import { importServers, installGateway } from "@/lib/api";
+import {
+  addCatalogServer,
+  importServers,
+  installGateway,
+  popularCatalog,
+} from "@/lib/api";
 import {
   importableServers,
+  type CatalogEntry,
   type DetectedClient,
   type Registry,
 } from "@/lib/types";
@@ -161,6 +168,27 @@ function AddServers({
 }) {
   const [busy, setBusy] = useState(false);
   const [imported, setImported] = useState<number | null>(null);
+  const [starters, setStarters] = useState<CatalogEntry[]>([]);
+  const [adding, setAdding] = useState<string | null>(null);
+  const [added, setAdded] = useState<Set<string>>(new Set());
+
+  // A few popular servers for a one-click start, zero-config (no keys) first so
+  // the user gets something that works immediately.
+  useEffect(() => {
+    let alive = true;
+    popularCatalog()
+      .then((all) => {
+        if (!alive) return;
+        const sorted = [...all].sort(
+          (a, b) => a.envKeys.length - b.envKeys.length,
+        );
+        setStarters(sorted.slice(0, 4));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   async function doImport() {
     setBusy(true);
@@ -173,6 +201,19 @@ function AddServers({
       toast.error(`Import failed: ${e}`);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function addStarter(entry: CatalogEntry) {
+    setAdding(entry.name);
+    try {
+      onImport(await addCatalogServer(entry));
+      setAdded((prev) => new Set(prev).add(entry.name));
+      toast.success(`Added ${entry.name}`);
+    } catch (e) {
+      toast.error(`Couldn't add ${entry.name}: ${e}`);
+    } finally {
+      setAdding(null);
     }
   }
 
@@ -201,6 +242,42 @@ function AddServers({
             {imported === 1 ? "" : "s"}.
           </div>
         )}
+
+        {starters.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs text-muted-foreground">
+              Or add a popular one:
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              {starters.map((s) => {
+                const isAdded = added.has(s.name);
+                return (
+                  <button
+                    key={s.name}
+                    onClick={() => !isAdded && addStarter(s)}
+                    disabled={adding === s.name || isAdded}
+                    title={s.description}
+                    className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                      isAdded
+                        ? "border-emerald-400/40 text-emerald-400"
+                        : "hover:bg-accent disabled:opacity-60"
+                    }`}
+                  >
+                    {adding === s.name ? (
+                      <Loader2 className="size-3 animate-spin" />
+                    ) : isAdded ? (
+                      <Check className="size-3" />
+                    ) : (
+                      <Plus className="size-3" />
+                    )}
+                    {s.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <Button variant="outline" onClick={onBrowseCatalog}>
           <Store className="size-4" />
           Browse the catalog
@@ -208,7 +285,7 @@ function AddServers({
       </div>
 
       <Button variant="ghost" onClick={onNext} className="self-start">
-        {imported !== null ? "Next" : "I'll add servers later"}
+        {imported !== null || added.size > 0 ? "Next" : "I'll add servers later"}
         <ArrowRight className="size-4" />
       </Button>
     </>

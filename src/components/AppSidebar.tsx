@@ -23,6 +23,13 @@ import {
 } from "@/lib/types";
 import { openDataDir } from "@/lib/api";
 import { checkForUpdate, installUpdate } from "@/lib/updater";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProfileBar } from "@/components/ProfileBar";
 import { ShareDialog } from "@/components/ShareDialog";
@@ -41,6 +48,8 @@ function VersionFooter({
   const [version, setVersion] = useState("");
   const [update, setUpdate] = useState<Update | null>(null);
   const [installing, setInstalling] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [showNotes, setShowNotes] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -54,6 +63,22 @@ function VersionFooter({
       alive = false;
     };
   }, []);
+
+  async function manualCheck() {
+    if (checking || installing) return;
+    setChecking(true);
+    try {
+      const u = await checkForUpdate();
+      if (u?.available) {
+        setUpdate(u);
+        setShowNotes(true);
+      } else {
+        toast.success("You're on the latest version");
+      }
+    } finally {
+      setChecking(false);
+    }
+  }
 
   async function applyUpdate() {
     if (!update) return;
@@ -81,7 +106,7 @@ function VersionFooter({
     <div className="mt-auto flex items-center justify-between gap-2 border-t px-4 py-3 text-xs">
       {update ? (
         <button
-          onClick={applyUpdate}
+          onClick={() => setShowNotes(true)}
           disabled={installing}
           className="flex min-w-0 items-center gap-1.5 text-emerald-400 transition hover:underline disabled:opacity-70"
         >
@@ -95,8 +120,23 @@ function VersionFooter({
           </span>
         </button>
       ) : (
-        <span className="text-muted-foreground">Conduit v{version}</span>
+        <button
+          onClick={manualCheck}
+          disabled={checking}
+          title="Check for updates"
+          className="text-muted-foreground transition hover:text-foreground disabled:opacity-70"
+        >
+          {checking ? "Checking…" : `Conduit v${version}`}
+        </button>
       )}
+
+      <UpdateNotes
+        open={showNotes}
+        onOpenChange={setShowNotes}
+        update={update}
+        installing={installing}
+        onInstall={applyUpdate}
+      />
       <div className="flex shrink-0 items-center gap-2">
         <ShareDialog
           onImported={onImport}
@@ -128,6 +168,64 @@ function VersionFooter({
         </button>
       </div>
     </div>
+  );
+}
+
+/** Release-notes dialog shown before installing an update, so the user sees
+ * what's changing and confirms the restart. */
+function UpdateNotes({
+  open,
+  onOpenChange,
+  update,
+  installing,
+  onInstall,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  update: Update | null;
+  installing: boolean;
+  onInstall: () => void;
+}) {
+  if (!update) return null;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Update available: v{update.version}</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          {update.body ? (
+            <div className="max-h-60 overflow-y-auto rounded-md border bg-muted/30 p-3 text-sm whitespace-pre-wrap text-muted-foreground">
+              {update.body}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              A new version is ready to install.
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              onClick={() => onOpenChange(false)}
+              disabled={installing}
+            >
+              Later
+            </Button>
+            <Button onClick={onInstall} disabled={installing}>
+              {installing ? (
+                <>
+                  <Loader2 className="size-4 animate-spin" /> Installing…
+                </>
+              ) : (
+                <>
+                  <ArrowUpCircle className="size-4" /> Install and restart
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

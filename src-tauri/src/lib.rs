@@ -666,11 +666,34 @@ fn open_data_dir() -> Result<(), String> {
 
 /// Serialize the user's servers into a shareable setup (server definitions only,
 /// never secret values). A teammate imports this and adds their own keys, so a
-/// curated server set can be shared without leaking any credentials.
+/// curated server set can be shared without leaking any credentials. An optional
+/// name/description lets the sharer label the set.
 #[tauri::command]
-fn export_config(state: State<RegistryState>) -> Result<String, String> {
+fn export_config(
+    state: State<RegistryState>,
+    name: Option<String>,
+    description: Option<String>,
+) -> Result<String, String> {
     let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    serde_json::to_string_pretty(&build_export(&reg)).map_err(|e| e.to_string())
+    serde_json::to_string_pretty(&build_export(&reg, name.as_deref(), description.as_deref()))
+        .map_err(|e| e.to_string())
+}
+
+/// Write a shareable setup to a file on disk (the path comes from a save dialog).
+/// Same content as export_config; just easier to hand to a teammate than a paste.
+#[tauri::command]
+fn export_config_to_path(
+    state: State<RegistryState>,
+    path: String,
+    name: Option<String>,
+    description: Option<String>,
+) -> Result<(), String> {
+    let json = {
+        let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        serde_json::to_string_pretty(&build_export(&reg, name.as_deref(), description.as_deref()))
+            .map_err(|e| e.to_string())?
+    };
+    std::fs::write(&path, json).map_err(|e| format!("Couldn't write the file: {e}"))
 }
 
 /// Import a shared setup. Adds servers not already present (by name); secret
@@ -683,10 +706,27 @@ fn import_config(state: State<RegistryState>, json: String) -> Result<Registry, 
     Ok(reg.clone())
 }
 
+/// Import a shared setup from a file on disk (the path comes from an open dialog).
+#[tauri::command]
+fn import_config_from_path(
+    state: State<RegistryState>,
+    path: String,
+) -> Result<Registry, String> {
+    let json = std::fs::read_to_string(&path).map_err(|e| format!("Couldn't read the file: {e}"))?;
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    apply_import(&mut reg, &json)?;
+    registry::save(&reg)?;
+    Ok(reg.clone())
+}
+
 /// Build a shareable setup document: server definitions only, with the gateway
 /// entry excluded and every secret value stripped. Pure, so the never-leak-a-key
 /// invariant is testable without Tauri state.
-fn build_export(reg: &Registry) -> serde_json::Value {
+fn build_export(
+    reg: &Registry,
+    name: Option<&str>,
+    description: Option<&str>,
+) -> serde_json::Value {
     let servers: Vec<ServerEntry> = reg
         .servers
         .iter()
@@ -700,7 +740,14 @@ fn build_export(reg: &Registry) -> serde_json::Value {
             s
         })
         .collect();
-    serde_json::json!({ "kind": "conduit-setup", "version": 1, "servers": servers })
+    let mut doc = serde_json::json!({ "kind": "conduit-setup", "version": 1, "servers": servers });
+    if let Some(n) = name.map(str::trim).filter(|s| !s.is_empty()) {
+        doc["name"] = serde_json::json!(n);
+    }
+    if let Some(d) = description.map(str::trim).filter(|s| !s.is_empty()) {
+        doc["description"] = serde_json::json!(d);
+    }
+    doc
 }
 
 /// Merge a shared setup into the registry: add servers not already present (by
@@ -734,6 +781,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(registry))
         .invoke_handler(tauri::generate_handler![
             detect_clients,
@@ -774,7 +822,9 @@ pub fn run() {
             open_data_dir,
             set_all_enabled,
             export_config,
+            export_config_to_path,
             import_config,
+            import_config_from_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -819,7 +869,7 @@ mod tests {
             disabled_tools: vec![],
         });
 
-        let doc = build_export(&reg);
+        let doc = build_export(&reg, Some("Team setup"), Some("Our shared servers"));
         let serialized = serde_json::to_string(&doc).unwrap();
         // The secret value must never appear in a shared setup.
         assert!(!serialized.contains("sk-live-xyz"));
@@ -827,6 +877,9 @@ mod tests {
         // Gateway entry excluded.
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0]["env"][0]["value"], serde_json::Value::Null);
+        // Optional label is carried through.
+        assert_eq!(doc["name"], "Team setup");
+        assert_eq!(doc["description"], "Our shared servers");
     }
 
     #[test]
