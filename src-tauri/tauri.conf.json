@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "conduit",
+  "productName": "Conduit",
   "version": "0.3.0",
   "identifier": "com.tsout.conduit",
   "build": {

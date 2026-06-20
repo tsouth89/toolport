@@ -499,7 +499,9 @@ fn read_client(def: &ClientDef) -> DetectedClient {
                  config_exists: bool,
                  servers: Vec<McpServer>,
                  error: Option<String>| {
-        let gateway_installed = servers.iter().any(|s| s.name == GATEWAY_ENTRY_NAME);
+        let gateway_installed = servers
+            .iter()
+            .any(|s| s.name.eq_ignore_ascii_case(GATEWAY_ENTRY_NAME));
         // The config file's parent is the client's own data dir (e.g. `.../Code/User`,
         // `.../Claude`, `~/.codex`); its presence means the app has run here. If the
         // config itself exists the app is obviously present. An empty path means we
