@@ -83,9 +83,6 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
 
   const secretKeys = server.env.filter((e) => e.secret).map((e) => e.key);
   const isRemote = server.url !== null;
-  // A local (stdio) server whose credential is an API-key env var: frame the
-  // secret entry as authentication, the same way OAuth/token is for remotes.
-  const needsKey = !isRemote && secretKeys.length > 0;
   const primaryKey = secretKeys[0];
   const keyHint = primaryKey ? KEY_HINTS[primaryKey] : undefined;
 
@@ -322,81 +319,101 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
             </div>
           )}
 
-          {needsKey && (
-            <div className="border-b pb-3">
-              <div className="rounded-md bg-muted/40 p-2.5 text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">
-                  {vendorFromKey(primaryKey)}:{" "}
-                </span>
-                {keyHint?.hint ??
-                  "This server authenticates with an API key. Paste it below to connect."}
-                {keyHint?.url && (
-                  <button
-                    onClick={() => openUrl(keyHint.url)}
-                    className="ml-1 inline-flex items-center gap-0.5 text-sky-400 hover:underline"
-                  >
-                    get your key
-                    <ExternalLink className="size-3" />
-                  </button>
-                )}
-              </div>
+          {/* Key-based servers: the API key entry is the primary, obvious action. */}
+          {secretKeys.length > 0 && (
+            <div className="flex flex-col gap-3">
+              {keyHint && (
+                <div className="rounded-md bg-muted/40 p-2.5 text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">
+                    {vendorFromKey(primaryKey)}:{" "}
+                  </span>
+                  {keyHint.hint}
+                  {keyHint.url && (
+                    <button
+                      onClick={() => openUrl(keyHint.url)}
+                      className="ml-1 inline-flex items-center gap-0.5 text-sky-400 hover:underline"
+                    >
+                      get your key
+                      <ExternalLink className="size-3" />
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {secretKeys.map((key) => (
+                <div key={key} className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-2">
+                    <Label className="text-sm font-medium">
+                      {vendorFromKey(key)} API key
+                    </Label>
+                    <code className="rounded bg-muted px-1 py-0.5 font-mono text-[10px] text-muted-foreground">
+                      {key}
+                    </code>
+                    {vaulted[key] && (
+                      <span className="inline-flex items-center gap-1 text-xs text-emerald-400">
+                        <Check className="size-3" />
+                        saved
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="password"
+                      placeholder={
+                        vaulted[key]
+                          ? "•••••••• (saved)"
+                          : `paste your ${vendorFromKey(key)} API key`
+                      }
+                      value={inputs[key] ?? ""}
+                      onChange={(e) =>
+                        setInputs((i) => ({ ...i, [key]: e.target.value }))
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") save(key, inputs[key] ?? "");
+                      }}
+                    />
+                    <Button
+                      size="sm"
+                      disabled={busy || !(inputs[key] ?? "")}
+                      onClick={() => save(key, inputs[key] ?? "")}
+                    >
+                      Save
+                    </Button>
+                    {vaulted[key] && (
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                        aria-label={`Remove ${key}`}
+                        disabled={busy}
+                        onClick={() => remove(key)}
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
 
           {secretKeys.length === 0 && !isRemote && (
             <p className="text-sm text-muted-foreground">
-              No secret env vars yet. Add one below.
+              This server didn't declare an API key. If it needs one, add it as an
+              environment variable below.
             </p>
           )}
 
-          {secretKeys.map((key) => (
-            <div key={key} className="flex flex-col gap-1.5">
-              <div className="flex items-center gap-2">
-                <Label className="font-mono text-xs">{key}</Label>
-                {vaulted[key] && (
-                  <span className="inline-flex items-center gap-1 text-xs text-emerald-400">
-                    <Check className="size-3" />
-                    vaulted
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <Input
-                  type="password"
-                  placeholder={vaulted[key] ? "•••••••• (set)" : "enter value"}
-                  value={inputs[key] ?? ""}
-                  onChange={(e) =>
-                    setInputs((i) => ({ ...i, [key]: e.target.value }))
-                  }
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") save(key, inputs[key] ?? "");
-                  }}
-                />
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy || !(inputs[key] ?? "")}
-                  onClick={() => save(key, inputs[key] ?? "")}
-                >
-                  Save
-                </Button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
-                  aria-label={`Remove ${key}`}
-                  disabled={busy}
-                  onClick={() => remove(key)}
-                >
-                  <Trash2 className="size-4" />
-                </Button>
-              </div>
-            </div>
-          ))}
-
-          <div className="mt-1 border-t pt-3">
-            <Label className="text-xs text-muted-foreground">Add a secret</Label>
-            <div className="mt-1.5 flex items-center gap-2">
+          {/* Extra env secrets are an advanced case; collapse them unless they're
+              the only option (a stdio server that declared no keys). */}
+          <details
+            className="mt-1 border-t pt-3"
+            open={secretKeys.length === 0 && !isRemote}
+          >
+            <summary className="cursor-pointer text-xs text-muted-foreground select-none">
+              Add another environment secret
+            </summary>
+            <div className="mt-2 flex items-center gap-2">
               <Input
                 placeholder="ENV_NAME"
                 className="font-mono"
@@ -419,7 +436,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                 <Plus className="size-4" />
               </Button>
             </div>
-          </div>
+          </details>
         </div>
       </DialogContent>
     </Dialog>

@@ -350,6 +350,10 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
         }
         match listener.accept() {
             Ok((mut stream, _)) => {
+                // The listener is non-blocking; on macOS/BSD the accepted socket can
+                // inherit that, which would make our timed read return nothing. Force
+                // it back to blocking so read_callback_query's read timeout applies.
+                let _ = stream.set_nonblocking(false);
                 let query = read_callback_query(&mut stream);
                 let mut params: std::collections::HashMap<String, String> = std::collections::HashMap::new();
                 for kv in query.split('&') {
