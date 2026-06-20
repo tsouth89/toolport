@@ -279,15 +279,17 @@ export function ClientDetail({
                 disabled={busy}
               >
                 <Shuffle className="size-3" />
-                Move all in
+                Move config in
               </Button>
             )}
           </div>
         </div>
         <p className="mb-3 text-xs text-muted-foreground">
-          These are configured directly in {client.name}. Import what you want Conduit to
-          manage — Conduit becomes the source of truth, and your Conduit servers appear
-          back in {client.name} through the gateway. You don't manage them here.
+          The servers {client.name} already has, from its config and any plugins
+          (tagged below). Import what you want Conduit to manage; it becomes the
+          source of truth and serves them back through the gateway. "Move config in"
+          also clears the config-file ones out of {client.name}, plugin servers stay
+          (only {client.name} can remove those).
         </p>
 
         {allServers.length === 0 ? (
@@ -345,6 +347,15 @@ export function ClientDetail({
             <div className="rounded-md bg-muted/40 p-2 font-mono text-xs text-muted-foreground">
               {movable.map((s) => s.name).join(", ")}
             </div>
+            {client.pluginServers.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                Note: {client.pluginServers.length} server
+                {client.pluginServers.length === 1 ? "" : "s"} managed by{" "}
+                {client.name}'s plugins or extensions can't be moved, only{" "}
+                {client.name} controls those. They stay where they are (you can
+                still import a copy above).
+              </p>
+            )}
             {profiles.length > 1 && (
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs text-muted-foreground">Scope this client to</span>
