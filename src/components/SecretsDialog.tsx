@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Check, ExternalLink, KeyRound, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -89,11 +89,17 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
   const primaryKey = secretKeys[0];
   const keyHint = primaryKey ? KEY_HINTS[primaryKey] : undefined;
 
+  // Bumped each open so a slow status fetch from a previous open can't apply
+  // after a newer one (or after the dialog closed).
+  const runIdRef = useRef(0);
+
   async function refreshStatus() {
+    const runId = ++runIdRef.current;
+    const fresh = () => runId === runIdRef.current;
     if (secretKeys.length > 0) {
       try {
         const pairs = await secretStatus(server.id, secretKeys);
-        setVaulted(Object.fromEntries(pairs));
+        if (fresh()) setVaulted(Object.fromEntries(pairs));
       } catch {
         /* non-fatal */
       }
@@ -102,14 +108,14 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
     }
     if (isRemote && server.url) {
       hasAuthToken(server.id)
-        .then(setAuthSet)
+        .then((v) => fresh() && setAuthSet(v))
         .catch(() => {});
       setProbing(true);
       setAuthInfo(null);
       probeAuth(server.url)
-        .then(setAuthInfo)
+        .then((v) => fresh() && setAuthInfo(v))
         .catch(() => {})
-        .finally(() => setProbing(false));
+        .finally(() => fresh() && setProbing(false));
     }
   }
 
