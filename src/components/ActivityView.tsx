@@ -85,7 +85,15 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
     };
   }, [refreshKey]);
 
-  if (entries && entries.length === 0) {
+  if (entries === null) {
+    return (
+      <div className="flex items-center justify-center py-24 text-sm text-muted-foreground">
+        Loading activity…
+      </div>
+    );
+  }
+
+  if (entries.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 py-24 text-center">
         <ScrollText className="size-10 text-muted-foreground/50" />

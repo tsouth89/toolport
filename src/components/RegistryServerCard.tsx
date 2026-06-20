@@ -26,9 +26,11 @@ interface Props {
 
 type Status = "disabled" | "checking" | "connected" | "needs-auth" | "error";
 
-function statusOf(enabled: boolean, probing: boolean, health?: ProbeResult): Status {
+function statusOf(enabled: boolean, _probing: boolean, health?: ProbeResult): Status {
   if (!enabled) return "disabled";
-  if (!health) return probing ? "checking" : "checking";
+  // No probe result yet (loading, or queued behind an in-flight probe): show as
+  // checking either way.
+  if (!health) return "checking";
   if (health.ok) return "connected";
   if (health.authRequired) return "needs-auth";
   return "error";
