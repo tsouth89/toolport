@@ -1,0 +1,70 @@
+<svg viewBox="0 0 1200 600" xmlns="http://www.w3.org/2000/svg" role="img" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+  <title>Conduit lazy discovery: every server's tools collapse to 3 meta-tools</title>
+  <desc>A cloud of many tool names on the left funnels through the Conduit gateway into three emerald meta-tools on the right.</desc>
+  <rect x="1" y="1" width="1198" height="598" rx="24" fill="#0b0b0e" stroke="rgba(255,255,255,0.08)"/>
+
+  <!-- header -->
+  <g transform="translate(56,38)">
+    <rect width="44" height="44" rx="11" fill="#34d399"/>
+    <g transform="translate(0,0) scale(0.92)" fill="none" stroke="#06140e" stroke-width="2.9" stroke-linecap="round">
+      <path d="M33.6 12.5 A 15 15 0 1 0 33.6 35.5"/>
+      <path d="M30.2 16.7 A 9.4 9.4 0 1 0 30.2 31.3"/>
+      <circle cx="33" cy="24" r="2.7" fill="#06140e" stroke="none"/>
+    </g>
+    <text x="58" y="31" font-size="30" font-weight="600" fill="#f5f5f7">Conduit</text>
+  </g>
+  <text x="1144" y="68" text-anchor="end" font-size="17" fill="#a1a1aa" font-family="ui-monospace, Menlo, monospace">local-first MCP gateway</text>
+
+  <!-- funnel lines: cluster -> gateway -->
+  <g stroke="#34d399" stroke-width="1.5" opacity="0.22">
+    <line x1="430" y1="158" x2="524" y2="254"/>
+    <line x1="430" y1="206" x2="524" y2="254"/>
+    <line x1="430" y1="254" x2="524" y2="254"/>
+    <line x1="430" y1="302" x2="524" y2="254"/>
+    <line x1="430" y1="350" x2="524" y2="254"/>
+  </g>
+  <!-- gateway -> 3 metas -->
+  <g stroke="#34d399" stroke-width="2.2" opacity="0.55">
+    <line x1="588" y1="254" x2="748" y2="182"/>
+    <line x1="588" y1="254" x2="748" y2="254"/>
+    <line x1="588" y1="254" x2="748" y2="326"/>
+  </g>
+
+  <!-- left cluster: many tools -->
+  <g font-family="ui-monospace, Menlo, monospace" font-size="14" fill="#6f6f78">
+    <g><rect x="64" y="140" width="164" height="36" rx="8" fill="#131318" stroke="rgba(255,255,255,0.08)"/><text x="78" y="163">list_charges</text></g>
+    <g><rect x="240" y="140" width="164" height="36" rx="8" fill="#131318" stroke="rgba(255,255,255,0.08)"/><text x="254" y="163">run_sql</text></g>
+    <g><rect x="64" y="188" width="164" height="36" rx="8" fill="#131318" stroke="rgba(255,255,255,0.08)"/><text x="78" y="211">create_issue</text></g>
+    <g><rect x="240" y="188" width="164" height="36" rx="8" fill="#131318" stroke="rgba(255,255,255,0.08)"/><text x="254" y="211">send_email</text></g>
+    <g><rect x="64" y="236" width="164" height="36" rx="8" fill="#131318" stroke="rgba(255,255,255,0.08)"/><text x="78" y="259">deploy</text></g>
+    <g><rect x="240" y="236" width="164" height="36" rx="8" fill="#131318" stroke="rgba(255,255,255,0.08)"/><text x="254" y="259">get_logs</text></g>
+    <g><rect x="64" y="284" width="164" height="36" rx="8" fill="#131318" stroke="rgba(255,255,255,0.08)"/><text x="78" y="307">create_pr</text></g>
+    <g><rect x="240" y="284" width="164" height="36" rx="8" fill="#131318" stroke="rgba(255,255,255,0.08)"/><text x="254" y="307">query</text></g>
+    <g><rect x="64" y="332" width="164" height="36" rx="8" fill="#131318" stroke="rgba(255,255,255,0.08)"/><text x="78" y="355">list_tables</text></g>
+    <g><rect x="240" y="332" width="164" height="36" rx="8" fill="#131318" stroke="rgba(255,255,255,0.08)"/><text x="254" y="355">get_metrics</text></g>
+  </g>
+
+  <!-- gateway node -->
+  <rect x="524" y="222" width="64" height="64" rx="16" fill="#34d399"/>
+  <g transform="translate(524,222) scale(1.33)" fill="none" stroke="#06140e" stroke-width="2.9" stroke-linecap="round">
+    <path d="M33.6 12.5 A 15 15 0 1 0 33.6 35.5"/>
+    <path d="M30.2 16.7 A 9.4 9.4 0 1 0 30.2 31.3"/>
+    <circle cx="33" cy="24" r="2.7" fill="#06140e" stroke="none"/>
+  </g>
+
+  <!-- right: 3 meta-tools -->
+  <g font-family="ui-monospace, Menlo, monospace" font-size="17" fill="#34d399">
+    <g><rect x="748" y="156" width="388" height="52" rx="10" fill="rgba(52,211,153,0.06)" stroke="rgba(52,211,153,0.4)"/><text x="770" y="189">conduit_search_tools</text></g>
+    <g><rect x="748" y="228" width="388" height="52" rx="10" fill="rgba(52,211,153,0.06)" stroke="rgba(52,211,153,0.4)"/><text x="770" y="261">conduit_call_tool</text></g>
+    <g><rect x="748" y="300" width="388" height="52" rx="10" fill="rgba(52,211,153,0.06)" stroke="rgba(52,211,153,0.4)"/><text x="770" y="333">conduit_status</text></g>
+  </g>
+
+  <!-- captions -->
+  <text x="264" y="402" text-anchor="middle" font-size="15" fill="#a1a1aa" font-family="ui-monospace, Menlo, monospace">every tool, across all your servers</text>
+  <text x="942" y="402" text-anchor="middle" font-size="15" fill="#34d399" font-family="ui-monospace, Menlo, monospace">the 3 your agent loads</text>
+
+  <!-- tagline -->
+  <line x1="56" y1="444" x2="1144" y2="444" stroke="rgba(255,255,255,0.08)"/>
+  <text x="600" y="498" text-anchor="middle" font-size="28" font-weight="600" fill="#f5f5f7">One local gateway for every MCP server.</text>
+  <text x="600" y="532" text-anchor="middle" font-size="16" fill="#a1a1aa">Set up once. Every AI tool shares it. Keys stay in your OS keychain.</text>
+</svg>
