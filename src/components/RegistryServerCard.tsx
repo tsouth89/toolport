@@ -134,7 +134,7 @@ export function RegistryServerCard({
                   )
                   .catch((e) => toast.error(`${e}`))
               }
-              className="rounded p-1 text-muted-foreground/60 opacity-0 transition group-hover:opacity-100 hover:bg-accent hover:text-foreground"
+              className="rounded p-1 text-muted-foreground/60 opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground"
             >
               <Star className="size-3.5" />
             </button>
@@ -149,7 +149,7 @@ export function RegistryServerCard({
               trigger={
                 <button
                   aria-label={`Duplicate ${server.name}`}
-                  className="rounded p-1 text-muted-foreground/60 opacity-0 transition group-hover:opacity-100 hover:bg-accent hover:text-foreground"
+                  className="rounded p-1 text-muted-foreground/60 opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground"
                 >
                   <Copy className="size-3.5" />
                 </button>
@@ -162,7 +162,7 @@ export function RegistryServerCard({
               trigger={
                 <button
                   aria-label={`Edit ${server.name}`}
-                  className="rounded p-1 text-muted-foreground/60 opacity-0 transition group-hover:opacity-100 hover:bg-accent hover:text-foreground"
+                  className="rounded p-1 text-muted-foreground/60 opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground"
                 >
                   <Pencil className="size-3.5" />
                 </button>
@@ -172,7 +172,7 @@ export function RegistryServerCard({
               onClick={onRemove}
               disabled={busy}
               aria-label={`Remove ${server.name}`}
-              className="rounded p-1 text-muted-foreground/60 opacity-0 transition group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
+              className="rounded p-1 text-muted-foreground/60 opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100 hover:bg-destructive/10 hover:text-destructive"
             >
               <Trash2 className="size-3.5" />
             </button>
