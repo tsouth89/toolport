@@ -36,3 +36,6 @@ dist-ssr
 # Mobile icons from `tauri icon` (desktop-only project)
 /src-tauri/icons/android/
 /src-tauri/icons/ios/
+
+# Raw (uncaptioned) demo recording - the captioned demo.mp4/demo.gif are tracked
+/docs/demo-raw.mp4

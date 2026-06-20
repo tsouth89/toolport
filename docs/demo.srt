@@ -1,0 +1,23 @@
+1
+00:00:00,300 --> 00:00:04,800
+One local gateway for all your MCP servers
+
+2
+00:00:05,200 --> 00:00:10,400
+Add a server from the catalog
+
+3
+00:00:10,800 --> 00:00:15,800
+Set up once. Keys stay in your OS keychain.
+
+4
+00:00:16,300 --> 00:00:22,800
+Connect it to every AI tool
+
+5
+00:00:23,300 --> 00:00:28,800
+Your agent loads 3 tools, not hundreds
+
+6
+00:00:29,200 --> 00:00:35,900
+Then it just works, in every client

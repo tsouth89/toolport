@@ -4,6 +4,8 @@
 
 ![Conduit: every tool from all your servers, collapsed to the 3 your agent loads](docs/feature.png)
 
+![Conduit demo: add a server, connect it to every AI tool, and the agent uses it](docs/demo.gif)
+
 Conduit is a local MCP (Model Context Protocol) gateway and manager. You set up
 and authenticate each MCP server once in Conduit, point your AI agents at the
 single Conduit gateway, and every server is instantly available in all of them.
