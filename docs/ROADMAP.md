@@ -5,9 +5,10 @@ Conduit is a cross-platform manager for MCP servers across AI coding tools
 working spec. It captures the architecture decision and the build order.
 
 **Status (2026-06-20):** shipping. Signed/notarized macOS (Apple Silicon + Intel),
-Windows, and Linux (deb/AppImage) builds via a tag-triggered release pipeline. v0.3.x
-released. Next: macOS keychain access-group entitlement, auto-updater, and the
-launch (Product Hunt, MCP registry).
+Windows, and Linux (deb/AppImage) builds via a tag-triggered release pipeline. v0.3.2
+released. First-run onboarding and an in-app auto-updater are built (pending the v0.3.3
+release). Next: cut v0.3.3, the macOS keychain access-group entitlement, and the launch
+(Product Hunt scheduled, MCP registries listed).
 
 ## The core decision: Conduit is a gateway, not a file editor
 
@@ -126,13 +127,16 @@ Tier 2 - feature completeness (in progress)
 
 Tier 3 - launch prep
 - [x] Bundle the gateway sidecar; signed/notarized macOS installers (Win/Linux
-      unsigned with documented bypass); cargo-audit in CI. Auto-updater still TODO.
+      unsigned with documented bypass); cargo-audit in CI.
 - [x] Verify macOS / Linux (signed mac dmgs arm64 + Intel, Linux deb/AppImage;
       tested across Windows/macOS/Ubuntu VMs)
-- [x] Marketing site (conduit.southforgeai.com) with demo video. First-run
-      onboarding still minimal.
+- [x] Marketing site (conduit.southforgeai.com) with demo video.
+- [x] In-app auto-updater (Tauri v2 updater plugin + signed `latest.json` from the
+      release pipeline). Live from v0.3.3 onward.
+- [x] First-run onboarding wizard (detect clients, add servers, connect a client).
 - [ ] macOS keychain access-group entitlement (app + gateway share secrets with
-      no "Always Allow" prompt); auto-updater; Product Hunt + MCP registry launch
+      no "Always Allow" prompt)
+- [ ] Launch: Product Hunt (scheduled), MCP registries (Glama/mcp.so/awesome-mcp listed)
 
 Tier 4 - teams / enterprise (paid)
 - [ ] Hosted/remote gateway, shared/synced config, RBAC/SSO

@@ -161,11 +161,6 @@ export function probeAuth(url: string): Promise<AuthInfo> {
   return invoke<AuthInfo>("probe_auth", { url });
 }
 
-/** Latest published release tag on GitHub (e.g. "v0.3.1"), for an update hint. */
-export function latestRelease(): Promise<string> {
-  return invoke<string>("latest_release");
-}
-
 /** Open Conduit's data directory (registry, logs, audit) in the OS file manager. */
 export function openDataDir(): Promise<void> {
   return invoke<void>("open_data_dir");
