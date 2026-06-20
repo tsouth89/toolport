@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -20,6 +21,8 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// server that never replies would block its thread (and the batch health probe)
 /// forever.
 const STDIO_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Keep at most this many bytes of a child's stderr tail for error reporting.
+const STDERR_TAIL_CAP: usize = 4096;
 
 /// Build an `Authorization` header value from a raw token, adding the `Bearer`
 /// scheme unless the caller already included one.
@@ -126,6 +129,10 @@ pub struct StdioTransport {
     child: Child,
     stdin: ChildStdin,
     rx: Receiver<String>,
+    /// Tail of the child's stderr, drained on a background thread. A server that
+    /// dies on startup (bad package name, missing API key) explains itself here,
+    /// so we can report that instead of a bare "closed the connection".
+    stderr: Arc<Mutex<String>>,
     next_id: i64,
 }
 
@@ -137,7 +144,7 @@ impl StdioTransport {
             .envs(env.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         // Give the child the augmented PATH too, so e.g. `npx` can find `node`.
         #[cfg(not(windows))]
         cmd.env("PATH", augmented_path());
@@ -146,6 +153,7 @@ impl StdioTransport {
             .map_err(|e| format!("failed to spawn '{command}': {e}"))?;
         let stdin = child.stdin.take().ok_or("no child stdin")?;
         let stdout = child.stdout.take().ok_or("no child stdout")?;
+        let stderr = child.stderr.take().ok_or("no child stderr")?;
 
         // Drain stdout line-by-line on a dedicated thread; the request loop pulls
         // from the channel with a timeout. The thread ends on EOF/read error or
@@ -167,12 +175,61 @@ impl StdioTransport {
             }
         });
 
+        // Drain stderr into a shared buffer, capped so a chatty server can't grow
+        // it without bound. We keep the most recent output (where the fatal error
+        // usually is).
+        let stderr_buf = Arc::new(Mutex::new(String::new()));
+        let stderr_writer = Arc::clone(&stderr_buf);
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            while let Ok(n) = reader.read_line(&mut line) {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut buf) = stderr_writer.lock() {
+                    buf.push_str(&line);
+                    if buf.len() > STDERR_TAIL_CAP {
+                        let cut = buf.len() - STDERR_TAIL_CAP;
+                        buf.drain(..cut);
+                    }
+                }
+                line.clear();
+            }
+        });
+
         Ok(StdioTransport {
             child,
             stdin,
             rx,
+            stderr: stderr_buf,
             next_id: 1,
         })
+    }
+
+    /// Build a useful error for when the child's stdout closed (it exited or
+    /// crashed). Includes the exit status and the tail of stderr when available -
+    /// that is where "package not found" or "missing API key" actually shows up.
+    fn closed_error(&mut self) -> String {
+        // The child just exited; give its stderr drain a brief moment to flush.
+        std::thread::sleep(Duration::from_millis(150));
+        let status = self.child.try_wait().ok().flatten();
+        let tail = self
+            .stderr
+            .lock()
+            .map(|b| b.trim().to_string())
+            .unwrap_or_default();
+        let mut msg = String::from("downstream server exited");
+        if let Some(code) = status.and_then(|s| s.code()) {
+            msg.push_str(&format!(" (status {code})"));
+        }
+        if tail.is_empty() {
+            msg.push_str(" without output. Check the command, args, and any required API keys.");
+        } else {
+            msg.push_str(":\n");
+            msg.push_str(&tail);
+        }
+        msg
     }
 }
 
@@ -198,7 +255,7 @@ impl Transport for StdioTransport {
                     return Err(format!("timed out waiting for '{method}' response"))
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err("downstream server closed the connection".to_string())
+                    return Err(self.closed_error())
                 }
             };
             let trimmed = line.trim();
