@@ -148,7 +148,10 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
   async function doOauth() {
     if (!server.url) return;
     setOauthBusy(true);
-    toast.info("Opening your browser to sign in…");
+    toast.info("Opening your browser…", {
+      description:
+        "Sign in to the provider if prompted (you may need an existing account session), then approve access.",
+    });
     try {
       await authenticateOauth(server.id, server.url);
       setAuthSet(true);
