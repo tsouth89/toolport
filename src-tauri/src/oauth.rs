@@ -354,16 +354,8 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
         }
         match listener.accept() {
             Ok((mut stream, _)) => {
-                let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]);
-                let path = req
-                    .lines()
-                    .next()
-                    .and_then(|l| l.split_whitespace().nth(1))
-                    .unwrap_or("");
-                let query = path.split('?').nth(1).unwrap_or("");
-                let (mut code, mut state) = (None, None);
+                let query = read_callback_query(&mut stream);
+                let mut params: std::collections::HashMap<String, String> = std::collections::HashMap::new();
                 for kv in query.split('&') {
                     let mut it = kv.splitn(2, '=');
                     let k = it.next().unwrap_or("");
@@ -371,24 +363,40 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
                     let v = urlencoding::decode(raw)
                         .map(|c| c.into_owned())
                         .unwrap_or_default();
-                    match k {
-                        "code" => code = Some(v),
-                        "state" => state = Some(v),
-                        _ => {}
+                    if !k.is_empty() {
+                        params.insert(k.to_string(), v);
                     }
                 }
-                let html = "<html><body style='font-family:sans-serif;padding:2rem'>Authorization complete. You can close this window and return to Conduit.</body></html>";
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    html.len(),
-                    html
-                );
-                let _ = stream.write_all(resp.as_bytes());
 
-                if state.as_deref() != Some(expected_state) {
-                    return Err("state mismatch (possible CSRF)".to_string());
+                let code = params.get("code");
+                let error = params.get("error");
+
+                // Ignore connections that carry neither an authorization result nor
+                // an error - browsers hit the loopback with /favicon.ico and other
+                // stray requests, and bailing on the first of those would mask the
+                // real redirect arriving right behind it. Answer politely and keep
+                // waiting until the deadline.
+                if code.is_none() && error.is_none() {
+                    write_callback_page(&mut stream, "Waiting for authorization...");
+                    continue;
                 }
-                return code.ok_or_else(|| "no authorization code in callback".to_string());
+
+                if let Some(error) = error {
+                    let desc = params
+                        .get("error_description")
+                        .map(|d| format!(": {d}"))
+                        .unwrap_or_default();
+                    write_callback_page(&mut stream, "Authorization failed. You can close this window and return to Conduit.");
+                    return Err(format!("authorization server returned an error ({error}){desc}"));
+                }
+
+                // We have a code. Validate state before accepting it.
+                if params.get("state").map(String::as_str) != Some(expected_state) {
+                    write_callback_page(&mut stream, "Authorization could not be verified. You can close this window.");
+                    return Err("state mismatch (possible CSRF); try connecting again".to_string());
+                }
+                write_callback_page(&mut stream, "Authorization complete. You can close this window and return to Conduit.");
+                return Ok(code.cloned().unwrap_or_default());
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(150));
@@ -396,6 +404,46 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
             Err(e) => return Err(e.to_string()),
         }
     }
+}
+
+/// Read an HTTP request from the callback socket and return its raw query string
+/// (the part after `?` in the request target). Reads until the end of the request
+/// line/headers so a long `code` isn't truncated by a single short read.
+fn read_callback_query(stream: &mut std::net::TcpStream) -> String {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut data = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                data.extend_from_slice(&buf[..n]);
+                if data.windows(4).any(|w| w == b"\r\n\r\n") || data.len() > 16384 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let req = String::from_utf8_lossy(&data);
+    let target = req
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("");
+    target.split('?').nth(1).unwrap_or("").to_string()
+}
+
+fn write_callback_page(stream: &mut std::net::TcpStream, message: &str) {
+    let html = format!(
+        "<html><body style='font-family:sans-serif;padding:2rem'>{message}</body></html>"
+    );
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        html.len(),
+        html
+    );
+    let _ = stream.write_all(resp.as_bytes());
 }
 
 /// Run the full interactive flow and return tokens plus what's needed to refresh.
