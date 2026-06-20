@@ -4,6 +4,12 @@ name: Release
 # macOS, and Linux, then attaches them to a DRAFT GitHub release. Review the
 # draft and publish it. Bump the version in src-tauri/tauri.conf.json (and
 # Cargo.toml / package.json) to match the tag before tagging.
+#
+# It also emits signed auto-updater artifacts and a `latest.json` manifest, so
+# installed copies (v0.3.3+) can update themselves. The Tauri updater signing
+# key lives in two repo secrets: TAURI_SIGNING_PRIVATE_KEY and
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD. The matching public key is in
+# tauri.conf.json under plugins.updater.pubkey.
 on:
   push:
     tags:
@@ -64,6 +70,10 @@ jobs:
           # When set, prepare-sidecar builds the gateway for this target; empty on
           # Windows/Linux, which build for the host.
           CONDUIT_SIDECAR_TARGET: ${{ matrix.target }}
+          # Tauri updater signing. Required to produce signed `.sig` files for the
+          # updater artifacts (createUpdaterArtifacts is set in the bundle config).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # macOS code signing + notarization. Empty/ignored on Windows and Linux;
           # Tauri only acts on these when building the macOS bundle. Set these as
           # repository secrets to produce a signed, notarized .dmg (see
@@ -75,6 +85,19 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      # Both macOS targets emit an identically named `Conduit.app.tar.gz` updater
+      # artifact, which would overwrite each other on one release. Tag each with
+      # its target so latest.json can point at the right arch.
+      - name: Stage macOS updater artifact (unique per arch)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          dir="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
+          base="$dir/Conduit.app.tar.gz"
+          if [ -f "$base" ]; then
+            cp "$base" "$dir/Conduit_${{ matrix.target }}.app.tar.gz"
+            cp "$base.sig" "$dir/Conduit_${{ matrix.target }}.app.tar.gz.sig"
+          fi
+
       - name: Draft release with the installers
         uses: softprops/action-gh-release@v2
         with:
@@ -82,7 +105,54 @@ jobs:
           generate_release_notes: true
           files: |
             src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe.sig
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/*/release/bundle/macos/Conduit_*-apple-darwin.app.tar.gz
+            src-tauri/target/*/release/bundle/macos/Conduit_*-apple-darwin.app.tar.gz.sig
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/appimage/*.AppImage.sig
+
+  # Assemble the updater manifest from every platform's signature, after all
+  # installers are uploaded to the draft. If this job fails the draft still has
+  # working installers - only auto-update is affected.
+  updater-manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compose and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/$REPO/releases/download/$TAG"
+          gh release download "$TAG" --repo "$REPO" --pattern '*.sig' --dir sigs
+          assets=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+          pick() { echo "$assets" | grep -E "$1" | head -1 || true; }
+          win=$(pick '\-setup\.exe$')
+          mac_arm=$(pick 'aarch64-apple-darwin\.app\.tar\.gz$')
+          mac_x64=$(pick 'x86_64-apple-darwin\.app\.tar\.gz$')
+          lin=$(pick '\.AppImage$')
+          sig() { cat "sigs/$1.sig"; }
+          jq -n \
+            --arg version "$TAG" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg win_url "$base/$win"       --arg win_sig "$(sig "$win")" \
+            --arg marm_url "$base/$mac_arm"  --arg marm_sig "$(sig "$mac_arm")" \
+            --arg mx64_url "$base/$mac_x64"  --arg mx64_sig "$(sig "$mac_x64")" \
+            --arg lin_url "$base/$lin"       --arg lin_sig "$(sig "$lin")" \
+            '{
+               version: $version,
+               pub_date: $pub_date,
+               platforms: {
+                 "windows-x86_64": { signature: $win_sig,  url: $win_url },
+                 "darwin-aarch64": { signature: $marm_sig, url: $marm_url },
+                 "darwin-x86_64":  { signature: $mx64_sig, url: $mx64_url },
+                 "linux-x86_64":   { signature: $lin_sig,  url: $lin_url }
+               }
+             }' > latest.json
+          echo "--- latest.json ---"; cat latest.json
+          gh release upload "$TAG" latest.json --repo "$REPO" --clobber

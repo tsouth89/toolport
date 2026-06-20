@@ -33,5 +33,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk2OEVFNkEzQ0Q1MzYxNDkKUldSSllWUE5vK2FPbGhXMmttM1J6c3FYVUlrdHhCbHd0M2o5ek4rZXl6M01SdmZwRnU1cGRnL24K",
+      "endpoints": [
+        "https://github.com/tsouth89/conduit/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
