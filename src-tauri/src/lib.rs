@@ -50,8 +50,23 @@ fn connect_server(server: &ServerEntry) -> Result<DownstreamServer, String> {
             if let Some(v) = &e.value {
                 env.push((e.key.clone(), v.clone()));
             } else if e.secret {
-                if let Some(v) = secrets::get_secret(&server.id, &e.key) {
-                    env.push((e.key.clone(), v));
+                // Distinguish "never saved" from "couldn't read it" so we don't
+                // silently launch a server without its key (which then fails with
+                // its own cryptic message). Surface the real reason instead.
+                match secrets::get_secret_result(&server.id, &e.key) {
+                    Ok(Some(v)) => env.push((e.key.clone(), v)),
+                    Ok(None) => {
+                        return Err(format!(
+                            "missing secret '{}': add its value under this server's secrets",
+                            e.key
+                        ))
+                    }
+                    Err(err) => {
+                        return Err(format!(
+                            "could not read secret '{}' from the keychain: {err}",
+                            e.key
+                        ))
+                    }
                 }
             }
         }

@@ -23,10 +23,20 @@ pub fn set_secret(server_id: &str, key: &str, value: &str) -> Result<(), String>
 }
 
 pub fn get_secret(server_id: &str, key: &str) -> Option<String> {
-    Entry::new(SERVICE, &account(server_id, key))
-        .ok()?
-        .get_password()
-        .ok()
+    get_secret_result(server_id, key).ok().flatten()
+}
+
+/// Like `get_secret`, but distinguishes "no such secret was saved" (`Ok(None)`)
+/// from an actual keychain failure (`Err`, e.g. the keychain is locked or denied
+/// access to this app). Callers that need to explain *why* a secret is missing
+/// use this so a read failure isn't silently treated as "never saved".
+pub fn get_secret_result(server_id: &str, key: &str) -> Result<Option<String>, String> {
+    let entry = Entry::new(SERVICE, &account(server_id, key)).map_err(|e| e.to_string())?;
+    match entry.get_password() {
+        Ok(v) => Ok(Some(v)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 pub fn delete_secret(server_id: &str, key: &str) -> Result<(), String> {

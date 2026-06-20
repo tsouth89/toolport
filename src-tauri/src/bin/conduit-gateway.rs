@@ -420,13 +420,16 @@ fn connect_one(server: &ServerEntry) -> Option<DownstreamServer> {
             if let Some(v) = &e.value {
                 env.push((e.key.clone(), v.clone()));
             } else if e.secret {
-                if let Some(v) = secrets::get_secret(&server.id, &e.key) {
-                    env.push((e.key.clone(), v));
-                } else {
-                    eprintln!(
+                match secrets::get_secret_result(&server.id, &e.key) {
+                    Ok(Some(v)) => env.push((e.key.clone(), v)),
+                    Ok(None) => eprintln!(
                         "conduit: '{}' needs secret '{}' but none is vaulted",
                         server.id, e.key
-                    );
+                    ),
+                    Err(err) => eprintln!(
+                        "conduit: '{}' could not read secret '{}' from the keychain: {err}",
+                        server.id, e.key
+                    ),
                 }
             }
         }

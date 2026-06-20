@@ -253,19 +253,15 @@ struct TokenResponse {
     expires_in: Option<u64>,
 }
 
-/// Ensure `offline_access` is among the requested scopes so the server issues a
-/// refresh token. Only touches servers that already advertise a scope; servers
-/// that request none (scope omitted) are left untouched. `offline_access` is the
-/// standard OAuth/OIDC scope for refresh tokens and is safely ignored by servers
-/// that don't recognize it.
-fn ensure_offline_access(scope: Option<String>) -> Option<String> {
-    scope.map(|s| {
-        if s.split_whitespace().any(|t| t == "offline_access") {
-            s
-        } else {
-            format!("{s} offline_access")
-        }
-    })
+/// Choose the `scope` to request. The input is the server's advertised
+/// `scopes_supported`. We want a refresh token (the `offline_access` scope), but
+/// we must not ask for it unless the server actually offers it: requesting an
+/// unsupported scope gets the entire authorization rejected with `invalid_scope`
+/// (Stripe does exactly this). The advertised list already contains
+/// `offline_access` when the server supports refresh tokens, so we pass it
+/// through unchanged and never inject a scope the server didn't offer.
+fn requested_scope(advertised: Option<String>) -> Option<String> {
+    advertised
 }
 
 fn exchange_code(
@@ -487,9 +483,11 @@ pub fn authenticate(mcp_url: &str) -> Result<AuthResult, String> {
     let (verifier, challenge) = pkce();
     let state = random_token(16);
 
-    // Request offline_access so the server issues a refresh token (otherwise a
-    // short-lived access token forces full re-auth on expiry, as with Expo).
-    let scope = ensure_offline_access(endpoints.scope.clone());
+    // Request exactly the scopes the server advertises. That already includes
+    // offline_access (the refresh-token scope) when the server supports it;
+    // forcing offline_access otherwise gets the authorization rejected with
+    // invalid_scope (e.g. Stripe).
+    let scope = requested_scope(endpoints.scope.clone());
     let auth_url = build_authorize_url(
         &endpoints.authorization_endpoint,
         &client_id,
@@ -573,18 +571,19 @@ mod tests {
     }
 
     #[test]
-    fn offline_access_added_only_when_a_scope_exists() {
+    fn requested_scope_never_forces_unsupported_offline_access() {
+        // offline_access advertised -> kept (server supports refresh tokens).
         assert_eq!(
-            ensure_offline_access(Some("mcp:access".into())).as_deref(),
-            Some("mcp:access offline_access")
-        );
-        // Already present -> unchanged (no duplicate).
-        assert_eq!(
-            ensure_offline_access(Some("openid offline_access profile".into())).as_deref(),
+            requested_scope(Some("openid offline_access profile".into())).as_deref(),
             Some("openid offline_access profile")
         );
-        // No advertised scope -> leave it alone (don't impose one).
-        assert_eq!(ensure_offline_access(None), None);
+        // offline_access NOT advertised -> never injected (would be invalid_scope).
+        assert_eq!(
+            requested_scope(Some("mcp:access".into())).as_deref(),
+            Some("mcp:access")
+        );
+        // No advertised scope -> request none.
+        assert_eq!(requested_scope(None), None);
     }
 
     #[test]
