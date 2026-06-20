@@ -112,7 +112,7 @@ async fn detect_clients() -> Result<Vec<clients::DetectedClient>, String> {
 
 #[tauri::command]
 fn get_registry(state: State<RegistryState>) -> Registry {
-    state.lock().unwrap().clone()
+    state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
 fn server_from_detected(server: &clients::McpServer, client_id: &str) -> ServerEntry {
@@ -146,7 +146,7 @@ async fn import_servers(state: State<'_, RegistryState>) -> Result<Registry, Str
     let detected = tauri::async_runtime::spawn_blocking(clients::detect_clients)
         .await
         .map_err(|e| e.to_string())?;
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     for client in &detected {
         for server in &client.servers {
             // Never import our own gateway entry (it would recurse).
@@ -168,7 +168,7 @@ async fn import_servers(state: State<'_, RegistryState>) -> Result<Registry, Str
 
 #[tauri::command]
 fn add_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.add_server(entry);
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -176,7 +176,7 @@ fn add_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Registr
 
 #[tauri::command]
 fn update_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.update_server(entry)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -184,7 +184,7 @@ fn update_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Regi
 
 #[tauri::command]
 fn remove_server(state: State<RegistryState>, id: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.remove_server(&id)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -197,7 +197,7 @@ fn set_server_enabled(
     server_id: String,
     enabled: bool,
 ) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_server_enabled(&profile_id, &server_id, enabled)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -209,7 +209,7 @@ fn set_all_enabled(
     profile_id: String,
     enabled: bool,
 ) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_all_enabled(&profile_id, enabled)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -217,7 +217,7 @@ fn set_all_enabled(
 
 #[tauri::command]
 fn create_profile(state: State<RegistryState>, name: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.add_profile(&name);
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -225,7 +225,7 @@ fn create_profile(state: State<RegistryState>, name: String) -> Result<Registry,
 
 #[tauri::command]
 fn delete_profile(state: State<RegistryState>, id: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.remove_profile(&id)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -233,7 +233,7 @@ fn delete_profile(state: State<RegistryState>, id: String) -> Result<Registry, S
 
 #[tauri::command]
 fn set_active_profile(state: State<RegistryState>, id: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_active_profile(&id)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -296,7 +296,7 @@ async fn migrate_client(
         .ok_or_else(|| format!("Unknown client '{client_id}'"))?;
 
     let (registry, imported, moved) = {
-        let mut reg = state.lock().unwrap();
+        let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut imported = 0;
         let mut moved = Vec::new();
         for server in &client.servers {
@@ -337,7 +337,7 @@ fn set_secret(
     value: String,
 ) -> Result<Registry, String> {
     secrets::set_secret(&server_id, &key, &value)?;
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(server) = reg.servers.iter_mut().find(|s| s.id == server_id) {
         match server.env.iter_mut().find(|e| e.key == key) {
             Some(ev) => {
@@ -363,7 +363,7 @@ fn delete_secret(
     key: String,
 ) -> Result<Registry, String> {
     secrets::delete_secret(&server_id, &key)?;
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(server) = reg.servers.iter_mut().find(|s| s.id == server_id) {
         server.env.retain(|e| e.key != key);
     }
@@ -389,7 +389,7 @@ fn audit_stats(window: usize) -> serde_json::Value {
 async fn probe_servers(state: State<'_, RegistryState>) -> Result<Vec<ProbeResult>, String> {
     // Snapshot which servers to probe, then drop the lock before any I/O.
     let servers: Vec<ServerEntry> = {
-        let reg = state.lock().unwrap();
+        let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reg.enabled_servers()
             .into_iter()
             .filter(|s| !clients::is_gateway_server(s))
@@ -410,7 +410,7 @@ async fn probe_servers(state: State<'_, RegistryState>) -> Result<Vec<ProbeResul
 
 /// Snapshot one server out of the registry by id (dropping the lock before I/O).
 fn server_by_id(state: &RegistryState, server_id: &str) -> Result<ServerEntry, String> {
-    let reg = state.lock().unwrap();
+    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.servers
         .iter()
         .find(|s| s.id == server_id)
@@ -471,7 +471,7 @@ fn set_tool_enabled(
     tool: String,
     enabled: bool,
 ) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_tool_enabled(&server_id, &tool, enabled)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -481,7 +481,7 @@ fn set_tool_enabled(
 /// blocks every tool annotated `destructiveHint: true` across all servers.
 #[tauri::command]
 fn set_deny_destructive(state: State<RegistryState>, deny: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_deny_destructive(deny);
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -492,7 +492,7 @@ fn set_deny_destructive(state: State<RegistryState>, deny: bool) -> Result<Regis
 /// Clients pick it up the next time they (re)spawn the gateway.
 #[tauri::command]
 fn set_lazy_discovery(state: State<RegistryState>, lazy: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_lazy_discovery(lazy);
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -575,7 +575,7 @@ fn popular_catalog() -> Vec<catalog::CatalogEntry> {
 /// shows up (and is searchable) under popular picks.
 #[tauri::command]
 fn promote_to_catalog(state: State<RegistryState>, server_id: String) -> Result<(), String> {
-    let reg = state.lock().unwrap();
+    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let server = reg
         .servers
         .iter()
@@ -669,7 +669,7 @@ fn open_data_dir() -> Result<(), String> {
 /// curated server set can be shared without leaking any credentials.
 #[tauri::command]
 fn export_config(state: State<RegistryState>) -> Result<String, String> {
-    let reg = state.lock().unwrap();
+    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let servers: Vec<ServerEntry> = reg
         .servers
         .iter()
@@ -697,7 +697,7 @@ fn import_config(state: State<RegistryState>, json: String) -> Result<Registry, 
     }
     let doc: Doc = serde_json::from_str(&json)
         .map_err(|e| format!("That doesn't look like a Conduit setup: {e}"))?;
-    let mut reg = state.lock().unwrap();
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     for mut s in doc.servers {
         if reg.servers.iter().any(|e| e.name.eq_ignore_ascii_case(&s.name)) {
             continue;

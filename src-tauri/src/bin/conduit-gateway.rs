@@ -467,7 +467,7 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 }
 
 fn notify_tools_changed(stdout: &Arc<Mutex<std::io::Stdout>>) {
-    let mut out = stdout.lock().unwrap();
+    let mut out = stdout.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let _ = writeln!(
         out,
         "{}",
@@ -566,12 +566,12 @@ fn watch_registry(
         // Build the new router (spawns processes) before taking locks.
         let new_router = build_router(&new_reg, profile.as_deref());
         let tools = new_router.aggregated_tools();
-        *registry.lock().unwrap() = new_reg;
-        *router.lock().unwrap() = new_router;
+        *registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_reg;
+        *router.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_router;
         // Same guard as the initial build: never persist an empty catalog over a
         // good one (a half-written registry would otherwise wipe the cache).
         if !tools.is_empty() {
-            *cached_tools.lock().unwrap() = tools.clone();
+            *cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = tools.clone();
             save_tool_cache(&tools, profile.as_deref());
         }
         notify_tools_changed(&stdout);
@@ -620,7 +620,7 @@ fn main() {
     let ready = Arc::new(AtomicBool::new(false));
     glog(&format!(
         "loaded tool cache: {} tools",
-        cached_tools.lock().unwrap().len()
+        cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     ));
 
     {
@@ -631,7 +631,7 @@ fn main() {
         let cached_tools = Arc::clone(&cached_tools);
         let profile = profile.clone();
         std::thread::spawn(move || {
-            let reg = registry.lock().unwrap().clone();
+            let reg = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             let built = build_router(&reg, profile.as_deref());
             let tools = built.aggregated_tools();
             glog(&format!(
@@ -639,12 +639,12 @@ fn main() {
                 tools.len(),
                 built.server_count()
             ));
-            *router.lock().unwrap() = built;
+            *router.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = built;
             // Don't let a transient empty build (registry caught mid-write, or
             // every downstream momentarily unreachable) clobber a good catalog -
             // that's what leaves a client showing only conduit_status.
             if !tools.is_empty() {
-                *cached_tools.lock().unwrap() = tools.clone();
+                *cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = tools.clone();
                 save_tool_cache(&tools, profile.as_deref());
             } else {
                 glog("background build was empty; keeping previous tool cache");
@@ -685,7 +685,7 @@ fn main() {
         // tools/list answers from cache instantly; only block on a cold cache
         // (first ever run). tools/call waits for live downstream connections.
         let wait = match method {
-            "tools/list" => cached_tools.lock().unwrap().is_empty(),
+            "tools/list" => cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty(),
             // These have no disk cache, so they need the live router connected.
             "tools/call" | "resources/list" | "resources/read" | "prompts/list"
             | "prompts/get" => true,
@@ -702,33 +702,33 @@ fn main() {
         // startup read found none (transient) or a server was authed after we
         // built. Reload the registry and rebuild once so the call can route,
         // instead of failing with "no connected server".
-        if method == "tools/call" && router.lock().unwrap().server_count() == 0 {
-            let reg = registry.lock().unwrap().clone();
+        if method == "tools/call" && router.lock().unwrap_or_else(std::sync::PoisonError::into_inner).server_count() == 0 {
+            let reg = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             let built = build_router(&reg, profile.as_deref());
             if built.server_count() > 0 {
                 let tools = built.aggregated_tools();
-                *router.lock().unwrap() = built;
+                *router.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = built;
                 if !tools.is_empty() {
-                    *cached_tools.lock().unwrap() = tools.clone();
+                    *cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = tools.clone();
                     save_tool_cache(&tools, profile.as_deref());
                 }
                 glog(&format!(
                     "self-heal: rebuilt router ({} servers, {} tools)",
-                    router.lock().unwrap().server_count(),
+                    router.lock().unwrap_or_else(std::sync::PoisonError::into_inner).server_count(),
                     tools.len()
                 ));
                 notify_tools_changed(&stdout);
             }
         }
 
-        let cache_snapshot = cached_tools.lock().unwrap().clone();
+        let cache_snapshot = cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let response = {
-            let reg = registry.lock().unwrap();
-            let mut r = router.lock().unwrap();
+            let reg = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut r = router.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             handle_request(&req, &reg, &mut r, &cache_snapshot, lazy, profile.as_deref())
         };
         if let Some(resp) = response {
-            let mut out = stdout.lock().unwrap();
+            let mut out = stdout.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if writeln!(out, "{resp}").is_err() {
                 break;
             }
