@@ -161,7 +161,13 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
       toast.success("Authenticated");
       onChanged?.();
     } catch (e) {
-      toast.error(`OAuth failed: ${e}`);
+      const msg = `${e}`;
+      const blankHint = /state mismatch|timed out|closed/i.test(msg);
+      toast.error(`OAuth failed: ${msg}`, {
+        description: blankHint
+          ? "If the sign-in page was blank, your default browser (e.g. Safari) may block the local redirect. Set Chrome or Brave as default and try once more, or paste an access token above instead."
+          : undefined,
+      });
     } finally {
       setOauthBusy(false);
     }
@@ -303,16 +309,26 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                   {(authInfo == null ||
                     authInfo.kind === "oauth" ||
                     authInfo.kind === "unknown") && (
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      disabled={oauthBusy}
-                      onClick={doOauth}
-                    >
-                      {oauthBusy
-                        ? "Waiting for browser sign-in…"
-                        : "Sign in with OAuth"}
-                    </Button>
+                    <>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={oauthBusy}
+                        onClick={doOauth}
+                      >
+                        {oauthBusy
+                          ? "Waiting for browser sign-in…"
+                          : "Sign in with OAuth"}
+                      </Button>
+                      {oauthBusy && (
+                        <p className="text-[11px] text-muted-foreground">
+                          Finish signing in and approve access in your browser. If
+                          the page is blank, your default browser (e.g. Safari) may
+                          block the local redirect, use Chrome or Brave, or paste an
+                          access token above instead.
+                        </p>
+                      )}
+                    </>
                   )}
 
                   {authInfo?.kind === "token" && (

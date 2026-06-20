@@ -125,6 +125,23 @@ npm run tauri:bundle
 
 The frontend is typechecked with `npx tsc --noEmit`.
 
+## Troubleshooting
+
+- **OAuth opens a blank page (macOS).** The OAuth flow redirects back to a local
+  `http://127.0.0.1` callback. Safari can silently block that redirect, so the
+  sign-in page renders blank. Set **Chrome or Brave** as your default browser (or
+  paste an access token instead). Complete one attempt at a time, an abandoned
+  attempt keeps the callback port reserved for a few minutes and can cause a
+  "state mismatch" on the next try.
+- **A client reports the gateway "was not found" (running from source).** Build
+  the gateway binary once: `cd src-tauri && cargo build --bin conduit-gateway`.
+  `npm run tauri dev` builds the app but not this separate binary; packaged
+  releases bundle it, so installed users never hit this.
+- **Repeated macOS keychain prompts / "could not read secret from the keychain"
+  in dev.** An unsigned dev build gets an unstable code-signing identity, so the
+  keychain re-prompts or denies reads. A signed release fixes this; it is a
+  dev-only artifact.
+
 ## Status
 
 Conduit is in active development (Windows-first). Working end to end: the
