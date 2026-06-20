@@ -99,9 +99,11 @@ Prebuilt installers are published on the
 targets **Windows**; macOS and Linux support is in progress. To run from source,
 see Development below.
 
-The installer is not yet code signed, so Windows may show "Windows protected your
-PC", click **More info → Run anyway**. See [docs/SIGNING.md](docs/SIGNING.md) for
-the signing plan.
+The installer is not yet code signed. On **Windows**, SmartScreen may show
+"Windows protected your PC", click **More info → Run anyway**. On **macOS**,
+Gatekeeper may say the app "is damaged" or cannot be opened; right-click the app
+and choose **Open**, or run `xattr -dr com.apple.quarantine /Applications/Conduit.app`.
+See [docs/SIGNING.md](docs/SIGNING.md) for the signing plan.
 
 ## Development
 
@@ -115,11 +117,14 @@ npm run tauri dev      # run the desktop app
 Other useful commands:
 
 ```bash
-cd src-tauri
-cargo test             # Rust unit tests (lib + gateway)
-cargo build --bin conduit-gateway   # build just the gateway binary
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust unit tests (lib + gateway)
 
-# from the repo root: build a Windows installer (NSIS) with the gateway bundled
+# Build the gateway binary. Required when running from source: AI clients spawn
+# this binary directly, so without it a connected client reports "not found".
+# (Packaged releases bundle it, so installed users never need this.)
+npm run build:gateway
+
+# Build a Windows installer (NSIS) with the gateway bundled.
 npm run tauri:bundle
 ```
 

@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "build:gateway": "cargo build --manifest-path src-tauri/Cargo.toml --bin conduit-gateway",
     "prepare:sidecar": "node scripts/prepare-sidecar.mjs",
     "build:bundle": "npm run build && npm run prepare:sidecar",
     "tauri:bundle": "tauri build --config src-tauri/tauri.bundle.conf.json --bundles nsis"
