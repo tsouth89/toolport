@@ -153,6 +153,14 @@ The frontend is typechecked with `npx tsc --noEmit`.
   headless box or a session without a running keyring daemon has nowhere to store
   secrets. Run Conduit in a desktop session, or install and unlock a keyring
   (e.g. `gnome-keyring`).
+- **macOS keychain prompt the first time the gateway runs.** When a client spawns
+  the gateway and it reads a saved key, macOS asks for keychain access ("Conduit
+  wants to use ..."). Click **Always Allow** once and it won't ask again. (The app
+  and the gateway are separate signed binaries today; a future release will share
+  keychain access so this prompt goes away.)
+- **VS Code: the conduit server doesn't start automatically.** VS Code may require
+  you to click **Start Server** on the conduit MCP entry the first time, that's VS
+  Code's own MCP handling, not Conduit. After that it reconnects on its own.
 
 ## Status
 
