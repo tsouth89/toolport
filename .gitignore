@@ -21,6 +21,7 @@ dist-ssr
 # Internal strategy docs - not for the public repo
 /docs/COMPETITIVE.md
 /docs/PLAN.md
+/docs/STATUS.md
 
 # Editor directories and files
 .vscode/*

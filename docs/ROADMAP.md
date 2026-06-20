@@ -4,6 +4,11 @@ Conduit is a cross-platform manager for MCP servers across AI coding tools
 (Claude Desktop, Cursor, VS Code, Windsurf, Codex CLI). This document is the
 working spec. It captures the architecture decision and the build order.
 
+**Status (2026-06-20):** shipping. Signed/notarized macOS (Apple Silicon + Intel),
+Windows, and Linux (deb/AppImage) builds via a tag-triggered release pipeline. v0.3.x
+released. Next: macOS keychain access-group entitlement, auto-updater, and the
+launch (Product Hunt, MCP registry).
+
 ## The core decision: Conduit is a gateway, not a file editor
 
 A tool that only edits each client's MCP JSON config is a dead end:
@@ -99,7 +104,7 @@ Phase 2 - Client integration
 - [x] Bundle conduit-gateway as a sidecar so the installed path survives in
       production (externalBin via merge config `tauri.bundle.conf.json`, staged by
       `scripts/prepare-sidecar.mjs`; `resolve_gateway_path` finds the dev name or
-      the packaged `-<triple>` name). Full `tauri build` installer run still TODO.
+      the packaged `-<triple>` name). Shipping in signed releases.
 
 Phase 3 - Scaling & UX
 - [x] Lazy discovery: `CONDUIT_DISCOVERY=lazy` exposes 3 meta-tools (search/call)
@@ -120,9 +125,14 @@ Tier 2 - feature completeness (in progress)
       dashboard); per-tool breakdown + filters still TODO
 
 Tier 3 - launch prep
-- [ ] Bundle/sign the gateway sidecar; signed installer + auto-update; CI audits
-- [ ] Verify macOS / Linux (path logic has been exercised mainly on Windows)
-- [ ] First-run onboarding; marketing site
+- [x] Bundle the gateway sidecar; signed/notarized macOS installers (Win/Linux
+      unsigned with documented bypass); cargo-audit in CI. Auto-updater still TODO.
+- [x] Verify macOS / Linux (signed mac dmgs arm64 + Intel, Linux deb/AppImage;
+      tested across Windows/macOS/Ubuntu VMs)
+- [x] Marketing site (conduit.southforgeai.com) with demo video. First-run
+      onboarding still minimal.
+- [ ] macOS keychain access-group entitlement (app + gateway share secrets with
+      no "Always Allow" prompt); auto-updater; Product Hunt + MCP registry launch
 
 Tier 4 - teams / enterprise (paid)
 - [ ] Hosted/remote gateway, shared/synced config, RBAC/SSO
