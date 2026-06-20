@@ -291,6 +291,7 @@ function App() {
           onSelectClient={selectClient}
           view={view}
           onSelectView={selectView}
+          onReplayOnboarding={() => setShowOnboarding(true)}
         />
 
         <main className="flex min-w-0 flex-1 flex-col">

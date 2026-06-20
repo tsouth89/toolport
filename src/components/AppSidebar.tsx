@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   ArrowUpCircle,
+  Compass,
   FlaskConical,
   FolderOpen,
   Layers,
@@ -30,7 +31,13 @@ import { ShareDialog } from "@/components/ShareDialog";
  * release is published. The check is best-effort: any failure (dev build,
  * offline, no manifest yet) just shows the current version. Clicking downloads,
  * installs, and relaunches into the new version. */
-function VersionFooter({ onImport }: { onImport: (r: Registry) => void }) {
+function VersionFooter({
+  onImport,
+  onReplay,
+}: {
+  onImport: (r: Registry) => void;
+  onReplay: () => void;
+}) {
   const [version, setVersion] = useState("");
   const [update, setUpdate] = useState<Update | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -103,6 +110,14 @@ function VersionFooter({ onImport }: { onImport: (r: Registry) => void }) {
             </button>
           }
         />
+        <button
+          onClick={onReplay}
+          title="Run setup again"
+          aria-label="Run setup again"
+          className="text-muted-foreground transition hover:text-foreground"
+        >
+          <Compass className="size-3.5" />
+        </button>
         <button
           onClick={() => openDataDir().catch(() => {})}
           title="Open data folder (config, logs)"
@@ -227,6 +242,7 @@ interface Props {
   onSelectClient: (id: string | null) => void;
   view: "servers" | "activity" | "catalog" | "playground";
   onSelectView: (view: "servers" | "activity" | "catalog" | "playground") => void;
+  onReplayOnboarding: () => void;
 }
 
 export function AppSidebar({
@@ -237,6 +253,7 @@ export function AppSidebar({
   onSelectClient,
   view,
   onSelectView,
+  onReplayOnboarding,
 }: Props) {
   return (
     <aside className="flex w-72 shrink-0 flex-col border-r bg-sidebar">
@@ -327,7 +344,7 @@ export function AppSidebar({
         </nav>
       </div>
 
-      <VersionFooter onImport={onRegistryChange} />
+      <VersionFooter onImport={onRegistryChange} onReplay={onReplayOnboarding} />
     </aside>
   );
 }
