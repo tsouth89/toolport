@@ -283,6 +283,10 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
       if (v === undefined || v === "") continue;
       out[k] = coerce(v, schema as JsonSchemaProp);
     }
+    const missing = [...required].filter((k) => !(k in out));
+    if (missing.length > 0) {
+      return { error: `Fill in required field${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}` };
+    }
     return out;
   }
 
