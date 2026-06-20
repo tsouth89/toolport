@@ -297,6 +297,28 @@ impl Drop for StdioTransport {
     }
 }
 
+/// Normalize a JSON-RPC id (number or string) to a string for comparison.
+fn id_key(v: &Value) -> Option<String> {
+    match v {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Whether an SSE message's id matches the request id. Tolerant of number-vs-string
+/// encoding (some servers echo a numeric id as a string). A `None` wanted id means
+/// take the first message (used when we didn't send an id).
+fn ids_match(got: Option<&Value>, wanted: Option<&Value>) -> bool {
+    match wanted {
+        None => true,
+        Some(w) => match (id_key(w), got.and_then(id_key)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        },
+    }
+}
+
 /// Talks to a remote MCP server over the Streamable HTTP transport: each request
 /// is a POST, and the response is either a JSON body or an SSE stream carrying
 /// the JSON-RPC message. A session id from `initialize` is echoed on later calls.
@@ -382,7 +404,7 @@ impl HttpTransport {
                         continue;
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(data) {
-                        if wanted.is_none() || v.get("id") == wanted.as_ref() {
+                        if ids_match(v.get("id"), wanted.as_ref()) {
                             return Ok(Some(v));
                         }
                     }
@@ -532,5 +554,20 @@ mod tests {
         assert_eq!(super::bearer_header("sk-123"), "Bearer sk-123");
         assert_eq!(super::bearer_header("Bearer sk-123"), "Bearer sk-123");
         assert_eq!(super::bearer_header("bearer sk-123"), "bearer sk-123");
+    }
+
+    #[test]
+    fn ids_match_tolerates_number_vs_string() {
+        use super::ids_match;
+        use serde_json::json;
+        assert!(ids_match(Some(&json!(1)), Some(&json!(1))));
+        // A server that echoes the numeric id as a string still matches.
+        assert!(ids_match(Some(&json!("1")), Some(&json!(1))));
+        assert!(ids_match(Some(&json!(1)), Some(&json!("1"))));
+        assert!(!ids_match(Some(&json!(2)), Some(&json!(1))));
+        // No id requested -> take the first message.
+        assert!(ids_match(Some(&json!(1)), None));
+        // Wanted an id but the message has none -> no match.
+        assert!(!ids_match(None, Some(&json!(1))));
     }
 }
