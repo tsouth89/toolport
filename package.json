@@ -10,7 +10,7 @@
     "tauri": "tauri",
     "prepare:sidecar": "node scripts/prepare-sidecar.mjs",
     "build:bundle": "npm run build && npm run prepare:sidecar",
-    "tauri:bundle": "tauri build --config src-tauri/tauri.bundle.conf.json"
+    "tauri:bundle": "tauri build --config src-tauri/tauri.bundle.conf.json --bundles nsis"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",

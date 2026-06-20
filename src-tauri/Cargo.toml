@@ -25,10 +25,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 dirs = "5"
-keyring = { version = "3", features = ["windows-native"] }
 ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.2"
 urlencoding = "2"
+
+# OS keychain, with the native backend per platform.
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 

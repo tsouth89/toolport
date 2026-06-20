@@ -1,9 +1,9 @@
 name: Release
 
-# Push a version tag (e.g. `v0.2.0`) and this builds the Windows installer and
-# creates a DRAFT GitHub release with it + auto-generated notes. Review the draft,
-# then publish it. Bump the version in src-tauri/tauri.conf.json (and Cargo.toml /
-# package.json) to match the tag before tagging.
+# Push a version tag (e.g. `v0.2.0`) and this builds installers for Windows,
+# macOS, and Linux, then attaches them to a DRAFT GitHub release. Review the
+# draft and publish it. Bump the version in src-tauri/tauri.conf.json (and
+# Cargo.toml / package.json) to match the tag before tagging.
 on:
   push:
     tags:
@@ -13,8 +13,18 @@ permissions:
   contents: write
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bundles: nsis
+          - os: macos-latest
+            bundles: dmg
+          - os: ubuntu-latest
+            bundles: deb,appimage
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -24,6 +34,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -31,12 +47,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build installer (NSIS, gateway bundled as sidecar)
-        run: npm run tauri:bundle
+      - name: Build installer
+        run: npx tauri build --config src-tauri/tauri.bundle.conf.json --bundles ${{ matrix.bundles }}
 
-      - name: Draft release with the installer
+      - name: Draft release with the installers
         uses: softprops/action-gh-release@v2
         with:
           draft: true
           generate_release_notes: true
-          files: src-tauri/target/release/bundle/nsis/*-setup.exe
+          files: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage

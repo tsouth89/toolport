@@ -14,9 +14,10 @@ Releases are built by CI on a version tag (`.github/workflows/release.yml`).
    git push origin v0.2.0
    ```
 
-CI (Windows runner) builds the NSIS installer with the gateway bundled and
-creates a **draft** release with the installer and auto-generated notes. Review
-it on the Releases page and click **Publish**.
+CI builds installers for **Windows** (NSIS), **macOS** (dmg), and **Linux**
+(deb + AppImage), each with the gateway bundled, and attaches them to a **draft**
+release with auto-generated notes. Review it on the Releases page and click
+**Publish**.
 
 ## Manual fallback
 

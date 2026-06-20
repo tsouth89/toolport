@@ -4,9 +4,6 @@
     "beforeBuildCommand": "npm run build:bundle"
   },
   "bundle": {
-    "targets": [
-      "nsis"
-    ],
     "externalBin": [
       "binaries/conduit-gateway"
     ]
