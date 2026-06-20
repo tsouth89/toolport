@@ -1,11 +1,77 @@
-import { FlaskConical, Layers, Link2, Puzzle, ScrollText, Store } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  ArrowUpCircle,
+  FlaskConical,
+  Layers,
+  Link2,
+  Puzzle,
+  ScrollText,
+  Store,
+} from "lucide-react";
+import { getVersion } from "@tauri-apps/api/app";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   importableServers,
   type DetectedClient,
   type Registry,
 } from "@/lib/types";
+import { latestRelease } from "@/lib/api";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProfileBar } from "@/components/ProfileBar";
+
+/** True if `latest` is a higher semver than `current` (tolerates a leading "v"). */
+function isNewer(latest: string, current: string): boolean {
+  const parse = (v: string) =>
+    v.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
+  const a = parse(latest);
+  const b = parse(current);
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  }
+  return false;
+}
+
+/** Footer showing the running version, and an update link when a newer release
+ * exists. The update check is best-effort: any failure just shows the version. */
+function VersionFooter() {
+  const [version, setVersion] = useState("");
+  const [update, setUpdate] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    getVersion().then((v) => {
+      if (!alive) return;
+      setVersion(v);
+      latestRelease()
+        .then((tag) => {
+          if (alive && isNewer(tag, v)) setUpdate(tag);
+        })
+        .catch(() => {});
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (!version) return null;
+  return (
+    <div className="mt-auto border-t px-4 py-3 text-xs">
+      {update ? (
+        <button
+          onClick={() =>
+            openUrl("https://github.com/tsouth89/conduit/releases/latest")
+          }
+          className="flex items-center gap-1.5 text-emerald-400 transition hover:underline"
+        >
+          <ArrowUpCircle className="size-3.5" />
+          Update available ({update})
+        </button>
+      ) : (
+        <span className="text-muted-foreground">Conduit v{version}</span>
+      )}
+    </div>
+  );
+}
 
 /** Present clients (have a config or use connectors) first, then by how many
  * servers they manage, then alphabetical. Keeps not-installed clients at the
@@ -217,6 +283,8 @@ export function AppSidebar({
           )}
         </nav>
       </div>
+
+      <VersionFooter />
     </aside>
   );
 }

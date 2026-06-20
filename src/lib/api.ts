@@ -161,6 +161,11 @@ export function probeAuth(url: string): Promise<AuthInfo> {
   return invoke<AuthInfo>("probe_auth", { url });
 }
 
+/** Latest published release tag on GitHub (e.g. "v0.3.1"), for an update hint. */
+export function latestRelease(): Promise<string> {
+  return invoke<string>("latest_release");
+}
+
 /** Load Conduit's registry (servers + profiles). */
 export function getRegistry(): Promise<Registry> {
   return invoke<Registry>("get_registry");

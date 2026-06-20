@@ -610,6 +610,29 @@ fn secret_status(server_id: String, keys: Vec<String>) -> Vec<(String, bool)> {
         .collect()
 }
 
+/// The latest published release tag on GitHub (e.g. "v0.3.1"), for an
+/// update-available hint. Network/parse failures are returned as Err and the UI
+/// simply shows no update info.
+#[tauri::command]
+async fn latest_release() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let body: serde_json::Value =
+            ureq::get("https://api.github.com/repos/tsouth89/conduit/releases/latest")
+                .set("User-Agent", "conduit-app")
+                .timeout(std::time::Duration::from_secs(10))
+                .call()
+                .map_err(|e| e.to_string())?
+                .into_json()
+                .map_err(|e| e.to_string())?;
+        body.get("tag_name")
+            .and_then(|t| t.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| "no tag_name in response".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let registry = registry::load().unwrap_or_default();
@@ -652,6 +675,7 @@ pub fn run() {
             search_catalog,
             promote_to_catalog,
             unpromote_from_catalog,
+            latest_release,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

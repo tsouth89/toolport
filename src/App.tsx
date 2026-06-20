@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Download,
   HeartPulse,
@@ -54,9 +54,12 @@ function App() {
   const [probing, setProbing] = useState(false);
   const [query, setQuery] = useState("");
 
+  const lastProbeRef = useRef(0);
+
   // Probe health quietly (no toast). Used on load and after authenticating, so
   // each server's status badge reflects reality without the user clicking around.
   const reprobe = useCallback(async () => {
+    lastProbeRef.current = Date.now();
     setProbing(true);
     try {
       const results = await probeServers();
@@ -67,6 +70,17 @@ function App() {
       setProbing(false);
     }
   }, []);
+
+  // Refresh statuses when the user returns to the window, so a server that came
+  // up (or went down) while they were away reflects reality without a manual
+  // refresh. Guarded so rapid alt-tabbing doesn't re-spawn every server.
+  useEffect(() => {
+    const onFocus = () => {
+      if (Date.now() - lastProbeRef.current > 20_000) void reprobe();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [reprobe]);
 
   const load = useCallback(async () => {
     setLoading(true);
