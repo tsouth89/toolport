@@ -4,6 +4,7 @@
     "beforeBuildCommand": "npm run build:bundle"
   },
   "bundle": {
+    "createUpdaterArtifacts": true,
     "externalBin": [
       "binaries/conduit-gateway"
     ]

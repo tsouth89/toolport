@@ -5,6 +5,7 @@ import {
   FolderOpen,
   Layers,
   Link2,
+  Loader2,
   Puzzle,
   ScrollText,
   Share2,
@@ -12,62 +13,79 @@ import {
 } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { toast } from "sonner";
+import type { Update } from "@tauri-apps/plugin-updater";
 import {
   importableServers,
   type DetectedClient,
   type Registry,
 } from "@/lib/types";
-import { latestRelease, openDataDir } from "@/lib/api";
+import { openDataDir } from "@/lib/api";
+import { checkForUpdate, installUpdate } from "@/lib/updater";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProfileBar } from "@/components/ProfileBar";
 import { ShareDialog } from "@/components/ShareDialog";
 
-/** True if `latest` is a higher semver than `current` (tolerates a leading "v"). */
-function isNewer(latest: string, current: string): boolean {
-  const parse = (v: string) =>
-    v.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
-  const a = parse(latest);
-  const b = parse(current);
-  for (let i = 0; i < 3; i++) {
-    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
-  }
-  return false;
-}
-
-/** Footer showing the running version, and an update link when a newer release
- * exists. The update check is best-effort: any failure just shows the version. */
+/** Footer showing the running version, and an in-app update button when a newer
+ * release is published. The check is best-effort: any failure (dev build,
+ * offline, no manifest yet) just shows the current version. Clicking downloads,
+ * installs, and relaunches into the new version. */
 function VersionFooter({ onImport }: { onImport: (r: Registry) => void }) {
   const [version, setVersion] = useState("");
-  const [update, setUpdate] = useState<string | null>(null);
+  const [update, setUpdate] = useState<Update | null>(null);
+  const [installing, setInstalling] = useState(false);
 
   useEffect(() => {
     let alive = true;
     getVersion().then((v) => {
-      if (!alive) return;
-      setVersion(v);
-      latestRelease()
-        .then((tag) => {
-          if (alive && isNewer(tag, v)) setUpdate(tag);
-        })
-        .catch(() => {});
+      if (alive) setVersion(v);
+    });
+    checkForUpdate().then((u) => {
+      if (alive && u?.available) setUpdate(u);
     });
     return () => {
       alive = false;
     };
   }, []);
 
+  async function applyUpdate() {
+    if (!update) return;
+    setInstalling(true);
+    toast.info(`Updating to v${update.version}…`, {
+      description: "Conduit will restart when it's done.",
+    });
+    try {
+      await installUpdate(update);
+    } catch (e) {
+      setInstalling(false);
+      toast.error(`Update failed: ${e}`, {
+        description: "You can download it manually from the releases page.",
+        action: {
+          label: "Open",
+          onClick: () =>
+            openUrl("https://github.com/tsouth89/conduit/releases/latest"),
+        },
+      });
+    }
+  }
+
   if (!version) return null;
   return (
     <div className="mt-auto flex items-center justify-between gap-2 border-t px-4 py-3 text-xs">
       {update ? (
         <button
-          onClick={() =>
-            openUrl("https://github.com/tsouth89/conduit/releases/latest")
-          }
-          className="flex min-w-0 items-center gap-1.5 text-emerald-400 transition hover:underline"
+          onClick={applyUpdate}
+          disabled={installing}
+          className="flex min-w-0 items-center gap-1.5 text-emerald-400 transition hover:underline disabled:opacity-70"
         >
-          <ArrowUpCircle className="size-3.5 shrink-0" />
-          <span className="truncate">Update available ({update})</span>
+          {installing ? (
+            <Loader2 className="size-3.5 shrink-0 animate-spin" />
+          ) : (
+            <ArrowUpCircle className="size-3.5 shrink-0" />
+          )}
+          <span className="truncate">
+            {installing ? "Updating…" : `Update to v${update.version}`}
+          </span>
         </button>
       ) : (
         <span className="text-muted-foreground">Conduit v{version}</span>
