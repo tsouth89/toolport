@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
+import { Plus, X } from "lucide-react";
 import { toast } from "sonner";
-import { addServer, updateServer } from "@/lib/api";
+import { addServer, setSecret, updateServer } from "@/lib/api";
 import type { Registry, ServerEntry, Transport } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +40,11 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
     args: initial?.args.join(" ") ?? "",
     url: initial?.url ?? "",
   });
+  // Env vars (API keys etc.). Values are vaulted in the OS keychain, never stored
+  // in the registry, so existing secrets show as declared keys with empty values.
+  const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>(
+    initial?.env.map((e) => ({ key: e.key, value: "" })) ?? [],
+  );
   const isStdio = form.transport === "stdio";
   const editing = editId !== undefined;
 
@@ -46,22 +52,41 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
     setForm((f) => ({ ...f, [key]: value }));
   }
 
+  function setEnvRow(i: number, field: "key" | "value", value: string) {
+    setEnvRows((rows) => rows.map((r, j) => (j === i ? { ...r, [field]: value } : r)));
+  }
+  function addEnvRow() {
+    setEnvRows((rows) => [...rows, { key: "", value: "" }]);
+  }
+  function removeEnvRow(i: number) {
+    setEnvRows((rows) => rows.filter((_, j) => j !== i));
+  }
+
   async function handleSave() {
     if (!form.name.trim()) return;
+    const declared = envRows.filter((r) => r.key.trim());
     const entry: ServerEntry = {
       id: editId ?? "",
       name: form.name.trim(),
       transport: form.transport,
       command: isStdio ? form.command.trim() || null : null,
       args: isStdio ? form.args.split(/\s+/).filter(Boolean) : [],
-      // Carry env-var names when editing/duplicating; secret *values* live in
-      // the keychain per server id, so a duplicate starts with fresh secrets.
-      env: initial?.env ?? [],
+      // Declare every env-var name as a secret; the values are vaulted separately
+      // below (they never enter the registry file).
+      env: declared.map((r) => ({ key: r.key.trim(), value: null, secret: true })),
       url: isStdio ? null : form.url.trim() || null,
       source: initial?.source ?? "manual",
     };
     try {
-      const result = editing ? await updateServer(entry) : await addServer(entry);
+      let result = editing ? await updateServer(entry) : await addServer(entry);
+      // Vault any values the user entered now. setSecret keys by server id, so we
+      // resolve the id from the saved registry (new servers get one on add).
+      const id = editId ?? result.servers.find((s) => s.name === entry.name)?.id;
+      if (id) {
+        for (const r of declared) {
+          if (r.value) result = await setSecret(id, r.key.trim(), r.value);
+        }
+      }
       onSaved(result);
       toast.success(editing ? `Saved ${entry.name}` : `Added ${entry.name}`);
       setOpen(false);
@@ -138,6 +163,49 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
               />
             </div>
           )}
+
+          <div className="flex flex-col gap-2">
+            <Label>Environment variables</Label>
+            <p className="-mt-1 text-xs text-muted-foreground">
+              API keys and other secrets the server needs (e.g.{" "}
+              <code className="font-mono">RESEND_API_KEY</code>). Values are stored
+              in your OS keychain, never in the config.
+            </p>
+            {envRows.map((row, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <Input
+                  placeholder="ENV_NAME"
+                  className="font-mono"
+                  value={row.key}
+                  onChange={(e) => setEnvRow(i, "key", e.target.value)}
+                />
+                <Input
+                  type="password"
+                  placeholder={initial?.env.some((e) => e.key === row.key) ? "•••• (saved)" : "value"}
+                  value={row.value}
+                  onChange={(e) => setEnvRow(i, "value", e.target.value)}
+                />
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                  aria-label="Remove variable"
+                  onClick={() => removeEnvRow(i)}
+                >
+                  <X className="size-4" />
+                </Button>
+              </div>
+            ))}
+            <Button
+              variant="outline"
+              size="sm"
+              className="self-start"
+              onClick={addEnvRow}
+            >
+              <Plus className="size-4" />
+              Add variable
+            </Button>
+          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)}>

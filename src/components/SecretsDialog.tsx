@@ -82,7 +82,10 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
   const [probing, setProbing] = useState(false);
 
   const secretKeys = server.env.filter((e) => e.secret).map((e) => e.key);
-  const isRemote = server.url !== null;
+  // A server with a command is stdio (matches how the backend connects); only a
+  // command-less, URL-based server is remote. Guards against a stray empty-string
+  // url making a stdio server show the remote token/OAuth UI.
+  const isRemote = !server.command;
   const primaryKey = secretKeys[0];
   const keyHint = primaryKey ? KEY_HINTS[primaryKey] : undefined;
 
