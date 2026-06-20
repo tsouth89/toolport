@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Check, Copy, FileDown, FileUp, Upload } from "lucide-react";
 import { toast } from "sonner";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open as openFile, save } from "@tauri-apps/plugin-dialog";
 import {
   exportConfig,
   exportConfigToPath,
@@ -30,7 +30,7 @@ interface Props {
  * the no-backend version of "push a setup to your team". Export via clipboard or
  * a file; label it with a name + description so the recipient knows what it is. */
 export function ShareDialog({ trigger, onImported }: Props) {
-  const [open_, setOpen] = useState(false);
+  const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [exported, setExported] = useState("");
@@ -41,11 +41,11 @@ export function ShareDialog({ trigger, onImported }: Props) {
   // Re-serialize whenever the dialog opens or the label changes, so the textarea
   // and any file/clipboard export carry the current name + description.
   useEffect(() => {
-    if (!open_) return;
+    if (!open) return;
     exportConfig(name, description)
       .then(setExported)
       .catch(() => setExported(""));
-  }, [open_, name, description]);
+  }, [open, name, description]);
 
   function onOpenChange(next: boolean) {
     setOpen(next);
@@ -82,7 +82,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
 
   async function loadFromFile() {
     try {
-      const path = await open({
+      const path = await openFile({
         title: "Open a Conduit setup",
         multiple: false,
         directory: false,
@@ -124,7 +124,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
     "w-full rounded-md border bg-background p-2.5 font-mono text-xs resize-none focus:outline-none focus:ring-1 focus:ring-ring";
 
   return (
-    <Dialog open={open_} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
