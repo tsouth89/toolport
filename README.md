@@ -2,7 +2,7 @@
 
 **One gateway for all your MCP servers, across every AI agent.**
 
-![Conduit — your agent sees 3 tools, Conduit runs 430](docs/feature.png)
+![Conduit: every tool from all your servers, collapsed to the 3 your agent loads](docs/feature.png)
 
 Conduit is a local MCP (Model Context Protocol) gateway and manager. You set up
 and authenticate each MCP server once in Conduit, point your AI agents at the
@@ -95,9 +95,9 @@ written for you when you connect a client:
 ## Install
 
 Prebuilt installers are published on the
-[Releases](https://github.com/tsouth89/conduit/releases) page. Conduit currently
-targets **Windows**; macOS and Linux support is in progress. To run from source,
-see Development below.
+[Releases](https://github.com/tsouth89/conduit/releases) page. Conduit runs on
+**Windows and macOS** (the macOS build is signed and notarized), with **Linux**
+(.deb and AppImage) in beta. To run from source, see Development below.
 
 The installer is not yet code signed. On **Windows**, SmartScreen may show
 "Windows protected your PC", click **More info → Run anyway**. On **macOS**,
@@ -154,7 +154,7 @@ The frontend is typechecked with `npx tsc --noEmit`.
 
 ## Status
 
-Conduit is in active development (Windows-first). Working end to end: the
+Conduit is in active development. Working end to end: the
 gateway, lazy discovery, per-agent scoping, OAuth/key auth with live propagation,
 the catalog, client import/migrate, per-tool and destructive-tool governance, an
 audit log with latency/error stats, resources + prompts proxying, and a tool
