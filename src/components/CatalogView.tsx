@@ -44,7 +44,7 @@ export function CatalogView({ registry, onAdded }: Props) {
       reloadPopular();
       toast.success(`Removed ${entry.name} from your catalog`);
     } catch (e) {
-      toast.error(`${e}`);
+      toast.error(`Couldn't remove ${entry.name}: ${e}`);
     }
   }
 
@@ -95,7 +95,7 @@ export function CatalogView({ registry, onAdded }: Props) {
         description: "Enable it, then authenticate if it needs credentials.",
       });
     } catch (e) {
-      toast.error(`${e}`);
+      toast.error(`Couldn't add ${entry.name}: ${e}`);
     } finally {
       setBusy(null);
     }

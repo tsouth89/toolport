@@ -91,7 +91,7 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
       toast.success(editing ? `Saved ${entry.name}` : `Added ${entry.name}`);
       setOpen(false);
     } catch (e) {
-      toast.error(`${e}`);
+      toast.error(`Couldn't save ${entry.name}: ${e}`);
     }
   }
 
