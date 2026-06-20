@@ -133,6 +133,18 @@ the catalog, client import/migrate, per-tool and destructive-tool governance, an
 audit log with latency/error stats, resources + prompts proxying, and a tool
 playground. See [docs/ROADMAP.md](docs/ROADMAP.md) for what is done and planned.
 
+## Known issues
+
+- **Linux only, glib `VariantStrIter` soundness ([RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429)).**
+  Tauri's Linux webview stack pulls in `glib` 0.18 transitively (`wry → webkit2gtk →
+  gtk 0.18 → glib 0.18`). The fix only exists in `glib` 0.20+, and the gtk-0.18
+  binding line, which is what Tauri 2 uses on Linux, hard-pins `glib = "^0.18"`, so
+  the patched release cannot be selected without moving the whole webview stack. The
+  bug is a soundness/null-deref crash (not remote code execution), is confined to the
+  webview binding layer (Conduit never calls `VariantStrIter`), and does not affect
+  the Windows or macOS builds. We are tracking the upstream move to a glib-0.20 stack
+  and will apply a `[patch.crates-io]` backport if Linux crashes surface before then.
+
 ## License
 
 [MIT](LICENSE). The gateway and local manager are free and open source under an
