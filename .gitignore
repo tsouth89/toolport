@@ -46,3 +46,6 @@ dist-ssr
 
 # Raw (uncaptioned) demo recording - the captioned demo.mp4/demo.gif are tracked
 /docs/demo-raw.mp4
+
+# Raw screen recordings (keep local, not in the repo)
+/docs/Recording*.mp4
