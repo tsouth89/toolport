@@ -5,6 +5,22 @@ All notable changes to Conduit are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-06-21
+
+### Improved
+- **Faster, more decisive tool search, especially with local models.** Search now
+  leads with the single best match and tells the model to call it; the remaining
+  results come back as a compact menu (name + a one-line description, no schema)
+  instead of every tool's full schema. A large result set drops from tens of KB to a
+  few KB, so a model that re-reads its context each turn (local models especially)
+  runs noticeably faster. Full schema for any other tool still comes from a scoped or
+  exact-name search.
+- **A loop-breaker for weaker models.** When a model re-searches and keeps landing on
+  the same top tool, the gateway returns just that tool and tells it to call it,
+  rather than letting the model spin on repeated searches. It only triggers on a
+  repeated top result, so a capable model, or one legitimately exploring different
+  tools, is never affected.
+
 ## [0.3.7] - 2026-06-21
 
 ### Added

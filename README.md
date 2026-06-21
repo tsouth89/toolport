@@ -123,7 +123,7 @@ terminal. The package name is `conduit`.
 
 ```bash
 # Update to a newer version: just install the new .deb, it upgrades in place.
-sudo apt install ./Conduit_0.3.7_amd64.deb
+sudo apt install ./Conduit_0.3.8_amd64.deb
 
 # Uninstall (keeps your config + saved secrets).
 sudo apt remove conduit
