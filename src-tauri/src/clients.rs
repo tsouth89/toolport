@@ -220,6 +220,25 @@ fn roo_code_path() -> Option<PathBuf> {
     vscode_globalstorage("rooveterinaryinc.roo-cline", "mcp_settings.json")
 }
 
+/// Warp reads file-based MCP servers from `~/.warp/.mcp.json` (keyed under
+/// `mcpServers`), alongside its in-app UI. The file is home-anchored on every OS.
+fn warp_path() -> Option<PathBuf> {
+    Some(home()?.join(".warp").join(".mcp.json"))
+}
+
+/// Amazon Q Developer CLI global MCP config: `~/.aws/amazonq/mcp.json`
+/// (`mcpServers`). A per-workspace `.amazonq/mcp.json` also exists; we manage the
+/// global one so the gateway is available everywhere.
+fn amazon_q_path() -> Option<PathBuf> {
+    Some(home()?.join(".aws").join("amazonq").join("mcp.json"))
+}
+
+/// Kiro user-level MCP config: `~/.kiro/settings/mcp.json` (`mcpServers`). A
+/// per-workspace `.kiro/settings/mcp.json` also exists and takes precedence.
+fn kiro_path() -> Option<PathBuf> {
+    Some(home()?.join(".kiro").join("settings").join("mcp.json"))
+}
+
 fn cursor_plugins_dir() -> Option<PathBuf> {
     Some(home()?.join(".cursor").join("plugins").join("cache"))
 }
@@ -370,6 +389,30 @@ fn defs() -> Vec<ClientDef> {
             format: Format::JsonMcpServers,
             uses_connectors: false,
             path: roo_code_path,
+            plugin_scan: None,
+        },
+        ClientDef {
+            id: "warp",
+            name: "Warp",
+            format: Format::JsonMcpServers,
+            uses_connectors: false,
+            path: warp_path,
+            plugin_scan: None,
+        },
+        ClientDef {
+            id: "amazon-q",
+            name: "Amazon Q",
+            format: Format::JsonMcpServers,
+            uses_connectors: false,
+            path: amazon_q_path,
+            plugin_scan: None,
+        },
+        ClientDef {
+            id: "kiro",
+            name: "Kiro",
+            format: Format::JsonMcpServers,
+            uses_connectors: false,
+            path: kiro_path,
             plugin_scan: None,
         },
     ]
@@ -1129,6 +1172,24 @@ mod tests {
         for s in &servers {
             let target = s.command.clone().or_else(|| s.url.clone()).unwrap_or_default();
             println!("  {} [{}] {}", s.name, s.transport, target);
+        }
+    }
+
+    #[test]
+    fn new_json_clients_are_registered() {
+        // Warp, Amazon Q, and Kiro all use the standard mcpServers JSON shape, so a
+        // ClientDef + path is all they need. Lock in their registration, format, and
+        // that their config paths resolve on this OS.
+        for id in ["warp", "amazon-q", "kiro"] {
+            let d = defs()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("missing client def: {id}"));
+            assert!(
+                matches!(d.format, Format::JsonMcpServers),
+                "{id} should use mcpServers JSON"
+            );
+            assert!((d.path)().is_some(), "{id} path should resolve");
         }
     }
 }
