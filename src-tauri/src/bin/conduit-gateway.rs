@@ -55,7 +55,8 @@ fn search_tool_def() -> Value {
         "name": "conduit_search_tools",
         "description": "Search across every tool from all MCP servers connected through Conduit. \
             Returns matching tools with their exact name, description, and input schema; call one with \
-            conduit_call_tool. \
+            conduit_call_tool. Once a result matches what you need, call it - do NOT keep searching for \
+            a better one (the first result includes its full schema and is ready to call). \
             Pass `server` (a server name/prefix like \"stripe\") to scope results to one server, and \
             pass an EMPTY `query` together with `server` to list ALL of that server's tools. \
             If the result says more tools matched than were shown, narrow with `server` or raise \
@@ -295,6 +296,27 @@ fn enabled_summary(reg: &Registry, cached: &[Value], profile: Option<&str>) -> S
 }
 
 /// Dispatch one JSON-RPC message. Returns `None` for notifications (no reply).
+/// Per-session guard against search-thrash. Weak local models (e.g. small-active
+/// MoEs) will call conduit_search_tools many times in a row for the SAME need
+/// instead of committing, which is slow and burns context. We escalate only on
+/// that specific pattern - the same top tool surfacing across consecutive searches
+/// - not on a raw search count. A capable model that searches once and calls, or
+/// searches several DIFFERENT things (exploring), or narrows broad -> server ->
+/// exact-name (each a different/justified result), never trips this. So it fixes
+/// the weak-model loop without ever penalizing Claude, Cursor, or any model doing
+/// real multi-step work. Any non-search action resets it. Per client connection.
+#[derive(Default)]
+struct SearchGuard {
+    /// The top result's name from the previous consecutive search, if any.
+    last_top: Option<String>,
+    /// How many consecutive searches returned that same top result.
+    repeats: u32,
+}
+
+/// Escalate once the SAME top tool has come back this many times in a row: the
+/// model is stuck on one need, so return only that tool and command the call.
+const SEARCH_REPEAT_LIMIT: u32 = 3;
+
 fn handle_request(
     req: &Value,
     reg: &Registry,
@@ -302,6 +324,7 @@ fn handle_request(
     cached: &[Value],
     lazy: bool,
     profile: Option<&str>,
+    guard: &mut SearchGuard,
 ) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -364,6 +387,12 @@ fn handle_request(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
+            // Anything other than a search breaks the search-thrash streak.
+            if name != "conduit_search_tools" {
+                guard.last_top = None;
+                guard.repeats = 0;
+            }
+
             if name == "conduit_status" {
                 return Some(success(
                     id,
@@ -394,14 +423,33 @@ fn handle_request(
                 } else {
                     cached
                 };
-                let (matches, total) = search_catalog(source, query, server, limit);
+                let (mut matches, total) = search_catalog(source, query, server, limit);
                 let scope = server
                     .filter(|s| !s.trim().is_empty())
                     .map(|s| format!(" on \"{s}\""))
                     .unwrap_or_default();
+                // Identify the top result, then track whether the model keeps landing
+                // on the SAME one across consecutive searches - the thrash signal that a
+                // raw count can't tell apart from genuine exploration/narrowing.
+                let top = matches
+                    .first()
+                    .and_then(|m| m.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !matches.is_empty() && guard.last_top.as_deref() == Some(top.as_str()) {
+                    guard.repeats += 1;
+                } else {
+                    guard.repeats = 1;
+                    guard.last_top = (!matches.is_empty()).then(|| top.clone());
+                }
+                let escalate = guard.repeats >= SEARCH_REPEAT_LIMIT && !matches.is_empty();
+                if escalate {
+                    matches.truncate(1); // only the best match, no distractions
+                }
                 // Tell the agent when results were truncated, so a buried tool isn't
                 // mistaken for a missing capability.
-                let more = if total > matches.len() {
+                let more = if total > matches.len() && !escalate {
                     format!(
                         " Showing {} of {}; narrow with the `server` filter (e.g. server: \
                          \"{}\") or raise `limit` (up to 200) before concluding a capability \
@@ -416,19 +464,43 @@ fn handle_request(
                 let omitted = matches.iter().any(|m| {
                     m.get("schemaOmitted").and_then(|v| v.as_bool()).unwrap_or(false)
                 });
+                // Note only clarifies the OMITTED (non-top) results need a follow-up;
+                // the first result always carries its schema, so it never does.
                 let schema_note = if omitted {
-                    " Some large input schemas were omitted to keep this response small; \
-                     search a tool's exact name (or pass `server`) to get its full schema \
-                     before calling it."
+                    " Results after the first may omit large input schemas (schemaOmitted); to call \
+                     one of those instead, search its exact name or pass `server` to get its schema."
                 } else {
                     ""
                 };
+                let lead = if matches.is_empty() {
+                    format!(
+                        "No tools matched{scope}. Try different keywords, or call conduit_status to \
+                         see the connected servers and their tool counts."
+                    )
+                } else if escalate {
+                    // Behavioral loop-breaker: the model keeps re-searching the same need
+                    // and landing on the same tool. Give it that one tool and a command,
+                    // not more options to graze on. (Only fires on a repeated top result,
+                    // so a model exploring different needs is never cut off.)
+                    format!(
+                        "You have searched {} times and keep getting the same top tool, `{top}`. It \
+                         is the best match and its full input schema is below - call conduit_call_tool \
+                         now with name \"{top}\". Searching again will keep returning this. Only if \
+                         `{top}` genuinely cannot do the task, call conduit_status to see other servers.",
+                        guard.repeats
+                    )
+                } else {
+                    // Lead with a single, named, ready-to-call directive so the model
+                    // commits instead of re-searching (the v0.3.6 keep-searching nudges
+                    // overcorrected and made compliant models thrash).
+                    format!(
+                        "Found {total} matching tool(s){scope}. Top match: `{top}` - its full input \
+                         schema is included below, so call it now with conduit_call_tool (name: \
+                         \"{top}\") if it fits. Only search again if none of these match.{more}{schema_note}"
+                    )
+                };
                 let text = format!(
-                    "Found {} matching tool(s){}.{}{} Call one with conduit_call_tool using its exact name.\n\n{}",
-                    total,
-                    scope,
-                    more,
-                    schema_note,
+                    "{lead}\n\n{}",
                     serde_json::to_string_pretty(&matches).unwrap_or_default()
                 );
                 return Some(success(
@@ -837,6 +909,7 @@ fn main() {
     }
 
     let stdin = std::io::stdin();
+    let mut search_guard = SearchGuard::default();
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
@@ -896,7 +969,15 @@ fn main() {
         let response = {
             let reg = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut r = router.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            handle_request(&req, &reg, &mut r, &cache_snapshot, lazy, profile.as_deref())
+            handle_request(
+                &req,
+                &reg,
+                &mut r,
+                &cache_snapshot,
+                lazy,
+                profile.as_deref(),
+                &mut search_guard,
+            )
         };
         if let Some(resp) = response {
             let mut out = stdout.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -923,7 +1004,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": { "protocolVersion": "2025-06-18" }
         });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default()).unwrap();
         assert_eq!(resp["id"], 1);
         assert_eq!(resp["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(resp["result"]["capabilities"]["tools"]["listChanged"], true);
@@ -933,14 +1014,14 @@ mod tests {
     fn notifications_get_no_reply() {
         let reg = Registry::default();
         let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        assert!(handle_request(&note, &reg, &mut router(), &[], false, None).is_none());
+        assert!(handle_request(&note, &reg, &mut router(), &[], false, None, &mut SearchGuard::default()).is_none());
     }
 
     #[test]
     fn tools_list_always_includes_status() {
         let reg = Registry::default();
         let req = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default()).unwrap();
         let names: Vec<&str> = resp["result"]["tools"]
             .as_array()
             .unwrap()
@@ -970,7 +1051,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": { "name": "conduit_status", "arguments": {} }
         });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default()).unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("github"));
         assert_eq!(resp["result"]["isError"], false);
@@ -980,7 +1061,7 @@ mod tests {
     fn unknown_method_is_jsonrpc_error() {
         let reg = Registry::default();
         let req = json!({ "jsonrpc": "2.0", "id": 9, "method": "frobnicate" });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default()).unwrap();
         assert_eq!(resp["error"]["code"], -32601);
     }
 
@@ -997,7 +1078,7 @@ mod tests {
         let reg = Registry::default();
         let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
         // Even with a full cached catalog, lazy mode advertises just the meta-tools.
-        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default()).unwrap();
         let names: Vec<&str> = resp["result"]["tools"]
             .as_array()
             .unwrap()
@@ -1084,9 +1165,92 @@ mod tests {
             "jsonrpc": "2.0", "id": 5, "method": "tools/call",
             "params": { "name": "conduit_search_tools", "arguments": { "query": "charges" } }
         });
-        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default()).unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("stripe__list_charges"));
         assert_eq!(resp["result"]["isError"], false);
+        // Response must lead with a named, ready-to-call directive and an explicit
+        // anti-loop signal, so a compliant (esp. local) model commits to a call
+        // instead of re-searching. Regression guard for the search-thrash fix.
+        assert!(text.contains("Top match:"), "should name the top match");
+        assert!(
+            text.contains("call it now") || text.contains("call it"),
+            "should tell the model to call now"
+        );
+        assert!(
+            text.to_lowercase().contains("only search again"),
+            "should signal not to keep searching"
+        );
+    }
+
+    #[test]
+    fn search_no_matches_guides_without_pushing_more_search() {
+        let reg = Registry::default();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": { "name": "conduit_search_tools", "arguments": { "query": "zzznotarealtoolzzz" } }
+        });
+        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default()).unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("No tools matched"));
+        // No phantom "Top match" when there's nothing to call.
+        assert!(!text.contains("Top match:"));
+    }
+
+    const ESCALATION_MARK: &str = "keep getting the same top tool";
+
+    fn search_req(query: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": { "name": "conduit_search_tools", "arguments": { "query": query } }
+        })
+    }
+
+    fn search_text(reg: &Registry, guard: &mut SearchGuard, query: &str) -> String {
+        let resp =
+            handle_request(&search_req(query), reg, &mut router(), &catalog(), true, None, guard)
+                .unwrap();
+        resp["result"]["content"][0]["text"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn repeated_same_need_escalates_then_resets() {
+        let reg = Registry::default();
+        let mut guard = SearchGuard::default();
+
+        // Same query keeps returning the same top tool; first two stay polite.
+        for _ in 0..2 {
+            let text = search_text(&reg, &mut guard, "charges");
+            assert!(text.contains("Top match:"));
+            assert!(!text.contains(ESCALATION_MARK));
+        }
+        // Third repeat of the same top tool trips the loop-breaker.
+        let text = search_text(&reg, &mut guard, "charges");
+        assert!(text.contains(ESCALATION_MARK), "3rd same-result search must escalate");
+        assert!(text.contains("stripe__list_charges"));
+
+        // Any non-search action resets the streak; the next search is polite again.
+        let status = json!({
+            "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+            "params": { "name": "conduit_status", "arguments": {} }
+        });
+        handle_request(&status, &reg, &mut router(), &catalog(), true, None, &mut guard);
+        let text = search_text(&reg, &mut guard, "charges");
+        assert!(!text.contains(ESCALATION_MARK), "non-search action should reset the streak");
+        assert!(text.contains("Top match:"));
+    }
+
+    #[test]
+    fn searching_different_needs_never_escalates() {
+        // The capable-model guarantee: a model that searches several DIFFERENT things
+        // in a row (different top tool each time) is never cut off, no matter how many
+        // searches. This is what keeps Claude/Cursor's exploration unaffected.
+        let reg = Registry::default();
+        let mut guard = SearchGuard::default();
+        for q in ["charges", "offerings", "send", "charges", "offerings", "send"] {
+            let text = search_text(&reg, &mut guard, q);
+            assert!(text.contains("Top match:"), "query {q} should stay polite");
+            assert!(!text.contains(ESCALATION_MARK), "query {q} must not escalate");
+        }
     }
 }
