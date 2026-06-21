@@ -535,6 +535,42 @@ fn app_present_for(config_path: &str, config_exists: bool) -> bool {
                 .unwrap_or(false))
 }
 
+/// Warp keeps its state under the OS data dir, not next to its MCP config: it reads
+/// file-based servers from `~/.warp/.mcp.json` but only creates `~/.warp` on first
+/// file-based use, while the app itself lives under the data dir. So the
+/// config-parent heuristic misses it. This finds Warp's install dir instead.
+/// Per-user location, so the all-users-vs-just-me install choice doesn't matter.
+fn warp_data_dir() -> Option<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(d) = dirs::data_local_dir() {
+        roots.push(d); // Windows %LOCALAPPDATA%, macOS App Support, Linux ~/.local/share
+    }
+    if let Some(d) = dirs::data_dir() {
+        roots.push(d);
+    }
+    if let Some(h) = home() {
+        roots.push(h.join(".local").join("state")); // Linux state dir
+    }
+    for root in roots {
+        for name in ["warp", "Warp", "dev.warp.Warp-Stable", "warp-terminal"] {
+            let p = root.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// An extra "is it installed" marker for clients whose MCP config lives somewhere
+/// other than their install dir (so the config-parent heuristic misses them).
+fn extra_app_marker(id: &str) -> Option<PathBuf> {
+    match id {
+        "warp" => warp_data_dir(),
+        _ => None,
+    }
+}
+
 fn read_client(def: &ClientDef) -> DetectedClient {
     let plugin_servers = def.plugin_scan.map(|scan| scan()).unwrap_or_default();
 
@@ -549,7 +585,10 @@ fn read_client(def: &ClientDef) -> DetectedClient {
         // `.../Claude`, `~/.codex`); its presence means the app has run here. If the
         // config itself exists the app is obviously present. An empty path means we
         // couldn't even resolve a location, so the app is not detectable.
-        let app_present = app_present_for(&config_path, config_exists);
+        let app_present = app_present_for(&config_path, config_exists)
+            || extra_app_marker(def.id)
+                .map(|p| p.exists())
+                .unwrap_or(false);
         DetectedClient {
             id: def.id.to_string(),
             name: def.name.to_string(),
@@ -1173,6 +1212,14 @@ mod tests {
             let target = s.command.clone().or_else(|| s.url.clone()).unwrap_or_default();
             println!("  {} [{}] {}", s.name, s.transport, target);
         }
+    }
+
+    #[test]
+    fn extra_app_marker_only_for_warp() {
+        assert!(extra_app_marker("cursor").is_none());
+        assert!(extra_app_marker("vscode").is_none());
+        // "warp" delegates to warp_data_dir() (env-dependent); just ensure no panic.
+        let _ = extra_app_marker("warp");
     }
 
     #[test]
