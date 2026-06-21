@@ -64,6 +64,10 @@ enum Format {
     JsonMcpServers,
     /// JSON with a top-level `servers` object (VS Code).
     JsonServers,
+    /// JSONC with a top-level `context_servers` object (Zed). Same per-server shape
+    /// as mcpServers; the file is read leniently (comments + trailing commas) and
+    /// never wiped on a parse failure (it holds the user's whole editor config).
+    JsonContextServers,
     /// TOML with `[mcp_servers.<name>]` tables (Codex CLI).
     TomlMcpServers,
 }
@@ -237,6 +241,20 @@ fn amazon_q_path() -> Option<PathBuf> {
 /// per-workspace `.kiro/settings/mcp.json` also exists and takes precedence.
 fn kiro_path() -> Option<PathBuf> {
     Some(home()?.join(".kiro").join("settings").join("mcp.json"))
+}
+
+/// Zed keeps MCP ("context") servers in its main settings.json (JSONC). Windows
+/// uses %APPDATA%\Zed; macOS and Linux use ~/.config/zed (not App Support). The
+/// parent dir is created on install, so the default presence heuristic works.
+fn zed_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        Some(config()?.join("Zed").join("settings.json"))
+    }
+    #[cfg(not(windows))]
+    {
+        Some(home()?.join(".config").join("zed").join("settings.json"))
+    }
 }
 
 fn cursor_plugins_dir() -> Option<PathBuf> {
@@ -415,6 +433,14 @@ fn defs() -> Vec<ClientDef> {
             path: kiro_path,
             plugin_scan: None,
         },
+        ClientDef {
+            id: "zed",
+            name: "Zed",
+            format: Format::JsonContextServers,
+            uses_connectors: false,
+            path: zed_path,
+            plugin_scan: None,
+        },
     ]
 }
 
@@ -468,8 +494,35 @@ fn json_server(name: &str, def: &serde_json::Value) -> McpServer {
     }
 }
 
+/// Parse a JSON value tolerantly: plain JSON first, then JSON5 (comments and
+/// trailing commas, as in Zed's settings.json) as a fallback. None only if even
+/// JSON5 can't read it. Used so a commented config is never mistaken for corrupt.
+fn read_json_lenient(content: &str) -> Option<serde_json::Value> {
+    if content.trim().is_empty() {
+        return Some(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    serde_json::from_str(content)
+        .ok()
+        .or_else(|| json5::from_str(content).ok())
+}
+
+/// Read an existing JSON config we're about to modify. Tolerant of JSONC. When
+/// `lenient` (e.g. Zed's settings.json, which holds the user's whole editor config),
+/// an unparseable file is an ERROR, never silently replaced with an empty object,
+/// so Conduit can't wipe it. For the well-behaved JSON configs, an unparseable file
+/// falls back to empty (start fresh), preserving prior behavior.
+fn read_existing_json(content: &str, lenient: bool) -> Result<serde_json::Value, String> {
+    match read_json_lenient(content) {
+        Some(v) => Ok(v),
+        None if lenient => {
+            Err("Could not parse the existing config; leaving it untouched.".to_string())
+        }
+        None => Ok(serde_json::Value::Object(serde_json::Map::new())),
+    }
+}
+
 fn parse_json(content: &str, key: &str) -> Result<Vec<McpServer>, String> {
-    let value: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    let value = read_json_lenient(content).ok_or("could not parse JSON config")?;
     let obj = match value.get(key).and_then(|v| v.as_object()) {
         Some(o) => o,
         None => return Ok(Vec::new()),
@@ -648,6 +701,7 @@ fn read_client(def: &ClientDef) -> DetectedClient {
     let parsed = match def.format {
         Format::JsonMcpServers => parse_json(&content, "mcpServers"),
         Format::JsonServers => parse_json(&content, "servers"),
+        Format::JsonContextServers => parse_json(&content, "context_servers"),
         Format::TomlMcpServers => parse_toml(&content),
     };
 
@@ -801,15 +855,15 @@ fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
-fn write_json(path: &Path, key: &str, servers: &[ServerEntry]) -> Result<(), String> {
+fn write_json(
+    path: &Path,
+    key: &str,
+    servers: &[ServerEntry],
+    lenient: bool,
+) -> Result<(), String> {
     let mut root = if path.exists() {
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        if content.trim().is_empty() {
-            serde_json::Value::Object(serde_json::Map::new())
-        } else {
-            serde_json::from_str(&content)
-                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
-        }
+        read_existing_json(&content, lenient)?
     } else {
         serde_json::Value::Object(serde_json::Map::new())
     };
@@ -856,8 +910,9 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
     let path = (def.path)().ok_or("Could not resolve a config path on this OS")?;
     let backup = backup_file(client_id, &path)?;
     match def.format {
-        Format::JsonMcpServers => write_json(&path, "mcpServers", servers)?,
-        Format::JsonServers => write_json(&path, "servers", servers)?,
+        Format::JsonMcpServers => write_json(&path, "mcpServers", servers, false)?,
+        Format::JsonServers => write_json(&path, "servers", servers, false)?,
+        Format::JsonContextServers => write_json(&path, "context_servers", servers, true)?,
         Format::TomlMcpServers => write_toml(&path, servers)?,
     }
     Ok(WriteOutcome {
@@ -973,15 +1028,11 @@ fn edit_json_gateway(
     key: &str,
     install: bool,
     profile: Option<&str>,
+    lenient: bool,
 ) -> Result<(), String> {
     let mut root = if path.exists() {
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        if content.trim().is_empty() {
-            serde_json::Value::Object(serde_json::Map::new())
-        } else {
-            serde_json::from_str(&content)
-                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
-        }
+        read_existing_json(&content, lenient)?
     } else {
         serde_json::Value::Object(serde_json::Map::new())
     };
@@ -1044,8 +1095,11 @@ fn install_or_remove(
     let path = (def.path)().ok_or("Could not resolve a config path on this OS")?;
     let backup = backup_file(client_id, &path)?;
     match def.format {
-        Format::JsonMcpServers => edit_json_gateway(&path, "mcpServers", install, profile)?,
-        Format::JsonServers => edit_json_gateway(&path, "servers", install, profile)?,
+        Format::JsonMcpServers => edit_json_gateway(&path, "mcpServers", install, profile, false)?,
+        Format::JsonServers => edit_json_gateway(&path, "servers", install, profile, false)?,
+        Format::JsonContextServers => {
+            edit_json_gateway(&path, "context_servers", install, profile, true)?
+        }
         Format::TomlMcpServers => edit_toml_gateway(&path, install, profile)?,
     }
     Ok(WriteOutcome {
@@ -1122,7 +1176,7 @@ mod tests {
         let path = temp_path("json-mcp");
         std::fs::remove_file(&path).ok();
         let servers = vec![stdio("filesystem"), stdio("github")];
-        write_json(&path, "mcpServers", &servers).unwrap();
+        write_json(&path, "mcpServers", &servers, false).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         let parsed = parse_json(&content, "mcpServers").unwrap();
         std::fs::remove_file(&path).ok();
@@ -1147,7 +1201,7 @@ mod tests {
     fn json_write_preserves_unrelated_keys() {
         let path = temp_path("json-preserve");
         std::fs::write(&path, r#"{"theme":"dark","mcpServers":{"old":{"command":"x"}}}"#).unwrap();
-        write_json(&path, "mcpServers", &[stdio("fresh")]).unwrap();
+        write_json(&path, "mcpServers", &[stdio("fresh")], false).unwrap();
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         std::fs::remove_file(&path).ok();
@@ -1195,7 +1249,7 @@ mod tests {
         )
         .unwrap();
 
-        edit_json_gateway(&path, "mcpServers", true, Some("Billing")).unwrap();
+        edit_json_gateway(&path, "mcpServers", true, Some("Billing"), false).unwrap();
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let servers = root["mcpServers"].as_object().unwrap();
@@ -1209,7 +1263,7 @@ mod tests {
         assert_eq!(root["theme"], "dark");
         assert_eq!(servers["existing"]["env"]["SECRET"], "keepme");
 
-        edit_json_gateway(&path, "mcpServers", false, None).unwrap();
+        edit_json_gateway(&path, "mcpServers", false, None, false).unwrap();
         let root2: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let servers2 = root2["mcpServers"].as_object().unwrap();
@@ -1243,6 +1297,51 @@ mod tests {
         assert!(install_override("cursor").is_none());
         assert!(install_override("codex").is_none());
         assert!(install_override("vscode").is_none());
+    }
+
+    #[test]
+    fn zed_context_servers_jsonc_round_trip() {
+        let path = std::env::temp_dir().join(format!("conduit-zed-{}.json", std::process::id()));
+        // JSONC: line comment, trailing comma, an unrelated user setting.
+        std::fs::write(
+            &path,
+            "// my zed settings\n{\n  \"ui_font_size\": 16,\n  \"context_servers\": {\n    \"existing\": { \"command\": \"x\", \"args\": [] },\n  },\n}\n",
+        )
+        .unwrap();
+
+        // Parsing tolerates the comments/trailing commas.
+        let parsed =
+            parse_json(&std::fs::read_to_string(&path).unwrap(), "context_servers").unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "existing");
+
+        // Installing preserves the unrelated key and the existing server.
+        edit_json_gateway(&path, "context_servers", true, None, true).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["ui_font_size"], 16);
+        let cs = root["context_servers"].as_object().unwrap();
+        assert!(cs.contains_key("conduit"));
+        assert!(cs.contains_key("existing"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn lenient_edit_never_wipes_unparseable_config() {
+        let path = std::env::temp_dir().join(format!("conduit-bad-{}.json", std::process::id()));
+        let garbage = "this is not json or json5 at all {{{";
+        std::fs::write(&path, garbage).unwrap();
+        // A lenient edit must ERROR, never replace the file with an empty object.
+        assert!(edit_json_gateway(&path, "context_servers", true, None, true).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn zed_is_registered_as_context_servers() {
+        let d = defs().into_iter().find(|d| d.id == "zed").unwrap();
+        assert!(matches!(d.format, Format::JsonContextServers));
+        assert!((d.path)().is_some());
     }
 
     #[test]
