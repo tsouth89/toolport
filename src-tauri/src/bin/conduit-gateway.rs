@@ -61,7 +61,9 @@ fn search_tool_def() -> Value {
             If the result says more tools matched than were shown, narrow with `server` or raise \
             `limit` before concluding a capability is missing - many servers expose a generic API \
             bridge (a single write/create tool), so search by capability, not just an exact operation \
-            name. conduit_status lists every server prefix and its tool count.",
+            name. conduit_status lists every server prefix and its tool count. \
+            Large input schemas may be omitted from broad results (flagged schemaOmitted) to \
+            keep responses small - search a tool's exact name to get its full schema.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -123,14 +125,6 @@ fn search_catalog(
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
 
-    let project = |t: &Value| {
-        json!({
-            "name": t.get("name").cloned().unwrap_or(Value::Null),
-            "description": t.get("description").cloned().unwrap_or(Value::Null),
-            "inputSchema": t.get("inputSchema").cloned().unwrap_or(Value::Null),
-        })
-    };
-
     // Optionally restrict to one server (its prefix contains the filter text).
     let pool: Vec<&Value> = cached
         .iter()
@@ -140,65 +134,96 @@ fn search_catalog(
         })
         .collect();
 
-    // Empty query: list the pool. With `server` set this enumerates that server.
-    if terms.is_empty() {
+    // Select an ordered set of tool refs (ranking happens here; projection below).
+    let (selected, total): (Vec<&Value>, usize) = if terms.is_empty() {
+        // Empty query: list the pool. With `server` set this enumerates that server.
         let total = pool.len();
-        return (
-            pool.into_iter().take(limit).map(|t| project(t)).collect(),
-            total,
-        );
-    }
-
-    let mut scored: Vec<(i32, &Value)> = pool
-        .into_iter()
-        .filter_map(|t| {
-            let name = t
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let desc = t
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let mut score = 0;
-            for term in &terms {
-                if name.contains(term) {
-                    score += 3;
-                } else if desc.contains(term) {
-                    score += 1;
-                }
-            }
-            (score > 0).then_some((score, t))
-        })
-        .collect();
-    // Stable, highest score first.
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
-    let total = scored.len();
-
-    // Scoped to a server: take the top `limit`. Unscoped: cap per server so one
-    // server with many matching tools can't crowd the others out of the window.
-    let results: Vec<Value> = if server_filter.is_some() {
-        scored.into_iter().take(limit).map(|(_, t)| project(t)).collect()
+        (pool.into_iter().take(limit).collect(), total)
     } else {
-        let cap = (limit / 3).max(4);
-        let mut per: HashMap<String, usize> = HashMap::new();
-        let mut out = Vec::new();
-        for (_, t) in scored {
-            if out.len() >= limit {
-                break;
+        let mut scored: Vec<(i32, &Value)> = pool
+            .into_iter()
+            .filter_map(|t| {
+                let name = t
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let desc = t
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let mut score = 0;
+                for term in &terms {
+                    if name.contains(term) {
+                        score += 3;
+                    } else if desc.contains(term) {
+                        score += 1;
+                    }
+                }
+                (score > 0).then_some((score, t))
+            })
+            .collect();
+        // Stable, highest score first.
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        let total = scored.len();
+
+        // Scoped to a server: take the top `limit`. Unscoped: cap per server so one
+        // server with many matching tools can't crowd the others out of the window.
+        let selected: Vec<&Value> = if server_filter.is_some() {
+            scored.into_iter().take(limit).map(|(_, t)| t).collect()
+        } else {
+            let cap = (limit / 3).max(4);
+            let mut per: HashMap<String, usize> = HashMap::new();
+            let mut out = Vec::new();
+            for (_, t) in scored {
+                if out.len() >= limit {
+                    break;
+                }
+                let c = per.entry(tool_prefix(t)).or_insert(0);
+                if *c >= cap {
+                    continue;
+                }
+                *c += 1;
+                out.push(t);
             }
-            let c = per.entry(tool_prefix(t)).or_insert(0);
-            if *c >= cap {
-                continue;
-            }
-            *c += 1;
-            out.push(project(t));
-        }
-        out
+            out
+        };
+        (selected, total)
     };
-    (results, total)
+
+    (project_budgeted(&selected), total)
+}
+
+/// Project selected tools to search results, bounding the total size of their
+/// (sometimes enormous) input schemas. Lazy discovery exists to keep the agent's
+/// context small, so one server's giant schemas must not blow it up: the top
+/// result always carries its full schema; past a byte budget the rest return name
+/// + description only, flagged `schemaOmitted` so the agent can fetch a specific
+/// tool's full schema by searching its exact name (or scoping with `server`).
+fn project_budgeted(tools: &[&Value]) -> Vec<Value> {
+    const SCHEMA_BUDGET: usize = 24_000;
+    let mut used = 0usize;
+    tools
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let name = t.get("name").cloned().unwrap_or(Value::Null);
+            let description = t.get("description").cloned().unwrap_or(Value::Null);
+            let schema = t.get("inputSchema").cloned().unwrap_or(Value::Null);
+            let slen = if schema.is_null() {
+                0
+            } else {
+                schema.to_string().len()
+            };
+            if i == 0 || used + slen <= SCHEMA_BUDGET {
+                used += slen;
+                json!({ "name": name, "description": description, "inputSchema": schema })
+            } else {
+                json!({ "name": name, "description": description, "schemaOmitted": true })
+            }
+        })
+        .collect()
 }
 
 fn enabled_summary(reg: &Registry, cached: &[Value], profile: Option<&str>) -> String {
@@ -377,11 +402,22 @@ fn handle_request(
                 } else {
                     String::new()
                 };
+                let omitted = matches.iter().any(|m| {
+                    m.get("schemaOmitted").and_then(|v| v.as_bool()).unwrap_or(false)
+                });
+                let schema_note = if omitted {
+                    " Some large input schemas were omitted to keep this response small; \
+                     search a tool's exact name (or pass `server`) to get its full schema \
+                     before calling it."
+                } else {
+                    ""
+                };
                 let text = format!(
-                    "Found {} matching tool(s){}.{} Call one with conduit_call_tool using its exact name.\n\n{}",
+                    "Found {} matching tool(s){}.{}{} Call one with conduit_call_tool using its exact name.\n\n{}",
                     total,
                     scope,
                     more,
+                    schema_note,
                     serde_json::to_string_pretty(&matches).unwrap_or_default()
                 );
                 return Some(success(
@@ -1001,6 +1037,22 @@ mod tests {
         let (hits, total) = search_catalog(&cat, "list", None, 6);
         assert!(total >= 22);
         assert!(hits.iter().any(|h| h["name"] == "stripe__list_charges"));
+    }
+
+    #[test]
+    fn search_bounds_total_schema_size() {
+        // Two tools with enormous schemas: the top result keeps its schema, the next
+        // is returned without it (flagged), so the response can't blow up context.
+        let big = json!({ "type": "object", "properties": { "x": { "description": "z".repeat(30_000) } } });
+        let cat = vec![
+            json!({ "name": "a__one", "description": "alpha", "inputSchema": big }),
+            json!({ "name": "a__two", "description": "alpha", "inputSchema": big }),
+        ];
+        let (hits, _) = search_catalog(&cat, "alpha", Some("a"), 10);
+        assert_eq!(hits.len(), 2);
+        assert!(hits[0].get("inputSchema").is_some());
+        assert!(hits[1].get("inputSchema").is_none());
+        assert_eq!(hits[1].get("schemaOmitted").and_then(|v| v.as_bool()), Some(true));
     }
 
     #[test]

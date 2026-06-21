@@ -16,6 +16,10 @@ All notable changes to Conduit are documented here. Format loosely follows
   narrow, diversifies across servers, and accepts a `server` filter to scope or
   fully enumerate one server's tools. `conduit_status` now lists each server and
   its tool count.
+- Tool search no longer blows up the agent's context: a few servers ship enormous
+  input schemas (tens of KB each), and search returned the full schema for every
+  result. It now bounds the total schema size, keeping the top result's full schema
+  and returning the rest compact (search a tool's exact name for its full schema).
 
 ## [0.3.5] - 2026-06-21
 
