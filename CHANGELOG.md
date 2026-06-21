@@ -5,6 +5,30 @@ All notable changes to Conduit are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-06-21
+
+### Security
+- Importing a shared setup now previews exactly what it will run (each server's
+  command, args, and url) and imports only on confirmation, and flags entries that
+  spawn a shell. A shared config can no longer slip an unseen command past you.
+- OAuth endpoints discovered from a server's metadata are rejected if they point at
+  a private or loopback address while the server itself is public (SSRF guard);
+  legitimate local servers are unaffected.
+- Set an explicit Content-Security-Policy for the app window.
+
+### Fixed
+- Registry writes are atomic, so a crash mid-write can't corrupt your server set.
+- A corrupt registry no longer silently makes every tool vanish: the gateway keeps
+  serving the last good tool list and logs the problem.
+- The user catalog and config backups are stored in one consistent location across
+  packaged and unpackaged installs.
+
+### Changed
+- Onboarding's final step reflects what you actually set up and explains lazy
+  discovery; the empty state offers a "Browse catalog" action; the New Profile
+  dialog explains that profiles scope servers, not credentials.
+- Clearer macOS OAuth guidance (shown before sign-in, not only after a failure).
+
 ## [0.3.4] - 2026-06-21
 
 ### Fixed
@@ -46,7 +70,8 @@ All notable changes to Conduit are documented here. Format loosely follows
 - First public release: local MCP gateway and manager with lazy discovery,
   per-agent profiles, the catalog, the tool playground, and the activity log.
 
-[Unreleased]: https://github.com/tsouth89/conduit/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/tsouth89/conduit/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/tsouth89/conduit/releases/tag/v0.3.5
 [0.3.4]: https://github.com/tsouth89/conduit/releases/tag/v0.3.4
 [0.3.3]: https://github.com/tsouth89/conduit/releases/tag/v0.3.3
 [0.3.2]: https://github.com/tsouth89/conduit/releases/tag/v0.3.2
