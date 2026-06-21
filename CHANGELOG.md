@@ -5,6 +5,18 @@ All notable changes to Conduit are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-06-21
+
+### Fixed
+- Lazy-discovery tool search is far more reliable on multi-server setups. A tool
+  that exists could read as missing (so an agent would wrongly conclude a server
+  was "read only"): the default result limit was too low with no signal that
+  results were truncated, and one server with many matching tools could crowd out
+  the rest. Search now returns more results, reports when it truncated and how to
+  narrow, diversifies across servers, and accepts a `server` filter to scope or
+  fully enumerate one server's tools. `conduit_status` now lists each server and
+  its tool count.
+
 ## [0.3.5] - 2026-06-21
 
 ### Security
@@ -70,7 +82,8 @@ All notable changes to Conduit are documented here. Format loosely follows
 - First public release: local MCP gateway and manager with lazy discovery,
   per-agent profiles, the catalog, the tool playground, and the activity log.
 
-[Unreleased]: https://github.com/tsouth89/conduit/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/tsouth89/conduit/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/tsouth89/conduit/releases/tag/v0.3.6
 [0.3.5]: https://github.com/tsouth89/conduit/releases/tag/v0.3.5
 [0.3.4]: https://github.com/tsouth89/conduit/releases/tag/v0.3.4
 [0.3.3]: https://github.com/tsouth89/conduit/releases/tag/v0.3.3
