@@ -18,8 +18,9 @@ All notable changes to Conduit are documented here. Format loosely follows
   its tool count.
 - Tool search no longer blows up the agent's context: a few servers ship enormous
   input schemas (tens of KB each), and search returned the full schema for every
-  result. It now bounds the total schema size, keeping the top result's full schema
-  and returning the rest compact (search a tool's exact name for its full schema).
+  result. It now bounds the total schema size (keeping the top result's full schema
+  and returning the rest compact) and truncates long descriptions. Full schema/text
+  for a specific tool is available by searching its exact name.
 
 ## [0.3.5] - 2026-06-21
 

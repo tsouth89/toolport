@@ -203,13 +203,24 @@ fn search_catalog(
 /// tool's full schema by searching its exact name (or scoping with `server`).
 fn project_budgeted(tools: &[&Value]) -> Vec<Value> {
     const SCHEMA_BUDGET: usize = 24_000;
+    // Cap each description too: some servers ship multi-KB descriptions, which add
+    // up across results. Enough to choose a tool; full text comes from a scoped or
+    // exact-name search.
+    const DESC_MAX: usize = 500;
+    let truncate_desc = |d: Option<&Value>| match d.and_then(|v| v.as_str()) {
+        Some(s) if s.chars().count() > DESC_MAX => {
+            let head: String = s.chars().take(DESC_MAX).collect();
+            Value::String(format!("{head}…"))
+        }
+        _ => d.cloned().unwrap_or(Value::Null),
+    };
     let mut used = 0usize;
     tools
         .iter()
         .enumerate()
         .map(|(i, t)| {
             let name = t.get("name").cloned().unwrap_or(Value::Null);
-            let description = t.get("description").cloned().unwrap_or(Value::Null);
+            let description = truncate_desc(t.get("description"));
             let schema = t.get("inputSchema").cloned().unwrap_or(Value::Null);
             let slen = if schema.is_null() {
                 0
@@ -1053,6 +1064,17 @@ mod tests {
         assert!(hits[0].get("inputSchema").is_some());
         assert!(hits[1].get("inputSchema").is_none());
         assert_eq!(hits[1].get("schemaOmitted").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn search_truncates_long_descriptions() {
+        let cat = vec![json!({
+            "name": "a__one", "description": "x".repeat(5000), "inputSchema": {}
+        })];
+        let (hits, _) = search_catalog(&cat, "", Some("a"), 10);
+        let d = hits[0]["description"].as_str().unwrap();
+        assert!(d.chars().count() <= 501); // 500 chars + ellipsis
+        assert!(d.ends_with('…'));
     }
 
     #[test]
