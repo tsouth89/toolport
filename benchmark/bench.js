@@ -189,6 +189,10 @@ async function runTask(gw, oaiTools, prompt) {
   return { tokens, calls, steps, done, error, answer: answer.slice(0, 200) };
 }
 
+// How many times to run each task. The agent loop is nondeterministic, so set >1
+// and we report the median + range. Tool-def overhead is deterministic (measured once).
+const RUNS = Number(process.env.RUNS || 1);
+
 async function benchMode(discovery) {
   const gw = new Gateway(discovery);
   await gw.init();
@@ -201,10 +205,16 @@ async function benchMode(discovery) {
   console.log(`\n[${discovery}] ${mcpTools.length} tools, tool-def overhead: ${ov}`);
   const rows = [];
   for (const task of TASKS) {
-    const r = await runTask(gw, oaiTools, task.prompt);
-    rows.push({ task: task.name, ...r });
-    const status = r.error ? `ERROR (${r.error})` : r.done ? "done" : "incomplete";
-    console.log(`  ${task.name.padEnd(16)} ${String(r.tokens).padStart(7)} tok  ${String(r.calls).padStart(2)} calls  ${status}`);
+    const trials = [];
+    for (let i = 0; i < RUNS; i++) trials.push(await runTask(gw, oaiTools, task.prompt));
+    const toks = trials.map((t) => t.tokens).sort((a, b) => a - b);
+    const median = toks[Math.floor((toks.length - 1) / 2)];
+    const done = trials.filter((t) => t.done).length;
+    const err = trials.find((t) => t.error)?.error;
+    rows.push({ task: task.name, tokens: median, lo: toks[0], hi: toks[toks.length - 1], done });
+    const range = RUNS > 1 ? ` (${toks[0]}-${toks[toks.length - 1]})` : "";
+    const status = err ? `ERROR (${String(err).slice(0, 60)})` : `${done}/${RUNS} done`;
+    console.log(`  ${task.name.padEnd(16)} median ${String(median).padStart(6)} tok${range}  ${status}`);
   }
   gw.stop();
   return { toolCount: mcpTools.length, overhead, rows };
@@ -212,8 +222,8 @@ async function benchMode(discovery) {
 
 function totals(modeRows) {
   return modeRows.reduce(
-    (a, r) => ({ tokens: a.tokens + r.tokens, calls: a.calls + r.calls, done: a.done + (r.done ? 1 : 0) }),
-    { tokens: 0, calls: 0, done: 0 }
+    (a, r) => ({ tokens: a.tokens + (r.tokens || 0), done: a.done + (r.done || 0) }),
+    { tokens: 0, done: 0 }
   );
 }
 
@@ -251,14 +261,15 @@ function totals(modeRows) {
   console.log(`tools exposed:        flat ${flat.toolCount}   lazy ${lazy.toolCount}`);
   console.log(`tool-def overhead:    flat ${fmtOv(flat.overhead)}   lazy ${fmtOv(lazy.overhead)} tok/request` +
     (ovPct != null ? `   (${ovPct}% less, EVERY request)` : ""));
-  console.log(`tasks completed:      flat ${tf.done}/${TASKS.length}   lazy ${tl.done}/${TASKS.length}`);
+  const denom = TASKS.length * RUNS;
+  console.log(`tasks completed:      flat ${tf.done}/${denom}   lazy ${tl.done}/${denom}   (${RUNS} run(s)/task)`);
   if (tf.done > 0) {
     const pct = tf.tokens ? Math.round((1 - tl.tokens / tf.tokens) * 100) : 0;
-    console.log(`total tokens (done):  flat ${tf.tokens}   lazy ${tl.tokens}   (${pct >= 0 ? "-" : "+"}${Math.abs(pct)}%)`);
+    console.log(`median tokens (sum):  flat ${tf.tokens}   lazy ${tl.tokens}   (${pct >= 0 ? "-" : "+"}${Math.abs(pct)}%)`);
   } else {
-    console.log(`lazy total tokens:    ${tl.tokens} across all tasks (flat couldn't run, its tool list overflowed the model)`);
+    console.log(`lazy median tokens:   ${tl.tokens} summed across tasks (flat couldn't run, its tool list overflowed the model)`);
   }
   console.log("\nThe headline metric is tool-def overhead: the tokens EVERY request pays just to");
-  console.log("list tools. Flat pays it on every call; lazy advertises 3 meta-tools. Small n -");
-  console.log("run a few times and eyeball the answers; treat the direction as the signal.");
+  console.log("list tools. Flat pays it on every call; lazy advertises 3 meta-tools. Set RUNS=5");
+  console.log("for medians; eyeball the answers for correctness; treat the direction as signal.");
 })();
