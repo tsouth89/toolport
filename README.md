@@ -1,19 +1,26 @@
 # Conduit
 
-**One gateway for all your MCP servers, across every AI agent.**
+**Your agent doesn't need 500 tools loaded on every request. It needs 3.**
 
 ![Conduit: every tool from all your servers, collapsed to the 3 your agent loads](docs/feature.png)
 
 ![Conduit demo: add a server, connect it to every AI tool, and the agent uses it](docs/demo.gif)
 
-Conduit is a local MCP (Model Context Protocol) gateway and manager. You set up
-and authenticate each MCP server once in Conduit, point your AI agents at the
-single Conduit gateway, and every server is instantly available in all of them.
-No more configuring the same servers separately in Cursor, Claude, Codex, and
-the rest.
+Conduit is a local MCP (Model Context Protocol) gateway. Every MCP server you
+connect dumps all of its tools into your agent's context on every single request,
+and it adds up fast: just 3 servers (62 tools) cost ~24,000 tokens of definitions
+before you've asked anything. Conduit puts your servers behind one gateway that
+advertises 3 meta-tools the agent searches on demand, so it pays ~660 tokens
+instead of ~24,000.
 
-Built for people who use more than one AI coding tool and are tired of managing
-MCP servers per app.
+**Measured: 97% less tool-definition overhead per request and ~90% fewer total
+tokens, at the same task success rate** (see [BENCHMARK.md](BENCHMARK.md)). That
+holds whether you run one AI tool or five, on cloud models (where tokens are your
+bill) or local ones (where tool defs eat your context window).
+
+And because everything sits behind one gateway, you also set up and authenticate
+each server once and it's available in all of them, no more configuring the same
+servers separately in Cursor, Claude, Codex, and the rest.
 
 ## Screenshots
 
@@ -23,16 +30,19 @@ MCP servers per app.
 
 ## Why
 
-Every AI client wants its own MCP configuration. Run a handful of agents and you
-end up configuring the same servers several times, re-authenticating in each, and
-drowning every agent in hundreds of tool definitions. Conduit fixes that:
+Every MCP server you connect dumps its full tool list into your agent's context,
+on every request, and most AI clients also want their own separate configuration.
+So you pay a token tax on every call and reconfigure the same servers per app.
+Conduit fixes both:
 
+- **~90% fewer tokens.** In lazy-discovery mode the gateway advertises three
+  meta-tools (`conduit_status`, `conduit_search_tools`, `conduit_call_tool`)
+  instead of the full catalog. The agent searches and calls on demand, so context
+  stays flat no matter how many servers you connect. In a measured benchmark that's
+  97% less tool-definition overhead per request and ~90% fewer total tokens at the
+  same success rate ([BENCHMARK.md](BENCHMARK.md)).
 - **Set up once, use everywhere.** Each client points at one Conduit gateway.
   Add a server and authenticate it a single time; it appears in every client.
-- **Small context, not hundreds of tools.** In lazy-discovery mode the gateway
-  advertises three meta-tools (`conduit_status`, `conduit_search_tools`,
-  `conduit_call_tool`) instead of the full catalog. The agent searches and calls
-  on demand, so context stays flat no matter how many servers you connect.
 - **Per-agent scoping.** Give each client only the servers it should see. A
   coding agent literally cannot call a billing tool that is not in its profile.
 - **Obvious auth.** OAuth or API key, stored once in the OS keychain. Status is
