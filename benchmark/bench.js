@@ -189,6 +189,21 @@ function totals(modeRows) {
 
 (async () => {
   console.log(`gateway: ${GATEWAY}`);
+
+  // TOOLS_ONLY: just report how many tools each mode exposes (no LLM needed).
+  // The headline number on its own ("N tools collapse to 3"), and a quick check
+  // that the gateway handshake works before you spend a full benchmark run.
+  if (process.env.TOOLS_ONLY) {
+    for (const mode of ["full", "lazy"]) {
+      const gw = new Gateway(mode);
+      await gw.init();
+      const tools = await gw.tools();
+      console.log(`[${mode}] exposes ${tools.length} tools`);
+      gw.stop();
+    }
+    process.exit(0);
+  }
+
   console.log(`llm:     ${MODEL} @ ${LLM_URL}`);
 
   const flat = await benchMode("full");
