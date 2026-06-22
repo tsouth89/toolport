@@ -70,6 +70,11 @@ enum Format {
     JsonContextServers,
     /// TOML with `[mcp_servers.<name>]` tables (Codex CLI).
     TomlMcpServers,
+    /// YAML with a top-level `extensions` map (Goose). Each entry is an
+    /// `{enabled, type, name, cmd, args, envs, ...}` record; `cmd`/`envs` (not
+    /// `command`/`env`) and a `type` tag distinguish it from mcpServers. The file
+    /// also holds the user's model config, so it's read leniently and never wiped.
+    YamlExtensions,
 }
 
 struct ClientDef {
@@ -247,6 +252,51 @@ fn kiro_path() -> Option<PathBuf> {
 /// JSON). The file is created by LM Studio, so the parent-dir presence check works.
 fn lmstudio_path() -> Option<PathBuf> {
     Some(home()?.join(".lmstudio").join("mcp.json"))
+}
+
+/// Jan keeps MCP servers in mcp_config.json (standard `mcpServers` shape) inside
+/// its data folder, `<data_dir>/Jan/data` on every OS (e.g. %APPDATA%\Jan\data on
+/// Windows, ~/Library/Application Support/Jan/data on macOS). Jan creates the
+/// folder and a default config on first launch, so the parent-dir check detects it.
+fn jan_path() -> Option<PathBuf> {
+    Some(
+        dirs::data_dir()?
+            .join("Jan")
+            .join("data")
+            .join("mcp_config.json"),
+    )
+}
+
+/// Goose keeps extensions (its MCP servers) in config.yaml. It resolves the dir
+/// via the `etcetera` "Block/goose" app strategy: ~/.config/goose on Linux, an
+/// app-support path on macOS, and %APPDATA%\Block\goose\config on Windows. (The
+/// Windows path is the etcetera default and is confirmed against a real install.)
+fn goose_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        Some(
+            config()?
+                .join("Block")
+                .join("goose")
+                .join("config")
+                .join("config.yaml"),
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(
+            home()?
+                .join("Library")
+                .join("Application Support")
+                .join("Block")
+                .join("goose")
+                .join("config.yaml"),
+        )
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Some(home()?.join(".config").join("goose").join("config.yaml"))
+    }
 }
 
 /// Zed keeps MCP ("context") servers in its main settings.json (JSONC). Windows
@@ -455,6 +505,22 @@ fn defs() -> Vec<ClientDef> {
             path: lmstudio_path,
             plugin_scan: None,
         },
+        ClientDef {
+            id: "jan",
+            name: "Jan",
+            format: Format::JsonMcpServers,
+            uses_connectors: false,
+            path: jan_path,
+            plugin_scan: None,
+        },
+        ClientDef {
+            id: "goose",
+            name: "Goose",
+            format: Format::YamlExtensions,
+            uses_connectors: false,
+            path: goose_path,
+            plugin_scan: None,
+        },
     ]
 }
 
@@ -475,7 +541,14 @@ fn classify(command: &Option<String>, url: &Option<String>, type_hint: Option<&s
 }
 
 fn json_server(name: &str, def: &serde_json::Value) -> McpServer {
-    let command = def.get("command").and_then(|c| c.as_str()).map(String::from);
+    // Treat an empty command string as no command: some clients (e.g. Jan's `exa`
+    // default) ship a remote/url server with `"command": ""`, which must not read
+    // as a broken stdio server.
+    let command = def
+        .get("command")
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     // Standard MCP uses `url`; Windsurf/Antigravity use `serverUrl` for remotes.
     let url = def
         .get("url")
@@ -717,6 +790,7 @@ fn read_client(def: &ClientDef) -> DetectedClient {
         Format::JsonServers => parse_json(&content, "servers"),
         Format::JsonContextServers => parse_json(&content, "context_servers"),
         Format::TomlMcpServers => parse_toml(&content),
+        Format::YamlExtensions => parse_yaml_extensions(&content),
     };
 
     match parsed {
@@ -789,8 +863,8 @@ fn entry_to_json(entry: &ServerEntry) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     if let Some(cmd) = &entry.command {
         map.insert("command".into(), serde_json::Value::String(cmd.clone()));
-    }
-    if !entry.args.is_empty() {
+        // A stdio server always carries `args`, even empty: some clients (e.g. Jan)
+        // reject an entry whose `args` key is missing ("failed to extract command args").
         map.insert(
             "args".into(),
             serde_json::Value::Array(
@@ -917,6 +991,130 @@ fn write_toml(path: &Path, servers: &[ServerEntry]) -> Result<(), String> {
     atomic_write(path, &out)
 }
 
+// --- Goose: YAML config.yaml with a top-level `extensions` map ---
+
+/// Parse Goose's `extensions` map into servers. Each entry carries a `type` tag
+/// plus `cmd`/`args`/`envs` (stdio) or `url` (http/sse), not the mcpServers shape.
+fn parse_yaml_extensions(content: &str) -> Result<Vec<McpServer>, String> {
+    if content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let value: serde_yaml::Value = serde_yaml::from_str(content).map_err(|e| e.to_string())?;
+    let exts = match value.get("extensions").and_then(|v| v.as_mapping()) {
+        Some(m) => m,
+        None => return Ok(Vec::new()),
+    };
+    let mut servers: Vec<McpServer> = exts
+        .iter()
+        .filter_map(|(k, def)| {
+            let name = k.as_str()?.to_string();
+            let def = def.as_mapping()?;
+            let str_of = |key: &str| def.get(key).and_then(|v| v.as_str()).map(String::from);
+            let command = str_of("cmd").filter(|s| !s.is_empty());
+            let url = str_of("url").filter(|s| !s.is_empty());
+            // Goose's `builtin`/`platform` extensions are internal to Goose, not
+            // proxiable external MCP servers, so skip them (they have no cmd/url).
+            if command.is_none() && url.is_none() {
+                return None;
+            }
+            let args = def
+                .get("args")
+                .and_then(|v| v.as_sequence())
+                .map(|seq| seq.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let env_keys = def
+                .get("envs")
+                .and_then(|v| v.as_mapping())
+                .map(|m| m.keys().filter_map(|k| k.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            Some(McpServer {
+                name,
+                transport: str_of("type").unwrap_or_else(|| "unknown".into()),
+                command,
+                args,
+                env_keys,
+                url,
+            })
+        })
+        .collect();
+    servers.sort_by_key(|s| s.name.to_lowercase());
+    Ok(servers)
+}
+
+/// Build a Goose stdio extension record for a server entry.
+fn entry_to_goose_yaml(entry: &ServerEntry) -> serde_yaml::Value {
+    let envs: serde_json::Map<String, serde_json::Value> = entry
+        .env
+        .iter()
+        .filter_map(|e| {
+            e.value
+                .as_ref()
+                .map(|v| (e.key.clone(), serde_json::Value::String(v.clone())))
+        })
+        .collect();
+    let v = serde_json::json!({
+        "enabled": true,
+        "type": "stdio",
+        "name": entry.name,
+        "cmd": entry.command.clone().unwrap_or_default(),
+        "args": entry.args,
+        "envs": envs,
+        "timeout": 300,
+    });
+    serde_yaml::to_value(&v).unwrap_or(serde_yaml::Value::Null)
+}
+
+/// Read an existing config.yaml we're about to modify. Like the JSON lenient path,
+/// an unparseable non-empty file is an ERROR, never replaced - config.yaml also
+/// holds the user's model settings and other extensions, so we must not wipe it.
+fn read_existing_yaml(path: &Path) -> Result<serde_yaml::Value, String> {
+    if !path.exists() {
+        return Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    }
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    if content.trim().is_empty() {
+        return Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    }
+    serde_yaml::from_str(&content)
+        .map_err(|e| format!("Could not parse the existing config.yaml ({e}); leaving it untouched."))
+}
+
+fn yaml_extensions_mut(root: &mut serde_yaml::Value) -> &mut serde_yaml::Mapping {
+    if !root.is_mapping() {
+        *root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    let map = root.as_mapping_mut().unwrap();
+    let key = serde_yaml::Value::String("extensions".into());
+    if !map.get(&key).map(|v| v.is_mapping()).unwrap_or(false) {
+        map.insert(key.clone(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    }
+    map.get_mut(&key).unwrap().as_mapping_mut().unwrap()
+}
+
+fn write_yaml_extensions(path: &Path, servers: &[ServerEntry]) -> Result<(), String> {
+    let mut root = read_existing_yaml(path)?;
+    let exts = yaml_extensions_mut(&mut root);
+    exts.clear();
+    for s in servers {
+        exts.insert(serde_yaml::Value::String(s.name.clone()), entry_to_goose_yaml(s));
+    }
+    let out = serde_yaml::to_string(&root).map_err(|e| e.to_string())?;
+    atomic_write(path, &out)
+}
+
+fn edit_yaml_gateway(path: &Path, install: bool, profile: Option<&str>) -> Result<(), String> {
+    let mut root = read_existing_yaml(path)?;
+    let exts = yaml_extensions_mut(&mut root);
+    let key = serde_yaml::Value::String(GATEWAY_ENTRY_NAME.into());
+    if install {
+        exts.insert(key, entry_to_goose_yaml(&gateway_entry(profile)?));
+    } else {
+        exts.remove(&key);
+    }
+    let out = serde_yaml::to_string(&root).map_err(|e| e.to_string())?;
+    atomic_write(path, &out)
+}
+
 /// Write a server set into a client's config, backing up the existing file first
 /// and preserving any unrelated top-level keys.
 pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOutcome, String> {
@@ -928,6 +1126,7 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
         Format::JsonServers => write_json(&path, "servers", servers, false)?,
         Format::JsonContextServers => write_json(&path, "context_servers", servers, true)?,
         Format::TomlMcpServers => write_toml(&path, servers)?,
+        Format::YamlExtensions => write_yaml_extensions(&path, servers)?,
     }
     Ok(WriteOutcome {
         path: path.display().to_string(),
@@ -1115,6 +1314,7 @@ fn install_or_remove(
             edit_json_gateway(&path, "context_servers", install, profile, true)?
         }
         Format::TomlMcpServers => edit_toml_gateway(&path, install, profile)?,
+        Format::YamlExtensions => edit_yaml_gateway(&path, install, profile)?,
     }
     Ok(WriteOutcome {
         path: path.display().to_string(),
@@ -1363,7 +1563,7 @@ mod tests {
         // Warp, Amazon Q, Kiro, and LM Studio all use the standard mcpServers JSON
         // shape, so a ClientDef + path is all they need. Lock in their registration,
         // format, and that their config paths resolve on this OS.
-        for id in ["warp", "amazon-q", "kiro", "lm-studio"] {
+        for id in ["warp", "amazon-q", "kiro", "lm-studio", "jan"] {
             let d = defs()
                 .into_iter()
                 .find(|d| d.id == id)
@@ -1374,5 +1574,62 @@ mod tests {
             );
             assert!((d.path)().is_some(), "{id} path should resolve");
         }
+    }
+
+    #[test]
+    fn goose_yaml_round_trip_preserves_config() {
+        let path = temp_path("goose.yaml");
+        // A real config.yaml has model settings AND extensions; touch neither but ours.
+        std::fs::write(
+            &path,
+            "GOOSE_MODEL: gpt-4o\nextensions:\n  fetch:\n    enabled: true\n    type: stdio\n    name: fetch\n    cmd: uvx\n    args:\n      - mcp-server-fetch\n    envs: {}\n    timeout: 300\n",
+        )
+        .unwrap();
+
+        // Parse reads the existing extension as a stdio server.
+        let parsed = parse_yaml_extensions(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "fetch");
+        assert_eq!(parsed[0].command.as_deref(), Some("uvx"));
+        assert_eq!(parsed[0].transport, "stdio");
+
+        // Installing the gateway preserves the model key and the existing extension.
+        edit_yaml_gateway(&path, true, None).unwrap();
+        let v: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v.get("GOOSE_MODEL").and_then(|x| x.as_str()), Some("gpt-4o"));
+        let exts = v.get("extensions").and_then(|x| x.as_mapping()).unwrap();
+        assert!(exts.get("fetch").is_some());
+        let conduit = exts.get("conduit").and_then(|x| x.as_mapping()).unwrap();
+        assert_eq!(conduit.get("type").and_then(|x| x.as_str()), Some("stdio"));
+        assert_eq!(conduit.get("enabled").and_then(|x| x.as_bool()), Some(true));
+        assert!(conduit.get("cmd").and_then(|x| x.as_str()).is_some());
+
+        // Uninstall removes only conduit.
+        edit_yaml_gateway(&path, false, None).unwrap();
+        let after: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let exts2 = after.get("extensions").and_then(|x| x.as_mapping()).unwrap();
+        assert!(exts2.get("conduit").is_none());
+        assert!(exts2.get("fetch").is_some());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn goose_yaml_edit_never_wipes_unparseable() {
+        let path = temp_path("goose-bad.yaml");
+        let garbage = "key: value\n  - [unbalanced flow sequence\n:::not valid";
+        std::fs::write(&path, garbage).unwrap();
+        // A parse failure must error, never replace config.yaml (it holds model config).
+        assert!(edit_yaml_gateway(&path, true, None).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn goose_is_registered_as_yaml_extensions() {
+        let d = defs().into_iter().find(|d| d.id == "goose").unwrap();
+        assert!(matches!(d.format, Format::YamlExtensions));
+        assert!((d.path)().is_some());
     }
 }

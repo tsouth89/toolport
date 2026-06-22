@@ -77,9 +77,9 @@ live, so toggles and new credentials take effect without restarting the client.
 ## Supported clients
 
 Cursor, Claude Desktop, Claude Code, Codex, Google Antigravity, VS Code,
-Windsurf, Gemini CLI, Cline, Roo Code, Warp, Amazon Q, Kiro, Zed, and LM Studio.
-Conduit detects each one, installs the gateway with one click, and can import a
-client's existing servers.
+Windsurf, Gemini CLI, Cline, Roo Code, Warp, Amazon Q, Kiro, Zed, LM Studio, Jan,
+and Goose. Conduit detects each one, installs the gateway with one click, and can
+import a client's existing servers.
 
 ## Configuration
 
