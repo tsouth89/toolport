@@ -49,3 +49,11 @@ dist-ssr
 
 # Raw screen recordings (keep local, not in the repo)
 /docs/Recording*.mp4
+
+# One-off marketing/demo assets (e.g. per-post videos + their caption scripts),
+# kept local; the README's demo.mp4/.gif/.srt stay tracked.
+/docs/conduit-llmstudio-demo*.mp4
+/captions.srt
+
+# Stray test artifacts (e.g. share/export test exports)
+/src-tauri/test.json
