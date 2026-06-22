@@ -88,7 +88,16 @@ fn call_tool_def() -> Value {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Exact tool name from conduit_search_tools." },
-                "arguments": { "type": "object", "description": "Arguments for the tool, per its input schema." }
+                // additionalProperties:true is REQUIRED: clients that constrain
+                // generation to the JSON schema (e.g. local runtimes like Jan) would
+                // otherwise only ever emit an empty `{}` here - an object with no
+                // declared properties and no additionalProperties permits no keys - so
+                // a required param like Vercel's teamId could never be passed.
+                "arguments": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Arguments for the tool, per its input schema."
+                }
             },
             "required": ["name"],
             "additionalProperties": false
@@ -1325,5 +1334,18 @@ mod tests {
         // Empty nested object with no siblings stays empty.
         let (_, a) = unwrap_call_tool(&json!({ "name": "x__list", "arguments": {} }));
         assert_eq!(a, json!({}));
+    }
+
+    #[test]
+    fn call_tool_arguments_allow_arbitrary_properties() {
+        // Grammar-constrained clients (e.g. Jan) can only emit keys the schema permits.
+        // If `arguments` declared no properties and no additionalProperties, the model
+        // could only ever produce `{}`, so a required param could never be passed.
+        let def = call_tool_def();
+        assert_eq!(
+            def["inputSchema"]["properties"]["arguments"]["additionalProperties"],
+            json!(true),
+            "conduit_call_tool's arguments must accept arbitrary properties"
+        );
     }
 }
