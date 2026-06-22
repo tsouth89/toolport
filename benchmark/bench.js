@@ -128,6 +128,20 @@ function toOpenAITools(mcpTools) {
   }));
 }
 
+// The per-request tool-definition overhead: how many tokens EVERY llm call carries
+// just to describe the available tools. This is the core of the claim and it doesn't
+// need the agent to complete. One trivial request: report prompt_tokens if it fits,
+// or the n_keep the model reports when the tool list overflows its context.
+async function measureToolOverhead(tools) {
+  try {
+    const res = await chat([{ role: "user", content: "hi" }], tools);
+    return { tokens: res.usage?.prompt_tokens ?? null, overflow: false };
+  } catch (e) {
+    const m = /n_keep:\s*(\d+)/.exec(e.message);
+    return { tokens: m ? Number(m[1]) : null, overflow: true };
+  }
+}
+
 async function chat(messages, tools) {
   const res = await fetch(LLM_URL, {
     method: "POST",
@@ -180,7 +194,11 @@ async function benchMode(discovery) {
   await gw.init();
   const mcpTools = await gw.tools();
   const oaiTools = toOpenAITools(mcpTools);
-  console.log(`\n[${discovery}] gateway exposes ${mcpTools.length} tools`);
+  const overhead = await measureToolOverhead(oaiTools);
+  const ov = overhead.tokens != null
+    ? `${overhead.tokens} tok/request${overhead.overflow ? " (OVERFLOWS context)" : ""}`
+    : "unknown";
+  console.log(`\n[${discovery}] ${mcpTools.length} tools, tool-def overhead: ${ov}`);
   const rows = [];
   for (const task of TASKS) {
     const r = await runTask(gw, oaiTools, task.prompt);
@@ -189,7 +207,7 @@ async function benchMode(discovery) {
     console.log(`  ${task.name.padEnd(16)} ${String(r.tokens).padStart(7)} tok  ${String(r.calls).padStart(2)} calls  ${status}`);
   }
   gw.stop();
-  return { toolCount: mcpTools.length, rows };
+  return { toolCount: mcpTools.length, overhead, rows };
 }
 
 function totals(modeRows) {
@@ -222,14 +240,25 @@ function totals(modeRows) {
   const lazy = await benchMode("lazy");
 
   const tf = totals(flat.rows), tl = totals(lazy.rows);
-  const pct = tf.tokens ? Math.round((1 - tl.tokens / tf.tokens) * 100) : 0;
+  const fmtOv = (o) => o.tokens != null
+    ? `${o.tokens}${o.overflow ? " (overflows context)" : ""}`
+    : "unknown";
+  const ovPct = flat.overhead.tokens && lazy.overhead.tokens
+    ? Math.round((1 - lazy.overhead.tokens / flat.overhead.tokens) * 100)
+    : null;
 
   console.log("\n=== summary ===");
-  console.log(`tools exposed:   flat ${flat.toolCount}   lazy ${lazy.toolCount}`);
-  console.log(`total tokens:    flat ${tf.tokens}   lazy ${tl.tokens}   (${pct >= 0 ? "-" : "+"}${Math.abs(pct)}%)`);
-  console.log(`total toolcalls: flat ${tf.calls}   lazy ${tl.calls}   (lazy trades extra search calls for fewer tokens)`);
-  console.log(`tasks completed: flat ${tf.done}/${TASKS.length}   lazy ${tl.done}/${TASKS.length}`);
-  console.log("\nNote: token counts come from your LLM's usage field; success is whether the");
-  console.log("agent produced a final answer (eyeball the answers for correctness). Small n,");
-  console.log("run it a few times - treat the direction as the signal, not the exact number.");
+  console.log(`tools exposed:        flat ${flat.toolCount}   lazy ${lazy.toolCount}`);
+  console.log(`tool-def overhead:    flat ${fmtOv(flat.overhead)}   lazy ${fmtOv(lazy.overhead)} tok/request` +
+    (ovPct != null ? `   (${ovPct}% less, EVERY request)` : ""));
+  console.log(`tasks completed:      flat ${tf.done}/${TASKS.length}   lazy ${tl.done}/${TASKS.length}`);
+  if (tf.done > 0) {
+    const pct = tf.tokens ? Math.round((1 - tl.tokens / tf.tokens) * 100) : 0;
+    console.log(`total tokens (done):  flat ${tf.tokens}   lazy ${tl.tokens}   (${pct >= 0 ? "-" : "+"}${Math.abs(pct)}%)`);
+  } else {
+    console.log(`lazy total tokens:    ${tl.tokens} across all tasks (flat couldn't run, its tool list overflowed the model)`);
+  }
+  console.log("\nThe headline metric is tool-def overhead: the tokens EVERY request pays just to");
+  console.log("list tools. Flat pays it on every call; lazy advertises 3 meta-tools. Small n -");
+  console.log("run a few times and eyeball the answers; treat the direction as the signal.");
 })();
