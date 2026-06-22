@@ -5,6 +5,29 @@ All notable changes to Conduit are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-06-22
+
+### Added
+- **Two more clients: Jan and Goose** (17 supported in total). Jan uses the standard
+  `mcpServers` JSON; Goose is the first YAML client, its MCP servers live under a
+  top-level `extensions:` map in `config.yaml`. Both detect, connect with one click,
+  and import existing servers, with the same no-wipe safeguard as Zed (config.yaml
+  also holds Goose's model settings and built-in extensions).
+
+### Fixed
+- **Required tool parameters now work from grammar-constrained local clients.** Some
+  local runtimes (e.g. Jan) force the model's output to match the tool schema, and
+  `conduit_call_tool`'s `arguments` declared no properties, so the model could only
+  ever emit an empty `{}`, making a required param (e.g. Vercel's `teamId`) impossible
+  to pass. `arguments` now accepts arbitrary properties, and the gateway also tolerates
+  models that put params at the top level instead of nesting them under `arguments`.
+- A stdio server entry now always writes `args` (even empty); some clients reject an
+  entry whose `args` key is missing. An empty `command` string is treated as no command,
+  so a remote/url server shipped with `"command": ""` isn't mis-read as stdio.
+- The sidebar now fills the full window height instead of stopping at its content.
+- Clearer messages when the onboarding starter list can't load (offline) and when a
+  Linux box has no system keyring.
+
 ## [0.3.8] - 2026-06-21
 
 ### Improved
