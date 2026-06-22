@@ -105,13 +105,25 @@ class Gateway {
   stop() { try { this.proc.kill(); } catch {} }
 }
 
+// OpenAI function-calling (and strict runtimes like LM Studio) require `parameters`
+// to be an object schema WITH a `properties` field, even for zero-arg tools. MCP
+// tools legitimately ship a bare {"type":"object"}, so normalize before sending.
+function normalizeParams(schema) {
+  const s = schema && typeof schema === "object" && !Array.isArray(schema) ? { ...schema } : {};
+  if (!s.type) s.type = "object";
+  if (s.type === "object" && (s.properties == null || typeof s.properties !== "object")) {
+    s.properties = {};
+  }
+  return s;
+}
+
 function toOpenAITools(mcpTools) {
   return mcpTools.map((t) => ({
     type: "function",
     function: {
       name: t.name,
       description: t.description || "",
-      parameters: t.inputSchema || { type: "object" },
+      parameters: normalizeParams(t.inputSchema),
     },
   }));
 }
