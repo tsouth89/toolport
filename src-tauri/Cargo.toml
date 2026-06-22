@@ -1,7 +1,7 @@
 [package]
 name = "conduit"
 version = "0.3.10"
-description = "Local MCP gateway and manager for AI coding tools"
+description = "Local MCP gateway: 3 meta-tools instead of hundreds, ~90% fewer tool tokens per request"
 authors = ["South Forge AI"]
 edition = "2021"
 default-run = "conduit"

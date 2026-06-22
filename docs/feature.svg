@@ -65,6 +65,6 @@
 
   <!-- tagline -->
   <line x1="56" y1="444" x2="1144" y2="444" stroke="rgba(255,255,255,0.08)"/>
-  <text x="600" y="498" text-anchor="middle" font-size="28" font-weight="600" fill="#f5f5f7">One local gateway for every MCP server.</text>
-  <text x="600" y="532" text-anchor="middle" font-size="16" fill="#a1a1aa">Set up once. Every AI tool shares it. Keys stay in your OS keychain.</text>
+  <text x="600" y="498" text-anchor="middle" font-size="28" font-weight="600" fill="#f5f5f7">Three tools in context, not hundreds.</text>
+  <text x="600" y="532" text-anchor="middle" font-size="16" fill="#a1a1aa">Measured: 97% less tool overhead per request, ~90% fewer tokens, same results.</text>
 </svg>
