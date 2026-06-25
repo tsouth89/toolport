@@ -66,11 +66,9 @@ fn rotate_if_large(path: &Path) {
     }
     if let Ok(content) = std::fs::read_to_string(path) {
         let trimmed = trimmed_tail(&content, KEEP_LINES);
-        // Write to a temp file then rename, so a crash mid-write can't corrupt the log.
-        let tmp = PathBuf::from(format!("{}.tmp", path.display()));
-        if std::fs::write(&tmp, &trimmed).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+        // Atomic + unique temp: every client's gateway shares this file, so a
+        // bespoke fixed temp name could let two rotations collide.
+        let _ = crate::registry::atomic_write(path, &trimmed);
     }
 }
 

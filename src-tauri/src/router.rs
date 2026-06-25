@@ -512,4 +512,40 @@ mod tests {
         let err = router.route_call("db__drop_table", json!({})).unwrap_err();
         assert!(err.contains("destructive"), "unexpected: {err}");
     }
+
+    #[test]
+    fn refresh_keeps_collision_suffixes_stable() {
+        // Two tools that sanitize to the same exposed name collide; the second
+        // gets a `_2` suffix. After a refresh (re-query + reindex) the order and
+        // suffixes must not shuffle, or a client's tool names would change
+        // mid-session and break in-flight calls.
+        struct DupMock;
+        impl Transport for DupMock {
+            fn request(&mut self, method: &str, _params: Value) -> Result<Value, String> {
+                match method {
+                    "initialize" => Ok(json!({ "protocolVersion": "2025-06-18" })),
+                    "tools/list" => Ok(json!({ "tools": [
+                        { "name": "a-b", "description": "one" },
+                        { "name": "a_b", "description": "two" }
+                    ] })),
+                    other => Err(format!("unexpected {other}")),
+                }
+            }
+            fn notify(&mut self, _m: &str, _p: Value) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let names = |r: &Router| -> Vec<String> {
+            r.aggregated_tools()
+                .iter()
+                .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        };
+        let mut router = Router::new();
+        router.add(DownstreamServer::connect("s".to_string(), Box::new(DupMock)).unwrap());
+        let before = names(&router);
+        assert_eq!(before, vec!["s__a_b", "s__a_b_2"]);
+        router.refresh_tools();
+        assert_eq!(names(&router), before, "refresh shuffled the collision suffixes");
+    }
 }

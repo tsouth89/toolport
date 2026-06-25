@@ -37,11 +37,7 @@ import {
 
 /** A tool is destructive if it carries the MCP `destructiveHint` annotation. */
 function isDestructive(tool: McpTool): boolean {
-  const t = tool as unknown as {
-    annotations?: { destructiveHint?: boolean };
-    destructiveHint?: boolean;
-  };
-  return t.annotations?.destructiveHint === true || t.destructiveHint === true;
+  return tool.annotations?.destructiveHint === true || tool.destructiveHint === true;
 }
 
 /** First declared type of a JSON-schema property (schemas may list several). */

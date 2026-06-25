@@ -388,9 +388,9 @@ fn search_catalog(
 /// Project selected tools to search results, bounding the total size of their
 /// (sometimes enormous) input schemas. Lazy discovery exists to keep the agent's
 /// context small, so one server's giant schemas must not blow it up: the top
-/// result always carries its full schema; past a byte budget the rest return name
-/// + description only, flagged `schemaOmitted` so the agent can fetch a specific
-/// tool's full schema by searching its exact name (or scoping with `server`).
+/// result always carries its full schema; past a byte budget the rest return the
+/// name and a short description only, flagged `schemaOmitted` so the agent can
+/// fetch a tool's full schema by searching its exact name (or scoping with `server`).
 fn project_budgeted(tools: &[&Value]) -> Vec<Value> {
     // Only the top result carries a full schema and a longer description - it's the
     // one we tell the model to call. Every other result is a compact menu entry:
@@ -490,10 +490,10 @@ fn enabled_summary(reg: &Registry, cached: &[Value], profile: Option<&str>) -> S
 /// Per-session guard against search-thrash. Weak local models (e.g. small-active
 /// MoEs) will call conduit_search_tools many times in a row for the SAME need
 /// instead of committing, which is slow and burns context. We escalate only on
-/// that specific pattern - the same top tool surfacing across consecutive searches
-/// - not on a raw search count. A capable model that searches once and calls, or
-/// searches several DIFFERENT things (exploring), or narrows broad -> server ->
-/// exact-name (each a different/justified result), never trips this. So it fixes
+/// that specific pattern (the same top tool surfacing across consecutive searches,
+/// not on a raw search count). A capable model that searches once and calls, or
+/// searches several DIFFERENT things (exploring), or narrows from broad to server
+/// to exact-name (each a different, justified result), never trips this. So it fixes
 /// the weak-model loop without ever penalizing Claude, Cursor, or any model doing
 /// real multi-step work. Any non-search action resets it. Per client connection.
 #[derive(Default)]

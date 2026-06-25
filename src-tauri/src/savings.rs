@@ -94,11 +94,9 @@ fn rotate_if_large(path: &Path) {
     out.push('\n');
     out.push_str(&lines[split..].join("\n"));
     out.push('\n');
-    // temp + rename so a crash mid-write can't corrupt the log.
-    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
-    if std::fs::write(&tmp, &out).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
-    }
+    // Atomic + unique temp: every client's gateway shares this file, so a
+    // bespoke fixed temp name could let two rotations collide.
+    let _ = crate::registry::atomic_write(path, &out);
 }
 
 /// Fold entries into a single carry record that the reader sums like any other

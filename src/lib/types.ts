@@ -62,6 +62,10 @@ export interface McpTool {
     properties?: Record<string, JsonSchemaProp>;
     required?: string[];
   };
+  /** MCP tool annotations. `destructiveHint` marks a tool that deletes/writes;
+   * some servers also emit it at the top level, so both are tolerated. */
+  annotations?: { destructiveHint?: boolean; [k: string]: unknown };
+  destructiveHint?: boolean;
 }
 
 /** The subset of JSON Schema the playground form renders per argument. */
