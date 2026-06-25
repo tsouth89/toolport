@@ -47,8 +47,41 @@ Flat mode re-sends all 62 tool schemas on **every** LLM call, so a 2-call task p
 ~24K overhead twice before counting any real work. Lazy mode pays ~660 tokens of meta-tool
 overhead once and searches for what it needs. The more calls a task takes, the wider the gap.
 
-For scale: at ~380 tokens/tool, a real 15-server setup (~450 tools) is **~170,000 tokens of
-tool definitions** , more than most local context windows can hold at all. Lazy stays at 3 tools.
+## Measured on a real 14-server catalog
+
+The 62-tool test above is deliberately small. Point [`benchmark/token-cost.mjs`](benchmark/token-cost.mjs)
+at a real Conduit catalog (no model needed, it just measures the tool definitions)
+and the gap widens fast. On a live 14-server setup of **415 tools**, the definitions
+an agent loads on **every request** measure:
+
+| | Per request |
+|---|---|
+| Without Conduit (all 415 tools) | **164,880 tokens** |
+| With Conduit (3 meta-tools, flat) | **660 tokens** |
+| Reduction | **99.6%** |
+
+The cost is dominated by a few large servers:
+
+| Server | Tools | Definition tokens |
+|---|---|---|
+| RevenueCat | 93 | 42,370 |
+| GitHub | 44 | 27,913 |
+| Resend | 83 | 26,045 |
+| Cloudflare (observability) | 8 | 5,948 |
+| Stripe | 11 | 5,214 |
+| Vercel | 20 | 5,029 |
+| Supabase | 29 | 4,897 |
+| (5 more) | ... | ... |
+
+At ~165k tokens of definitions *per request*, that catalog barely fits in most
+models' context alongside real work. At 200 agent requests/day it's roughly
+**$3,000/month** in input tokens at Claude Sonnet prices (about $5,000 at Opus),
+spent entirely on re-sending tool schemas. Conduit's meta-tools stay flat at 3 no
+matter how many servers you add, which is why the reduction *grows* with your setup
+(90% at 62 tools, 99.6% at 415).
+
+The measured average here is ~397 tokens per tool, consistent with the ~387 the
+public [calculator](https://conduitmcp.app/calculator) uses.
 
 ## Honest caveats
 
