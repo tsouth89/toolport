@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, ChevronRight, ScrollText, Sparkles, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronRight, ScrollText, Share2, Sparkles, XCircle } from "lucide-react";
+import { toast } from "sonner";
 import { getAuditLog, getAuditStats, getSavingsSummary } from "@/lib/api";
 import type { AuditEntry, AuditStats, SavingsSummary, ServerStat } from "@/lib/types";
 
@@ -16,8 +17,28 @@ function fmtTokens(n: number): string {
   return `${n}`;
 }
 
-/** Hero stat: tool-definition tokens lazy discovery kept out of agent context. */
+/** Models for the dollar estimate, input-token list prices ($/1M). Matches the
+ *  public calculator at conduitmcp.app/calculator. */
+const SAVINGS_MODELS = [
+  { label: "Claude Sonnet", price: 3 },
+  { label: "Claude Opus", price: 5 },
+  { label: "GPT-5.4", price: 2.5 },
+  { label: "Gemini 2.5 Pro", price: 1.25 },
+  { label: "Gemini 2.5 Flash", price: 0.3 },
+];
+
+/** Dollar value of saved input tokens, scaled to the number's size. */
+function fmtDollars(n: number): string {
+  if (n >= 1000) return `$${Math.round(n).toLocaleString()}`;
+  if (n >= 10) return `$${n.toFixed(0)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+/** Hero stat: tool-definition tokens (and dollars) lazy discovery kept out of
+ *  agent context, with a one-click share so users can flex their savings. */
 function SavingsBanner({ savings }: { savings: SavingsSummary }) {
+  const [price, setPrice] = useState(3);
+  const dollars = (savings.tokensSaved / 1_000_000) * price;
   const since =
     savings.sinceTs > 0
       ? new Date(savings.sinceTs).toLocaleDateString(undefined, {
@@ -32,19 +53,58 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
       : null,
     since ? `since ${since}` : null,
   ].filter(Boolean);
+
+  const share = async () => {
+    const text =
+      `Conduit has saved me ~${fmtTokens(savings.tokensSaved)} tokens (~${fmtDollars(dollars)}) of MCP ` +
+      `tool definitions so far. One local gateway for all my MCP servers, ~90% fewer tokens: conduitmcp.app`;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Savings copied, paste it anywhere");
+    } catch {
+      toast.error("Couldn't copy to clipboard");
+    }
+  };
+
   return (
     <div className="mb-6 rounded-lg border border-emerald-500/30 bg-emerald-500/[0.06] p-4">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <div className="flex items-center gap-2">
         <Sparkles className="size-4 text-emerald-400" />
-        <span className="text-3xl font-semibold tabular-nums text-emerald-400">
-          ≈ {fmtTokens(savings.tokensSaved)}
-        </span>
-        <span className="text-sm text-muted-foreground">
-          tool-definition tokens kept out of your agent&apos;s context
+        <span className="text-sm font-medium text-muted-foreground">
+          What lazy discovery has saved you
         </span>
       </div>
-      <p className="mt-1.5 text-xs text-muted-foreground">
-        {details.join(" · ")}. Lazy discovery, estimated.
+      <div className="mt-2 flex flex-wrap items-end gap-x-6 gap-y-1">
+        <span className="text-3xl font-semibold tabular-nums text-emerald-400">
+          ≈ {fmtTokens(savings.tokensSaved)}{" "}
+          <span className="text-base font-normal text-muted-foreground">tokens</span>
+        </span>
+        <span className="text-3xl font-semibold tabular-nums text-emerald-400">
+          ≈ {fmtDollars(dollars)}
+        </span>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <select
+          value={price}
+          onChange={(e) => setPrice(Number(e.target.value))}
+          aria-label="Model for the dollar estimate"
+          className="rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs text-muted-foreground"
+        >
+          {SAVINGS_MODELS.map((m) => (
+            <option key={m.label} value={m.price}>
+              at {m.label} (${m.price}/1M input)
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={share}
+          className="inline-flex items-center gap-1.5 rounded-md border border-white/10 px-2.5 py-1 text-xs text-muted-foreground transition hover:text-foreground"
+        >
+          <Share2 className="size-3.5" /> Share
+        </button>
+      </div>
+      <p className="mt-2.5 text-xs text-muted-foreground">
+        {details.join(" · ")}. Estimated.
       </p>
     </div>
   );
