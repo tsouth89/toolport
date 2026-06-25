@@ -173,6 +173,36 @@ impl Router {
         self.tools.clone()
     }
 
+    /// Re-query every live server's tool list (a downstream announced a
+    /// `tools/list_changed`) and rebuild the exposed aggregation in place. Unlike
+    /// a full rebuild this keeps the existing connections, so a runtime or
+    /// session-scoped tool change isn't lost to a freshly spawned process that
+    /// never saw it.
+    pub fn refresh_tools(&mut self) {
+        for server in &mut self.servers {
+            server.refresh_tools();
+        }
+        self.reindex();
+    }
+
+    /// Re-derive the exposed tool/resource/prompt aggregation from the current
+    /// servers' (possibly refreshed) lists. Order is preserved, so exposed names
+    /// and their `_2` collision suffixes stay stable across a refresh.
+    fn reindex(&mut self) {
+        let servers = std::mem::take(&mut self.servers);
+        self.tools.clear();
+        self.routes.clear();
+        self.seen.clear();
+        self.blocked.clear();
+        self.resources.clear();
+        self.resource_routes.clear();
+        self.prompts.clear();
+        self.prompt_routes.clear();
+        for server in servers {
+            self.add(server);
+        }
+    }
+
     /// Forward an exposed tool call to its owning downstream server, using that
     /// server's original tool name.
     pub fn route_call(&mut self, exposed_name: &str, arguments: Value) -> Result<Value, String> {

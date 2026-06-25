@@ -43,7 +43,7 @@ pub fn estimate_tokens(tools: &[Value]) -> u64 {
         .filter_map(|t| serde_json::to_string(t).ok())
         .map(|s| s.len())
         .sum();
-    ((chars + 3) / 4) as u64
+    chars.div_ceil(4) as u64
 }
 
 /// Record one lazy serve: the full catalog's tool-def tokens minus the meta-tools'.
@@ -176,7 +176,7 @@ mod tests {
     fn carry_line_preserves_totals_after_rotation() {
         // A folded carry line plus fresh detail lines aggregates the same as if
         // nothing had been trimmed.
-        let detail = vec![
+        let detail = [
             json!({ "ts": 10, "saved": 100, "tools": 40 }),
             json!({ "ts": 20, "saved": 100, "tools": 90 }),
             json!({ "ts": 30, "saved": 100, "tools": 50 }),

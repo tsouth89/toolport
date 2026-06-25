@@ -9,7 +9,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -129,6 +130,47 @@ pub trait Transport: Send {
     /// connect handshake fast. Default no-op: transports with their own fixed
     /// request timeout (e.g. HTTP) ignore it.
     fn set_read_timeout(&mut self, _timeout: Duration) {}
+    /// Start reacting to the server's own `notifications/tools/list_changed`.
+    /// Called once the connect handshake is done, so a server that announces its
+    /// tools during startup doesn't trigger a needless rebuild. Default no-op:
+    /// transports without a live notification stream ignore it.
+    fn arm_tools_watch(&mut self) {}
+}
+
+/// True if `line` is a downstream `notifications/tools/list_changed` message: a
+/// JSON-RPC notification (a `method` of that name, no `id`). Lets the stdout drain
+/// spot when a server changes its own tool set mid-session.
+fn is_list_changed(line: &str) -> bool {
+    // Cheap gate: skip the JSON parse for the overwhelming majority of lines
+    // (ordinary responses to our requests) that can't be this notification.
+    if !line.contains("tools/list_changed") {
+        return false;
+    }
+    serde_json::from_str::<Value>(line.trim())
+        .ok()
+        .and_then(|v| {
+            v.get("method")
+                .and_then(|m| m.as_str())
+                .map(|m| m == "notifications/tools/list_changed")
+        })
+        .unwrap_or(false)
+}
+
+/// Forward one drained stdout line to the request loop, first flagging `dirty` if
+/// the server (once `armed`) announced a tool-list change. Returns false when the
+/// receiver is gone (transport closed) so the drain loop can stop.
+fn forward_line(
+    line: String,
+    tx: &Sender<String>,
+    dirty: &Option<Arc<AtomicBool>>,
+    armed: &Arc<AtomicBool>,
+) -> bool {
+    if let Some(flag) = dirty {
+        if armed.load(Ordering::SeqCst) && is_list_changed(&line) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+    tx.send(line).is_ok()
 }
 
 /// Talks to a downstream MCP server over its stdio (a spawned child process).
@@ -146,10 +188,39 @@ pub struct StdioTransport {
     /// How long a single request waits for its response. Lowered during the
     /// connect handshake, then restored for (potentially slow) live tool calls.
     read_timeout: Duration,
+    /// Gate shared with the stdout drain: the drain only flags a `dirty` signal
+    /// once this is set, so tool-list changes announced during startup are
+    /// ignored. Flipped on by `arm_tools_watch` after the handshake.
+    armed: Arc<AtomicBool>,
 }
 
 impl StdioTransport {
+    /// Spawn a downstream server without watching for its tool-list changes.
+    /// Used by one-shot callers (the app's health probe and playground) that
+    /// don't keep the connection around to react to live notifications.
     pub fn spawn(command: &str, args: &[String], env: &[(String, String)]) -> Result<Self, String> {
+        Self::spawn_inner(command, args, env, None)
+    }
+
+    /// Like [`spawn`], but flips `dirty` to true whenever the downstream server
+    /// emits `notifications/tools/list_changed` (after `arm_tools_watch`). The
+    /// gateway watches that flag and rebuilds, so a server changing its own tool
+    /// set mid-session reaches the client instead of being silently dropped.
+    pub fn spawn_watched(
+        command: &str,
+        args: &[String],
+        env: &[(String, String)],
+        dirty: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        Self::spawn_inner(command, args, env, Some(dirty))
+    }
+
+    fn spawn_inner(
+        command: &str,
+        args: &[String],
+        env: &[(String, String)],
+        dirty: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, String> {
         let resolved = resolve_command(command);
         let mut cmd = Command::new(&resolved);
         cmd.args(args)
@@ -177,8 +248,11 @@ impl StdioTransport {
 
         // Drain stdout line-by-line on a dedicated thread; the request loop pulls
         // from the channel with a timeout. The thread ends on EOF/read error or
-        // when the receiver is dropped (transport closed).
+        // when the receiver is dropped (transport closed). `forward_line` also
+        // flags `dirty` when an armed server announces a tool-list change.
         let (tx, rx) = std::sync::mpsc::channel();
+        let armed = Arc::new(AtomicBool::new(false));
+        let drain_armed = Arc::clone(&armed);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
@@ -186,7 +260,7 @@ impl StdioTransport {
                 match reader.read_line(&mut line) {
                     Ok(0) => break,
                     Ok(_) => {
-                        if tx.send(line).is_err() {
+                        if !forward_line(line, &tx, &dirty, &drain_armed) {
                             break;
                         }
                     }
@@ -225,6 +299,7 @@ impl StdioTransport {
             stderr: stderr_buf,
             next_id: 1,
             read_timeout: STDIO_READ_TIMEOUT,
+            armed,
         })
     }
 
@@ -304,6 +379,10 @@ impl Transport for StdioTransport {
 
     fn set_read_timeout(&mut self, timeout: Duration) {
         self.read_timeout = timeout;
+    }
+
+    fn arm_tools_watch(&mut self) {
+        self.armed.store(true, Ordering::SeqCst);
     }
 }
 
@@ -497,6 +576,9 @@ impl DownstreamServer {
 
         // Restore the longer timeout: actual tool calls can legitimately be slow.
         transport.set_read_timeout(STDIO_READ_TIMEOUT);
+        // Handshake done: from here on, react to the server's own tool-list
+        // changes (ignored until now so a startup announcement is a no-op).
+        transport.arm_tools_watch();
 
         Ok(DownstreamServer {
             id,
@@ -507,6 +589,17 @@ impl DownstreamServer {
             caps_resources,
             caps_prompts,
         })
+    }
+
+    /// Re-fetch the server's tool list on the existing connection, after it
+    /// announced a `tools/list_changed`. Bounds the wait like the handshake so a
+    /// hung server can't stall the refresh; on error the previous list is kept.
+    pub fn refresh_tools(&mut self) {
+        self.transport.set_read_timeout(STDIO_CONNECT_TIMEOUT);
+        if let Ok(result) = self.transport.request("tools/list", json!({})) {
+            self.tools = extract_array(&result, "tools");
+        }
+        self.transport.set_read_timeout(STDIO_READ_TIMEOUT);
     }
 
     /// Fetch the resources and prompts the server advertised. Best-effort: an
@@ -592,5 +685,59 @@ mod tests {
         assert!(ids_match(Some(&json!(1)), None));
         // Wanted an id but the message has none -> no match.
         assert!(!ids_match(None, Some(&json!(1))));
+    }
+
+    #[test]
+    fn recognizes_a_tools_list_changed_notification() {
+        use super::is_list_changed;
+        assert!(is_list_changed(
+            r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#
+        ));
+        assert!(is_list_changed(
+            "  {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n"
+        ));
+        // A response to our own tools/list call is not the notification.
+        assert!(!is_list_changed(r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}"#));
+        // Other notifications and unrelated lines are ignored (and skip the parse).
+        assert!(!is_list_changed(
+            r#"{"jsonrpc":"2.0","method":"notifications/message","params":{}}"#
+        ));
+        assert!(!is_list_changed("not json at all"));
+        assert!(!is_list_changed(""));
+    }
+
+    #[test]
+    fn forward_line_flags_dirty_only_when_armed() {
+        use super::forward_line;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let notif = r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
+        let dirty = Some(Arc::new(AtomicBool::new(false)));
+        let armed = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Unarmed (still in the handshake window): the line is forwarded but the
+        // change is not acted on.
+        assert!(forward_line(notif.to_string(), &tx, &dirty, &armed));
+        assert!(!dirty.as_ref().unwrap().load(Ordering::SeqCst));
+        assert_eq!(rx.recv().unwrap(), notif);
+
+        // Armed: the same notification now flips the dirty flag.
+        armed.store(true, Ordering::SeqCst);
+        assert!(forward_line(notif.to_string(), &tx, &dirty, &armed));
+        assert!(dirty.as_ref().unwrap().load(Ordering::SeqCst));
+        assert_eq!(rx.recv().unwrap(), notif);
+
+        // An ordinary line is always forwarded and never flags a change.
+        let resp = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+        let dirty2 = Some(Arc::new(AtomicBool::new(false)));
+        assert!(forward_line(resp.to_string(), &tx, &dirty2, &armed));
+        assert!(!dirty2.as_ref().unwrap().load(Ordering::SeqCst));
+        assert_eq!(rx.recv().unwrap(), resp);
+
+        // A closed receiver makes forward_line report "stop".
+        drop(rx);
+        assert!(!forward_line(notif.to_string(), &tx, &dirty, &armed));
     }
 }

@@ -797,7 +797,7 @@ fn handle_request(
 /// Spawn and connect every enabled server into a router. With `profile` set, only
 /// that profile's servers are connected (per-client scoping); otherwise the
 /// active profile is used.
-fn build_router(reg: &Registry, profile: Option<&str>) -> Router {
+fn build_router(reg: &Registry, profile: Option<&str>, dirty: &Arc<AtomicBool>) -> Router {
     let enabled = match profile {
         Some(p) => reg.enabled_servers_for(p),
         None => reg.enabled_servers(),
@@ -824,7 +824,10 @@ fn build_router(reg: &Registry, profile: Option<&str>) -> Router {
     // Connect concurrently so total time is the slowest server, not the sum.
     let handles: Vec<_> = servers
         .into_iter()
-        .map(|server| std::thread::spawn(move || connect_one(&server)))
+        .map(|server| {
+            let dirty = Arc::clone(dirty);
+            std::thread::spawn(move || connect_one(&server, &dirty))
+        })
         .collect();
 
     let mut router = Router::with_policy(policy);
@@ -838,7 +841,7 @@ fn build_router(reg: &Registry, profile: Option<&str>) -> Router {
 
 /// Connect a single enabled server (stdio with keychain secret injection, or
 /// remote with refresh-aware auth). Returns None on failure.
-fn connect_one(server: &ServerEntry) -> Option<DownstreamServer> {
+fn connect_one(server: &ServerEntry, dirty: &Arc<AtomicBool>) -> Option<DownstreamServer> {
     let result = if let Some(command) = &server.command {
         let mut env: Vec<(String, String)> = Vec::new();
         for e in &server.env {
@@ -858,7 +861,7 @@ fn connect_one(server: &ServerEntry) -> Option<DownstreamServer> {
                 }
             }
         }
-        match StdioTransport::spawn(command, &server.args, &env) {
+        match StdioTransport::spawn_watched(command, &server.args, &env, Arc::clone(dirty)) {
             Ok(t) => DownstreamServer::connect(server.id.clone(), Box::new(t)),
             Err(e) => Err(e),
         }
@@ -899,6 +902,24 @@ fn notify_tools_changed(stdout: &Arc<Mutex<std::io::Stdout>>) {
         json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" })
     );
     let _ = out.flush();
+}
+
+/// Persist a freshly built or refreshed catalog and tell the client it changed.
+/// Never persists an empty catalog over a good one (a transient empty build or a
+/// momentarily unreachable server would otherwise wipe the cache and leave the
+/// client showing only conduit_status); the emit still fires so the client
+/// re-fetches from cache.
+fn persist_and_emit(
+    tools: &[Value],
+    cached_tools: &Arc<Mutex<Vec<Value>>>,
+    stdout: &Arc<Mutex<std::io::Stdout>>,
+    profile: Option<&str>,
+) {
+    if !tools.is_empty() {
+        *cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = tools.to_vec();
+        save_tool_cache(tools, profile);
+    }
+    notify_tools_changed(stdout);
 }
 
 /// Append a line to the gateway debug log (for diagnosing client connections).
@@ -968,39 +989,57 @@ fn watch_registry(
     stdout: Arc<Mutex<std::io::Stdout>>,
     cached_tools: Arc<Mutex<Vec<Value>>>,
     profile: Option<String>,
+    downstream_dirty: Arc<AtomicBool>,
 ) {
     eprintln!("conduit: watching registry at {}", path.display());
     let mut last = mtime(&path);
     loop {
         std::thread::sleep(Duration::from_millis(1000));
+        // A live downstream server that changed its own tool set (sent
+        // tools/list_changed) sets this. Swap before acting so a notification
+        // arriving mid-refresh is caught on the next tick rather than lost.
+        let downstream_changed = downstream_dirty.swap(false, Ordering::SeqCst);
         let current = mtime(&path);
-        if current == last {
+        let file_changed = current != last;
+        if !file_changed && !downstream_changed {
             continue;
         }
-        eprintln!("conduit: registry file changed on disk");
-        // Don't advance `last` until a successful load, so a half-written file
-        // (caught mid-save) is retried on the next tick instead of skipped.
-        let new_reg = match registry::load_from(&path) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("conduit: reload failed (will retry): {e}");
-                continue;
-            }
-        };
-        last = current;
-        // Build the new router (spawns processes) before taking locks.
-        let new_router = build_router(&new_reg, profile.as_deref());
-        let tools = new_router.aggregated_tools();
-        *registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_reg;
-        *router.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_router;
-        // Same guard as the initial build: never persist an empty catalog over a
-        // good one (a half-written registry would otherwise wipe the cache).
-        if !tools.is_empty() {
-            *cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = tools.clone();
-            save_tool_cache(&tools, profile.as_deref());
+
+        if file_changed {
+            // The registry changed: servers may have been added, removed, or
+            // reconfigured, so reload and rebuild from scratch. This re-connects
+            // everything, which also subsumes any pending downstream change.
+            eprintln!("conduit: registry file changed on disk");
+            // Don't advance `last` until a successful load, so a half-written file
+            // (caught mid-save) is retried on the next tick instead of skipped.
+            let new_reg = match registry::load_from(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("conduit: reload failed (will retry): {e}");
+                    continue;
+                }
+            };
+            last = current;
+            // Build the new router (spawns processes) before taking locks.
+            let new_router = build_router(&new_reg, profile.as_deref(), &downstream_dirty);
+            let tools = new_router.aggregated_tools();
+            *registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_reg;
+            *router.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_router;
+            persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
+            eprintln!("conduit: registry changed, sent tools/list_changed");
+        } else {
+            // A live server announced a tool-list change. Re-query the existing
+            // connections in place rather than re-spawning: a runtime or
+            // session-scoped change (the usual reason a server sends this) would
+            // be lost by a fresh process that never saw it.
+            let tools = {
+                let mut r = router.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                r.refresh_tools();
+                r.aggregated_tools()
+            };
+            persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
+            eprintln!("conduit: downstream tools/list_changed, refreshed + sent");
         }
-        notify_tools_changed(&stdout);
-        eprintln!("conduit: registry changed, sent tools/list_changed");
     }
 }
 
@@ -1062,6 +1101,10 @@ fn main() {
     let cached_tools = Arc::new(Mutex::new(load_tool_cache(profile.as_deref())));
     let stdout = Arc::new(Mutex::new(std::io::stdout()));
     let ready = Arc::new(AtomicBool::new(false));
+    // Flipped by any downstream transport that emits notifications/tools/list_changed.
+    // The registry watcher polls it and rebuilds, so a server that changes its own
+    // tool set mid-session propagates to the client instead of being dropped.
+    let downstream_dirty = Arc::new(AtomicBool::new(false));
     glog(&format!(
         "loaded tool cache: {} tools",
         cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
@@ -1073,10 +1116,11 @@ fn main() {
         let stdout = Arc::clone(&stdout);
         let ready = Arc::clone(&ready);
         let cached_tools = Arc::clone(&cached_tools);
+        let downstream_dirty = Arc::clone(&downstream_dirty);
         let profile = profile.clone();
         std::thread::spawn(move || {
             let reg = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-            let built = build_router(&reg, profile.as_deref());
+            let built = build_router(&reg, profile.as_deref(), &downstream_dirty);
             let tools = built.aggregated_tools();
             glog(&format!(
                 "background build: {} tools from {} servers",
@@ -1103,9 +1147,18 @@ fn main() {
         let router = Arc::clone(&router);
         let stdout = Arc::clone(&stdout);
         let cached_tools = Arc::clone(&cached_tools);
+        let downstream_dirty = Arc::clone(&downstream_dirty);
         let profile = profile.clone();
         std::thread::spawn(move || {
-            watch_registry(path, registry, router, stdout, cached_tools, profile)
+            watch_registry(
+                path,
+                registry,
+                router,
+                stdout,
+                cached_tools,
+                profile,
+                downstream_dirty,
+            )
         });
     }
 
@@ -1149,7 +1202,7 @@ fn main() {
         // instead of failing with "no connected server".
         if method == "tools/call" && router.lock().unwrap_or_else(std::sync::PoisonError::into_inner).server_count() == 0 {
             let reg = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-            let built = build_router(&reg, profile.as_deref());
+            let built = build_router(&reg, profile.as_deref(), &downstream_dirty);
             if built.server_count() > 0 {
                 let tools = built.aggregated_tools();
                 *router.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = built;
