@@ -9,10 +9,38 @@
 //! the OS keychain; this file only records that a secret exists.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 const REGISTRY_VERSION: u32 = 1;
+
+/// Per-process counter for unique atomic-write temp names.
+static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Write `contents` to `path` atomically: a uniquely-named sibling temp file,
+/// then rename over the target. The unique name (pid + per-process sequence)
+/// means two writers to the same path can't overwrite each other's half-written
+/// temp. The temp sits in the same directory so the rename stays on one
+/// filesystem (and is therefore atomic). The temp is cleaned up if the rename
+/// fails, so a failed write never leaves a stray file behind.
+pub fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = PathBuf::from(format!(
+        "{}.{}.{}.conduit-tmp",
+        path.display(),
+        std::process::id(),
+        seq
+    ));
+    std::fs::write(&tmp, contents).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
 const DEFAULT_PROFILE_ID: &str = "default";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -389,13 +417,9 @@ pub fn save_to(path: &Path, registry: &Registry) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(registry).map_err(|e| e.to_string())?;
-    // Write atomically: a sibling temp file, then rename over the target. The
-    // registry is the single source of truth for every server, so a crash, power
-    // loss, or full disk mid-write must not be able to truncate it. The temp file
-    // sits in the same directory so the rename stays on one filesystem.
-    let tmp = PathBuf::from(format!("{}.conduit-tmp", path.display()));
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    // The registry is the single source of truth for every server, so a crash,
+    // power loss, or full disk mid-write must not be able to truncate it.
+    atomic_write(path, &json)
 }
 
 pub fn load() -> Result<Registry, String> {
@@ -579,5 +603,24 @@ mod tests {
         let path = std::env::temp_dir().join("conduit-does-not-exist-xyz.json");
         let r = load_from(&path).unwrap();
         assert_eq!(r.profiles.len(), 1);
+    }
+
+    #[test]
+    fn atomic_write_replaces_and_leaves_no_temp() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-aw-{}.json", std::process::id()));
+        atomic_write(&path, "first").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        // Overwrite replaces the contents in place.
+        atomic_write(&path, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        // A successful write leaves no .conduit-tmp sibling behind.
+        let prefix = format!("conduit-aw-{}.json.", std::process::id());
+        let leftover = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with(&prefix));
+        assert!(!leftover, "temp file left behind after a successful write");
+        std::fs::remove_file(&path).ok();
     }
 }

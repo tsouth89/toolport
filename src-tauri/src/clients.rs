@@ -941,18 +941,12 @@ fn entry_to_toml(entry: &ServerEntry) -> toml::Value {
     toml::Value::Table(t)
 }
 
-/// Write `contents` to `path` atomically: write a sibling temp file, then rename
-/// over the target. A crash, power loss, or full disk mid-write can't leave a
-/// client's config truncated or empty - the rename either fully happens or it
-/// doesn't. Mirrors the audit-log rotation writer. The temp file sits in the same
-/// directory so the rename stays on one filesystem (and is therefore atomic).
+/// Write a client's config atomically (temp file + rename) so a crash or full
+/// disk mid-write can't leave it truncated or empty. Delegates to the shared
+/// [`registry::atomic_write`], which uses a unique temp name so two writers to
+/// the same config can't clobber each other.
 fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = PathBuf::from(format!("{}.conduit-tmp", path.display()));
-    std::fs::write(&tmp, contents).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    crate::registry::atomic_write(path, contents)
 }
 
 fn write_json(

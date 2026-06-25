@@ -1003,11 +1003,10 @@ fn load_tool_cache(profile: Option<&str>) -> Vec<Value> {
 
 fn save_tool_cache(tools: &[Value], profile: Option<&str>) {
     if let Some(path) = tool_cache_path(profile) {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if let Ok(s) = serde_json::to_string(tools) {
-            let _ = std::fs::write(path, s);
+            // Atomic + unique temp: several gateways share this cache file, so a
+            // torn or interleaved write would leave an inconsistent catalog.
+            let _ = registry::atomic_write(&path, &s);
         }
     }
 }

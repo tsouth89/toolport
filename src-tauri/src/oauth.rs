@@ -60,19 +60,22 @@ fn debug_log(msg: &str) {
     }
 }
 
-fn random_token(bytes: usize) -> String {
+fn random_token(bytes: usize) -> Result<String, String> {
     let mut buf = vec![0u8; bytes];
-    let _ = getrandom::getrandom(&mut buf);
-    base64url(&buf)
+    // A CSPRNG failure must fail loudly. Silently ignoring the error would leave
+    // the buffer all-zeros, making the PKCE verifier and the CSRF state constant
+    // and predictable, which defeats both protections.
+    getrandom::getrandom(&mut buf).map_err(|e| format!("secure RNG unavailable: {e}"))?;
+    Ok(base64url(&buf))
 }
 
 /// (verifier, challenge) per RFC 7636 using S256.
-pub fn pkce() -> (String, String) {
-    let verifier = random_token(32);
+pub fn pkce() -> Result<(String, String), String> {
+    let verifier = random_token(32)?;
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
     let challenge = base64url(&hasher.finalize());
-    (verifier, challenge)
+    Ok((verifier, challenge))
 }
 
 fn origin_of(url: &str) -> String {
@@ -156,7 +159,7 @@ fn require_https(url: &str, what: &str) -> Result<(), String> {
 }
 
 /// The host (no scheme, userinfo, port, or brackets) of a URL.
-fn host_of_url(url: &str) -> Option<String> {
+pub fn host_of_url(url: &str) -> Option<String> {
     let after = url.split("://").nth(1)?;
     let authority = after.split(['/', '?', '#']).next()?;
     let authority = authority.rsplit('@').next()?; // strip any userinfo
@@ -194,7 +197,7 @@ fn ip_is_private(ip: &std::net::IpAddr) -> bool {
 
 /// True if `host` is loopback, private, or link-local. Resolves DNS (literal IPs
 /// resolve to themselves); fails closed (treats an unresolvable host as private).
-fn host_is_private(host: &str) -> bool {
+pub fn host_is_private(host: &str) -> bool {
     use std::net::ToSocketAddrs;
     let h = host.trim().to_ascii_lowercase();
     if h.is_empty() || h == "localhost" || h.ends_with(".localhost") {
@@ -590,8 +593,8 @@ pub fn authenticate(mcp_url: &str) -> Result<AuthResult, String> {
     if client_id.trim().is_empty() {
         return Err("dynamic registration returned an empty client_id".to_string());
     }
-    let (verifier, challenge) = pkce();
-    let state = random_token(16);
+    let (verifier, challenge) = pkce()?;
+    let state = random_token(16)?;
 
     // Request exactly the scopes the server advertises. That already includes
     // offline_access (the refresh-token scope) when the server supports it;
@@ -653,6 +656,19 @@ mod tests {
             base64url(&hasher.finalize()),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
+    }
+
+    #[test]
+    fn pkce_generates_a_fresh_verifier_each_call() {
+        let (verifier, challenge) = pkce().expect("RNG should be available");
+        // 32 random bytes base64url'd -> 43 chars, within RFC 7636's 43..=128.
+        assert_eq!(verifier.len(), 43);
+        // The challenge is S256(verifier).
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        assert_eq!(challenge, base64url(&hasher.finalize()));
+        // Guards the all-zeros bug: two calls must not produce the same verifier.
+        assert_ne!(pkce().unwrap().0, verifier);
     }
 
     #[test]

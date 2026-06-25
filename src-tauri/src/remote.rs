@@ -82,16 +82,41 @@ pub fn is_auth_error(e: &str) -> bool {
         || lower.contains("needs authentication")
 }
 
+/// A vaulted bearer token must not ride over cleartext to a public host. Allow
+/// http only for loopback/private hosts (local dev on a trusted network); require
+/// https for anything public, so the token can't be sniffed off the wire.
+fn require_secure_for_auth(url: &str) -> Result<(), String> {
+    if url.trim().to_ascii_lowercase().starts_with("https://") {
+        return Ok(());
+    }
+    let host = oauth::host_of_url(url).unwrap_or_default();
+    if oauth::host_is_private(&host) {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to send the saved auth token to a non-HTTPS URL ({url}); \
+         use https for an authenticated remote server"
+    ))
+}
+
+/// Build an HTTP transport, refusing to attach a token to a cleartext public URL.
+fn authed_transport(url: &str, token: Option<String>) -> Result<HttpTransport, String> {
+    if token.is_some() {
+        require_secure_for_auth(url)?;
+    }
+    Ok(HttpTransport::with_auth(url, token))
+}
+
 /// Connect to a remote server, injecting any vaulted token. On an auth error,
 /// refresh the token once and retry.
 pub fn connect_remote(server_id: &str, url: &str) -> Result<DownstreamServer, String> {
     let auth = secrets::get_secret(server_id, secrets::HTTP_AUTH_KEY);
-    let transport = HttpTransport::with_auth(url, auth);
+    let transport = authed_transport(url, auth)?;
     match DownstreamServer::connect(server_id.to_string(), Box::new(transport)) {
         Ok(ds) => Ok(ds),
         Err(e) if is_auth_error(&e) => match refresh_token(server_id) {
             Ok(fresh) => {
-                let transport = HttpTransport::with_auth(url, Some(fresh));
+                let transport = authed_transport(url, Some(fresh))?;
                 DownstreamServer::connect(server_id.to_string(), Box::new(transport))
             }
             Err(_) => Err(e),
@@ -110,5 +135,17 @@ mod tests {
         assert!(is_auth_error("got 403 Forbidden"));
         assert!(!is_auth_error("HTTP 500: server error"));
         assert!(!is_auth_error("connection refused"));
+    }
+
+    #[test]
+    fn auth_requires_https_for_public_hosts() {
+        // IP literals so the private-host check needs no DNS (hermetic test).
+        // A token must not ride cleartext to a public host.
+        assert!(require_secure_for_auth("http://8.8.8.8/mcp").is_err());
+        // https to anywhere is fine.
+        assert!(require_secure_for_auth("https://8.8.8.8/mcp").is_ok());
+        // Loopback / private over http is acceptable (local dev).
+        assert!(require_secure_for_auth("http://127.0.0.1:8080/mcp").is_ok());
+        assert!(require_secure_for_auth("http://192.168.1.10/mcp").is_ok());
     }
 }
