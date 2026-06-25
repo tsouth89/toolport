@@ -95,6 +95,7 @@ pub fn curated() -> Vec<CatalogEntry> {
         http("DeepWiki", "Ask questions about any public GitHub repo. No auth.", "https://mcp.deepwiki.com/mcp", "https://deepwiki.com"),
         http("Hugging Face", "Models, datasets, and Spaces on Hugging Face.", "https://huggingface.co/mcp", "https://huggingface.co/settings/mcp"),
         cmd("Brave Search", "Web search via the Brave Search API.", "npx", &["-y", "@modelcontextprotocol/server-brave-search"], &["BRAVE_API_KEY"], "https://github.com/modelcontextprotocol/servers"),
+        cmd("Firecrawl", "Web scraping and data extraction from websites.", "npx", &["-y", "firecrawl-mcp"], &["FIRECRAWL_API_KEY"], "https://github.com/firecrawl/firecrawl-mcp-server"),
         // --- Email & comms already above; Design ---
         cmd("Figma", "Turn Figma designs into code (Framelink).", "npx", &["-y", "figma-developer-mcp", "--stdio"], &["FIGMA_API_KEY"], "https://github.com/GLips/Figma-Context-MCP"),
         // --- Email ---
