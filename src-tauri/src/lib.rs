@@ -407,7 +407,26 @@ fn gather_diagnostics() -> String {
     let _ = writeln!(out, "version: {}", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(out, "os: {} {}", std::env::consts::OS, std::env::consts::ARCH);
 
-    let reg = registry::load().unwrap_or_default();
+    // A load failure is exactly what a bug report needs to surface, not a
+    // silently-empty registry from unwrap_or_default.
+    match registry::load() {
+        Ok(reg) => out.push_str(&registry_summary(&reg)),
+        Err(e) => {
+            let _ = writeln!(out, "\nregistry: failed to load: {e}");
+        }
+    }
+
+    let _ = writeln!(out, "\ngateway log (last {DIAG_LOG_LINES} lines):");
+    out.push_str(&gateway_log_tail(DIAG_LOG_LINES));
+    out
+}
+
+/// Format the registry for a diagnostics bundle: settings, servers (on/off plus
+/// launch target), and profiles. Secret-safe: env vars are listed by key name
+/// only (with a `(secret)` marker), never their values.
+fn registry_summary(reg: &Registry) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
     let active = reg.active_profile_id();
     let _ = writeln!(out, "\nsettings:");
     let _ = writeln!(out, "  lazy discovery: {}", reg.lazy_discovery);
@@ -437,9 +456,6 @@ fn gather_diagnostics() -> String {
     for p in &reg.profiles {
         let _ = writeln!(out, "  {}: [{}]", p.name, p.enabled_server_ids.join(", "));
     }
-
-    let _ = writeln!(out, "\ngateway log (last {DIAG_LOG_LINES} lines):");
-    out.push_str(&gateway_log_tail(DIAG_LOG_LINES));
     out
 }
 
@@ -1031,5 +1047,18 @@ mod tests {
         assert_eq!(last_lines(text, 99), "a\nb\nc\nd\ne\n");
         // Empty input stays empty (no stray newline).
         assert_eq!(last_lines("", 10), "");
+    }
+
+    #[test]
+    fn diagnostics_lists_env_keys_but_never_values() {
+        let mut reg = Registry::default();
+        reg.add_server(github_with_secret());
+        let s = registry_summary(&reg);
+        // The key is shown (with a secret marker) so a report says what's set...
+        assert!(s.contains("TOKEN (secret)"), "got: {s}");
+        // ...but the secret value itself must never appear in a pasted report.
+        assert!(!s.contains("sk-live-xyz"), "secret value leaked: {s}");
+        // The launch command is present for debugging.
+        assert!(s.contains("(stdio) npx"), "missing launch line: {s}");
     }
 }
