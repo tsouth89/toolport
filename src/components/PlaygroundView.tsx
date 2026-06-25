@@ -365,12 +365,12 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
             Tests any server directly, regardless of the active profile.
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
           <label className="flex items-center gap-2.5 rounded-md border px-3 py-2 text-sm">
             <Layers
               className={`size-4 ${lazyDiscovery ? "text-violet-300" : "text-muted-foreground"}`}
             />
-            <span className="flex flex-col leading-tight">
+            <span className="flex flex-1 flex-col leading-tight min-w-0">
               <span className="font-medium">Lazy discovery</span>
               <span className="text-xs text-muted-foreground">
                 Expose 3 meta-tools, not the full catalog (all clients)
@@ -386,7 +386,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
             <ShieldAlert
               className={`size-4 ${denyDestructive ? "text-amber-400" : "text-muted-foreground"}`}
             />
-            <span className="flex flex-col leading-tight">
+            <span className="flex flex-1 flex-col leading-tight min-w-0">
               <span className="font-medium">Block destructive tools</span>
               <span className="text-xs text-muted-foreground">
                 Hide every {`destructiveHint`} tool from all clients
@@ -402,7 +402,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
             <Bot
               className={`size-4 ${allowAgentControl ? "text-emerald-400" : "text-muted-foreground"}`}
             />
-            <span className="flex flex-col leading-tight">
+            <span className="flex flex-1 flex-col leading-tight min-w-0">
               <span className="font-medium">Allow agent control</span>
               <span className="text-xs text-muted-foreground">
                 Let an agent turn servers on/off (the block above stays yours)
