@@ -17,15 +17,36 @@ function fmtTokens(n: number): string {
   return `${n}`;
 }
 
-/** Models for the dollar estimate, input-token list prices ($/1M). Matches the
- *  public calculator at conduitmcp.app/calculator. */
+/** Models for the dollar estimate, input-token list prices ($/1M), grouped by
+ *  provider. Matches the public calculator at conduitmcp.app/calculator. */
 const SAVINGS_MODELS = [
-  { label: "Claude Sonnet", price: 3 },
-  { label: "Claude Opus", price: 5 },
-  { label: "GPT-5.4", price: 2.5 },
-  { label: "Gemini 2.5 Pro", price: 1.25 },
-  { label: "Gemini 2.5 Flash", price: 0.3 },
+  {
+    group: "Anthropic",
+    items: [
+      { label: "Claude Opus", price: 5 },
+      { label: "Claude Sonnet", price: 3 },
+      { label: "Claude Haiku", price: 1 },
+    ],
+  },
+  {
+    group: "OpenAI",
+    items: [
+      { label: "GPT-5.5", price: 5 },
+      { label: "GPT-5.4", price: 2.5 },
+      { label: "GPT-5.4 mini", price: 0.75 },
+    ],
+  },
+  {
+    group: "Google",
+    items: [
+      { label: "Gemini 2.5 Pro", price: 1.25 },
+      { label: "Gemini 2.5 Flash", price: 0.3 },
+    ],
+  },
 ];
+const SAVINGS_MODEL_PRICE = new Map(
+  SAVINGS_MODELS.flatMap((g) => g.items).map((m) => [m.label, m.price]),
+);
 
 /** Dollar value of saved input tokens, scaled to the number's size. */
 function fmtDollars(n: number): string {
@@ -37,7 +58,8 @@ function fmtDollars(n: number): string {
 /** Hero stat: tool-definition tokens (and dollars) lazy discovery kept out of
  *  agent context, with a one-click share so users can flex their savings. */
 function SavingsBanner({ savings }: { savings: SavingsSummary }) {
-  const [price, setPrice] = useState(3);
+  const [modelLabel, setModelLabel] = useState("Claude Sonnet");
+  const price = SAVINGS_MODEL_PRICE.get(modelLabel) ?? 3;
   const dollars = (savings.tokensSaved / 1_000_000) * price;
   const since =
     savings.sinceTs > 0
@@ -85,15 +107,19 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <select
-          value={price}
-          onChange={(e) => setPrice(Number(e.target.value))}
+          value={modelLabel}
+          onChange={(e) => setModelLabel(e.target.value)}
           aria-label="Model for the dollar estimate"
           className="rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs text-muted-foreground"
         >
-          {SAVINGS_MODELS.map((m) => (
-            <option key={m.label} value={m.price}>
-              at {m.label} (${m.price}/1M input)
-            </option>
+          {SAVINGS_MODELS.map((g) => (
+            <optgroup key={g.group} label={g.group}>
+              {g.items.map((m) => (
+                <option key={m.label} value={m.label}>
+                  at {m.label} (${m.price}/1M)
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
         <button
