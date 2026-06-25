@@ -46,6 +46,21 @@ export function getAuditStats(window = 2000): Promise<AuditStats> {
   return invoke<AuditStats>("audit_stats", { window });
 }
 
+/** A tool-definition integrity event: a previously-approved tool changed
+ * (rug-pull signal) or a known server added a tool. */
+export interface SecurityEvent {
+  ts: number;
+  type: string;
+  server: string;
+  tool: string;
+  change: string;
+}
+
+/** Recent tool-definition integrity events (newest first). */
+export function getSecurityEvents(limit = 100): Promise<SecurityEvent[]> {
+  return invoke<SecurityEvent[]>("get_security_events", { limit });
+}
+
 /** Cumulative tokens lazy discovery has kept out of client context. */
 export function getSavingsSummary(): Promise<SavingsSummary> {
   return invoke<SavingsSummary>("savings_summary");

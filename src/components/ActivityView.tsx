@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, ChevronRight, ScrollText, Share2, Sparkles, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronRight, ScrollText, Share2, ShieldAlert, Sparkles, XCircle } from "lucide-react";
 import { toast } from "sonner";
-import { getAuditLog, getAuditStats, getSavingsSummary } from "@/lib/api";
+import {
+  getAuditLog,
+  getAuditStats,
+  getSavingsSummary,
+  getSecurityEvents,
+  type SecurityEvent,
+} from "@/lib/api";
 import type { AuditEntry, AuditStats, SavingsSummary, ServerStat } from "@/lib/types";
 
 /** Compact latency string: "180 ms" or "1.2 s", or a dash when unmeasured. */
@@ -57,6 +63,50 @@ function fmtDollars(n: number): string {
 
 /** Hero stat: tool-definition tokens (and dollars) lazy discovery kept out of
  *  agent context, with a one-click share so users can flex their savings. */
+/** Surfaces tool-definition integrity events: a tool you already approved changed
+ * (rug-pull signal), or a known server quietly added one. Detection only. */
+function SecurityNotices({ events }: { events: SecurityEvent[] }) {
+  return (
+    <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <ShieldAlert className="size-4 text-amber-400" />
+        <h3 className="text-sm font-medium text-amber-300">
+          Tool definitions changed since you approved them
+        </h3>
+      </div>
+      <p className="mb-3 max-w-2xl text-xs text-muted-foreground">
+        A server's tool changed or a new tool appeared after it was first connected.
+        Usually a routine update, but it's also how a "rug pull" works, review before
+        trusting these tools again.
+      </p>
+      <ul className="space-y-1.5 text-xs">
+        {events.slice(0, 8).map((e, i) => (
+          <li key={i} className="flex items-center gap-2">
+            <span
+              className={`rounded px-1.5 py-0.5 font-medium ${
+                e.change === "changed"
+                  ? "bg-amber-500/15 text-amber-300"
+                  : "bg-sky-500/15 text-sky-300"
+              }`}
+            >
+              {e.change === "changed" ? "changed" : "new tool"}
+            </span>
+            <code className="font-mono text-foreground">{e.tool}</code>
+            <span className="ml-auto text-muted-foreground">
+              {new Date(e.ts).toLocaleString(undefined, {
+                month: "short",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function SavingsBanner({ savings }: { savings: SavingsSummary }) {
   const [modelLabel, setModelLabel] = useState("Claude Sonnet");
   const price = SAVINGS_MODEL_PRICE.get(modelLabel) ?? 3;
@@ -258,6 +308,7 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
   const [savings, setSavings] = useState<SavingsSummary | null>(null);
   const [serverFilter, setServerFilter] = useState<string>("");
   const [errorsOnly, setErrorsOnly] = useState(false);
+  const [security, setSecurity] = useState<SecurityEvent[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -270,13 +321,20 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
     getSavingsSummary()
       .then((s) => alive && setSavings(s))
       .catch(() => alive && setSavings(null));
+    getSecurityEvents(50)
+      .then((s) => alive && setSecurity(s))
+      .catch(() => alive && setSecurity([]));
     return () => {
       alive = false;
     };
   }, [refreshKey]);
 
-  const banner =
-    savings && savings.tokensSaved > 0 ? <SavingsBanner savings={savings} /> : null;
+  const banner = (
+    <>
+      {security.length > 0 && <SecurityNotices events={security} />}
+      {savings && savings.tokensSaved > 0 ? <SavingsBanner savings={savings} /> : null}
+    </>
+  );
 
   const servers = useMemo(
     () => [...new Set((entries ?? []).map((e) => e.server))].sort(),

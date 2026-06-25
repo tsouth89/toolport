@@ -137,6 +137,12 @@ Tier 2 - feature completeness (in progress)
       uri-routed resources); sampling / elicitation passthrough still TODO
 - [x] Observability: per-server latency (avg/p95), success/error rates, per-tool
       breakdown, and server/errors-only filters (Activity dashboard)
+- [x] Tool-definition integrity / rug-pull detection: fingerprint tools on connect,
+      diff on every refresh, flag changed/added definitions on already-approved
+      servers as a security notice (detection only, on by default). Reuses the
+      existing tools/list_changed refresh hook. See `docs/specs/mcp-integrity.md`.
+- [ ] Security, next: tool-description injection scanning (poisoning / line jumping)
+      and tool-result defense (agentjacking), per `docs/specs/content-defense.md`.
 
 Tier 3 - launch prep
 - [x] Bundle the gateway sidecar; signed/notarized macOS installers (Win/Linux

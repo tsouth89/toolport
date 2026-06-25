@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 use conduit_lib::audit;
 use conduit_lib::clients;
 use conduit_lib::downstream::{DownstreamServer, StdioTransport, PROTOCOL_VERSION};
+use conduit_lib::integrity;
 use conduit_lib::registry::{self, Registry, ServerEntry};
 use conduit_lib::remote;
 use conduit_lib::router::{Router, ToolPolicy};
@@ -1065,6 +1066,29 @@ fn notify_tools_changed(stdout: &Arc<Mutex<std::io::Stdout>>) {
 /// momentarily unreachable server would otherwise wipe the cache and leave the
 /// client showing only conduit_status); the emit still fires so the client
 /// re-fetches from cache.
+/// Run tool-definition integrity detection on a freshly built catalog (gated by
+/// the registry's `integrity_check`, on by default). Any drift is recorded to the
+/// security log inside `integrity::check`; here we also surface it in the gateway
+/// log so it's visible in "Copy diagnostics". Detection only, never blocks.
+fn maybe_check_integrity(registry: &Arc<Mutex<Registry>>, tools: &[Value], profile: Option<&str>) {
+    let enabled = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .integrity_check;
+    if !enabled {
+        return;
+    }
+    for d in integrity::check(profile, tools) {
+        let server = d.get("server").and_then(Value::as_str).unwrap_or("?");
+        let tool = d.get("tool").and_then(Value::as_str).unwrap_or("?");
+        let change = d.get("change").and_then(Value::as_str).unwrap_or("?");
+        glog(&format!(
+            "SECURITY: tool definition {change} on already-approved server \"{server}\": {tool}"
+        ));
+        eprintln!("conduit: SECURITY tool drift ({change}) {tool}");
+    }
+}
+
 fn persist_and_emit(
     tools: &[Value],
     cached_tools: &Arc<Mutex<Vec<Value>>>,
@@ -1212,6 +1236,7 @@ fn watch_registry(
             let tools = new_router.aggregated_tools();
             *registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_reg;
             *router.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_router;
+            maybe_check_integrity(&registry, &tools, profile.as_deref());
             persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
             eprintln!("conduit: registry changed, sent tools/list_changed");
         } else {
@@ -1224,6 +1249,7 @@ fn watch_registry(
                 r.refresh_tools();
                 r.aggregated_tools()
             };
+            maybe_check_integrity(&registry, &tools, profile.as_deref());
             persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
             eprintln!("conduit: downstream tools/list_changed, refreshed + sent");
         }

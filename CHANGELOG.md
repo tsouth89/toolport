@@ -3,6 +3,23 @@
 All notable changes to Conduit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the GitHub releases.
 
+## [Unreleased]
+
+### Added
+- **Tool-definition integrity (rug-pull detection).** The gateway now fingerprints
+  every tool when a server is first connected and diffs it on each refresh. If a
+  previously-approved tool's definition changes, or a known server adds a tool (the
+  signature of a "rug pull"), it records a security event and surfaces it as a notice
+  in the Activity view. Detection only, never blocks; on by default
+  (`integrityCheck`), fully local. New `get_security_events` command + `security.jsonl`.
+- **OpenRouter** added to the curated catalog (live model intelligence; OAuth).
+
+### Changed
+- Benchmark suite: added a graded server-sweep harness (`bench-sweep.mjs`) that
+  grades answers for correctness, not just completion, and expanded `token-cost.mjs`
+  (context-window share, scaling curve, per-tool distribution, multi-volume dollar
+  tables).
+
 ## [0.3.19] - 2026-06-25
 
 ### Added

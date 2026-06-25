@@ -56,6 +56,13 @@ Conduit fixes both:
 - **Governance built in.** Toggle any tool on or off, or flip one switch to hide
   every destructive tool from every client at once. Every tool call is recorded
   in an audit log, with per-server latency and error rates.
+- **Tool-definition integrity (rug-pull detection).** Conduit fingerprints each
+  tool when you connect a server, and flags it if the definition later changes or a
+  known server quietly adds a tool, the signature of a "rug pull," where a tool you
+  approved is silently swapped for a malicious one. The change shows up as a security
+  notice in Activity. Detection only (it never blocks), on by default, and entirely
+  local. Because Conduit is on the path and already watches for tool changes, it's
+  the natural place to catch this.
 - **Agent-controllable, on your terms.** Turn on *Allow agent control* and an
   agent can enable or disable servers itself through the gateway
   (`conduit_enable_server` / `conduit_disable_server`), with the change reflected

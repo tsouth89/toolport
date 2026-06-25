@@ -6,6 +6,7 @@ pub mod audit;
 pub mod catalog;
 pub mod clients;
 pub mod downstream;
+pub mod integrity;
 pub mod oauth;
 pub mod registry;
 pub mod remote;
@@ -383,6 +384,14 @@ fn get_audit_log(limit: usize) -> Vec<serde_json::Value> {
 #[tauri::command]
 fn audit_stats(window: usize) -> serde_json::Value {
     audit::stats(window)
+}
+
+/// Recent tool-definition integrity events (newest first): a previously-approved
+/// tool whose definition changed (rug-pull signal) or a known server that added a
+/// tool. Powers the in-app security notices.
+#[tauri::command]
+fn get_security_events(limit: usize) -> Vec<serde_json::Value> {
+    integrity::read_recent(limit)
 }
 
 /// Cumulative tool-definition tokens that lazy discovery has kept out of clients'
@@ -976,6 +985,7 @@ pub fn run() {
             secret_status,
             get_audit_log,
             audit_stats,
+            get_security_events,
             savings_summary,
             gather_diagnostics,
             probe_servers,

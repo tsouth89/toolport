@@ -118,6 +118,12 @@ pub struct Registry {
     /// the user's governance, only flip which servers are connected.
     #[serde(default)]
     pub allow_agent_control: bool,
+    /// Tool-definition integrity: fingerprint each connected tool and flag when a
+    /// previously-approved tool's definition changes (a rug-pull signal) or a known
+    /// server quietly adds a tool. Detection only, it records a security event and
+    /// never blocks. On by default.
+    #[serde(default = "default_true")]
+    pub integrity_check: bool,
 }
 
 fn default_true() -> bool {
@@ -138,6 +144,7 @@ impl Default for Registry {
             deny_destructive: false,
             lazy_discovery: true,
             allow_agent_control: false,
+            integrity_check: true,
         }
     }
 }
