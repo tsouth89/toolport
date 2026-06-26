@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   ArrowUpCircle,
+  ChevronRight,
   ClipboardList,
   Compass,
   FlaskConical,
@@ -32,7 +33,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { ProfileBar } from "@/components/ProfileBar";
 import { ShareDialog } from "@/components/ShareDialog";
 
@@ -176,7 +181,9 @@ function VersionFooter({
           onClick={async () => {
             try {
               await navigator.clipboard.writeText(await gatherDiagnostics());
-              toast.success("Diagnostics copied, paste them into your bug report");
+              toast.success(
+                "Diagnostics copied, paste them into your bug report",
+              );
             } catch {
               toast.error("Could not copy diagnostics");
             }
@@ -251,7 +258,8 @@ function UpdateNotes({
  * bottom. */
 function sortClients(clients: DetectedClient[]): DetectedClient[] {
   const present = (c: DetectedClient) => (c.appPresent ? 1 : 0);
-  const count = (c: DetectedClient) => c.servers.length + c.pluginServers.length;
+  const count = (c: DetectedClient) =>
+    c.servers.length + c.pluginServers.length;
   return [...clients].sort((a, b) => {
     if (present(a) !== present(b)) return present(b) - present(a);
     if (count(a) !== count(b)) return count(b) - count(a);
@@ -317,7 +325,9 @@ function ClientRow({ client, importCount, selected, onSelect }: RowProps) {
           ) : client.usesConnectors ? (
             <Puzzle className="size-3.5 shrink-0 text-violet-400" />
           ) : (
-            <span className={`size-2 shrink-0 rounded-full ${dotClass[status]}`} />
+            <span
+              className={`size-2 shrink-0 rounded-full ${dotClass[status]}`}
+            />
           )}
           <span className="truncate">{client.name}</span>
           <span
@@ -343,7 +353,9 @@ function ClientRow({ client, importCount, selected, onSelect }: RowProps) {
             Manages servers as account connectors, outside the config file.
           </p>
         )}
-        {client.error && <p className="mt-1 text-xs text-amber-400">{client.error}</p>}
+        {client.error && (
+          <p className="mt-1 text-xs text-amber-400">{client.error}</p>
+        )}
       </TooltipContent>
     </Tooltip>
   );
@@ -356,7 +368,9 @@ interface Props {
   selectedClientId: string | null;
   onSelectClient: (id: string | null) => void;
   view: "servers" | "activity" | "catalog" | "playground" | "teams";
-  onSelectView: (view: "servers" | "activity" | "catalog" | "playground" | "teams") => void;
+  onSelectView: (
+    view: "servers" | "activity" | "catalog" | "playground" | "teams",
+  ) => void;
   onReplayOnboarding: () => void;
 }
 
@@ -370,12 +384,21 @@ export function AppSidebar({
   onSelectView,
   onReplayOnboarding,
 }: Props) {
+  const [showMissing, setShowMissing] = useState(false);
+  const sorted = sortClients(clients);
+  const detectedClients = sorted.filter((c) => statusOf(c) !== "missing");
+  const missingClients = sorted.filter((c) => statusOf(c) === "missing");
   return (
-    <aside className="flex h-screen w-72 shrink-0 flex-col overflow-y-auto border-r bg-sidebar">
+    <aside className="flex h-screen w-72 shrink-0 flex-col border-r bg-sidebar">
       <div className="flex items-center gap-2.5 px-4 py-4">
         <svg className="size-8" viewBox="0 0 48 48" aria-hidden="true">
           <rect width="48" height="48" rx="12" fill="#34d399" />
-          <g fill="none" stroke="#06140e" strokeWidth="2.9" strokeLinecap="round">
+          <g
+            fill="none"
+            stroke="#06140e"
+            strokeWidth="2.9"
+            strokeLinecap="round"
+          >
             <path d="M33.6 12.5 A 15 15 0 1 0 33.6 35.5" />
             <path d="M30.2 16.7 A 9.4 9.4 0 1 0 30.2 31.3" />
             <circle cx="33" cy="24" r="2.7" fill="#06140e" stroke="none" />
@@ -383,92 +406,131 @@ export function AppSidebar({
         </svg>
         <div className="leading-tight">
           <div className="font-semibold tracking-tight">Conduit</div>
-          <div className="text-xs text-muted-foreground">MCP control center</div>
-        </div>
-      </div>
-
-      {registry && (
-        <div className="px-3 pb-2">
-          <div className="px-2.5 pb-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            Profile
+          <div className="text-xs text-muted-foreground">
+            MCP control center
           </div>
-          <ProfileBar registry={registry} onChange={onRegistryChange} />
         </div>
-      )}
-
-      <div className="flex flex-col gap-0.5 px-3 pt-2">
-        <button
-          onClick={() => onSelectClient(null)}
-          className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
-            view === "servers" && selectedClientId === null ? "bg-accent" : ""
-          }`}
-        >
-          <Layers className="size-4 shrink-0 text-muted-foreground" />
-          <span>All servers</span>
-        </button>
-        <button
-          onClick={() => onSelectView("catalog")}
-          className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
-            view === "catalog" ? "bg-accent" : ""
-          }`}
-        >
-          <Store className="size-4 shrink-0 text-muted-foreground" />
-          <span>Browse catalog</span>
-        </button>
-        <button
-          onClick={() => onSelectView("playground")}
-          className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
-            view === "playground" ? "bg-accent" : ""
-          }`}
-        >
-          <FlaskConical className="size-4 shrink-0 text-muted-foreground" />
-          <span>Playground</span>
-        </button>
-        <button
-          onClick={() => onSelectView("activity")}
-          className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
-            view === "activity" ? "bg-accent" : ""
-          }`}
-        >
-          <ScrollText className="size-4 shrink-0 text-muted-foreground" />
-          <span>Activity</span>
-        </button>
-        <button
-          onClick={() => onSelectView("teams")}
-          className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
-            view === "teams" ? "bg-accent" : ""
-          }`}
-        >
-          <Users className="size-4 shrink-0 text-muted-foreground" />
-          <span>Teams</span>
-        </button>
       </div>
 
-      <div className="px-3 pt-3">
-        <div className="px-2.5 pb-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-          Clients
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        {registry && (
+          <div className="px-3 pb-2">
+            <div className="px-2.5 pb-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+              Profile
+            </div>
+            <ProfileBar registry={registry} onChange={onRegistryChange} />
+          </div>
+        )}
+
+        <div className="flex flex-col gap-0.5 px-3 pt-2">
+          <button
+            onClick={() => onSelectClient(null)}
+            className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
+              view === "servers" && selectedClientId === null ? "bg-accent" : ""
+            }`}
+          >
+            <Layers className="size-4 shrink-0 text-muted-foreground" />
+            <span>All servers</span>
+          </button>
+          <button
+            onClick={() => onSelectView("catalog")}
+            className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
+              view === "catalog" ? "bg-accent" : ""
+            }`}
+          >
+            <Store className="size-4 shrink-0 text-muted-foreground" />
+            <span>Browse catalog</span>
+          </button>
+          <button
+            onClick={() => onSelectView("playground")}
+            className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
+              view === "playground" ? "bg-accent" : ""
+            }`}
+          >
+            <FlaskConical className="size-4 shrink-0 text-muted-foreground" />
+            <span>Playground</span>
+          </button>
+          <button
+            onClick={() => onSelectView("activity")}
+            className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
+              view === "activity" ? "bg-accent" : ""
+            }`}
+          >
+            <ScrollText className="size-4 shrink-0 text-muted-foreground" />
+            <span>Activity</span>
+          </button>
+          <button
+            onClick={() => onSelectView("teams")}
+            className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
+              view === "teams" ? "bg-accent" : ""
+            }`}
+          >
+            <Users className="size-4 shrink-0 text-muted-foreground" />
+            <span>Teams</span>
+          </button>
         </div>
-        <nav className="flex flex-col gap-0.5">
-          {clients.length === 0 ? (
-            <p className="px-2.5 py-1.5 text-xs text-muted-foreground">
-              No MCP clients found. Install Claude Desktop, Cursor, or another
-              supported tool, then refresh.
-            </p>
-          ) : (
-            sortClients(clients).map((client) => (
-              <ClientRow
-                key={client.id}
-                client={client}
-                importCount={importableServers(client, registry).length}
-                selected={view === "servers" && selectedClientId === client.id}
-                onSelect={() => onSelectClient(client.id)}
-              />
-            ))
-          )}
-        </nav>
+
+        <div className="px-3 pt-3">
+          <div className="px-2.5 pb-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+            Clients
+          </div>
+          <nav className="flex flex-col gap-0.5">
+            {clients.length === 0 ? (
+              <p className="px-2.5 py-1.5 text-xs text-muted-foreground">
+                No MCP clients found. Install Claude Desktop, Cursor, or another
+                supported tool, then refresh.
+              </p>
+            ) : (
+              <>
+                {detectedClients.map((client) => (
+                  <ClientRow
+                    key={client.id}
+                    client={client}
+                    importCount={importableServers(client, registry).length}
+                    selected={
+                      view === "servers" && selectedClientId === client.id
+                    }
+                    onSelect={() => onSelectClient(client.id)}
+                  />
+                ))}
+                {missingClients.length > 0 && (
+                  <>
+                    <button
+                      onClick={() => setShowMissing((v) => !v)}
+                      className="mt-1 flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      <ChevronRight
+                        className={`size-3.5 shrink-0 transition-transform ${showMissing ? "rotate-90" : ""}`}
+                      />
+                      <span>Not detected</span>
+                      <span className="ml-auto">{missingClients.length}</span>
+                    </button>
+                    {showMissing &&
+                      missingClients.map((client) => (
+                        <ClientRow
+                          key={client.id}
+                          client={client}
+                          importCount={
+                            importableServers(client, registry).length
+                          }
+                          selected={
+                            view === "servers" && selectedClientId === client.id
+                          }
+                          onSelect={() => onSelectClient(client.id)}
+                        />
+                      ))}
+                  </>
+                )}
+              </>
+            )}
+          </nav>
+        </div>
       </div>
 
-      <VersionFooter onImport={onRegistryChange} onReplay={onReplayOnboarding} />
+      <VersionFooter
+        onImport={onRegistryChange}
+        onReplay={onReplayOnboarding}
+      />
     </aside>
   );
 }
