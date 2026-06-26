@@ -67,70 +67,69 @@ mod platform {
         }
     }
 
-    /// Result of a one-time keychain migration.
-    pub struct MigrationReport {
-        /// Entries whose values were read and re-created via the ACL-free path.
-        pub migrated: usize,
-        /// Entries that were deleted but couldn't be re-created (value unreadable
-        /// or re-creation failed). The user must re-authenticate these servers.
-        pub lost: usize,
-    }
-
     /// Migrate all `conduit-mcp` keychain entries from the legacy file-based
     /// keychain (ACL-bearing) to the ACL-free `SecItem` path.
     ///
-    /// **Algorithm (read-delete-rewrite):**
-    /// 1. For each `(server_id, key)` pair the registry knows about, read the
-    ///    current value via `get_generic_password`. From the app process this is
-    ///    safe — the user already has an "Always Allow" ACL grant for the app.
-    /// 2. Delete **all** entries for our service via `ItemSearchOptions` (refs
-    ///    only, no data) + FFI `SecKeychainItemDelete` — the only API that can
-    ///    reliably remove legacy file-based items.
-    /// 3. Re-create each read value via `set_generic_password` (`SecItemAdd`),
-    ///    which stores items without per-application ACLs. Since the old entries
-    ///    were deleted in step 2, `SecItemAdd` creates fresh items rather than
-    ///    updating existing ones (which would preserve the old ACL).
+    /// **Algorithm (per-key read-delete-rewrite):**
     ///
-    /// Entries whose values couldn't be read (locked keychain, denied access) are
-    /// still deleted — the user re-authenticates those servers.
-    pub fn migrate_legacy_entries(keys: &[(String, String)]) -> Result<MigrationReport, String> {
-        // Phase 1: Read values for all known secret keys.
-        let mut read: Vec<(String, String)> = Vec::new();
-        for (server_id, key) in keys {
-            match get_generic_password(SERVICE, &account(server_id, key)) {
-                Ok(bytes) => {
-                    if let Ok(v) = String::from_utf8(bytes) {
-                        read.push((account(server_id, key), v));
-                    }
-                }
-                Err(e) if e.code() == -25300 => {} // not found — skip
-                Err(_) => {}                       // unreadable — will be lost, user re-auths
-            }
-        }
-
-        // Phase 2: Delete all entries for our service.
-        delete_all_service_entries()?;
-
-        // Phase 3: Re-create each read value via SecItemAdd (ACL-free).
+    /// For each `(server_id, key)` pair:
+    /// 1. **Read** the current value via `get_generic_password`. Safe from the
+    ///    app process, which has ACL grants from the old version.
+    /// 2. **Delete** that specific entry by account-filtered ref search +
+    ///    FFI `SecKeychainItemDelete` (the only API that reliably removes legacy
+    ///    file-based items). Scoped to one account so an interruption costs one
+    ///    key, not all of them.
+    /// 3. **Re-create** the value via `set_generic_password` (`SecItemAdd`),
+    ///    which stores items without per-application ACLs. Since the old entry
+    ///    was just deleted, `SecItemAdd` creates a fresh item rather than hitting
+    ///    `SecItemUpdate` (which would preserve the old ACL).
+    ///
+    /// Keys that don't exist in the keychain (e.g. `__oauth_state__` for a
+    /// non-OAuth server) are counted as `not_found`, not a failure.
+    pub fn migrate_legacy_entries(
+        keys: &[(String, String)],
+    ) -> Result<super::MigrationReport, String> {
         let mut migrated = 0;
-        let mut lost = keys.len().saturating_sub(read.len());
-        for (acct, value) in &read {
-            match set_generic_password(SERVICE, acct, value.as_bytes()) {
-                Ok(()) => migrated += 1,
-                Err(_) => lost += 1,
+        let mut failed = 0;
+        let mut not_found = 0;
+
+        for (server_id, key) in keys {
+            let acct = account(server_id, key);
+            match get_generic_password(SERVICE, &acct) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(value) => {
+                        // Delete just this entry, then rewrite via SecItemAdd.
+                        // Per-account scoping means an interruption between delete
+                        // and rewrite costs one key, not the entire keychain.
+                        let _ = delete_entry_by_account(&acct);
+                        match set_generic_password(SERVICE, &acct, value.as_bytes()) {
+                            Ok(()) => migrated += 1,
+                            Err(_) => failed += 1,
+                        }
+                    }
+                    Err(_) => failed += 1, // non-UTF-8 value — can't round-trip
+                },
+                Err(e) if e.code() == -25300 => not_found += 1, // expected for reserved keys
+                Err(_) => failed += 1,                          // locked keychain, denied access
             }
         }
 
-        Ok(MigrationReport { migrated, lost })
+        Ok(super::MigrationReport {
+            migrated,
+            failed,
+            not_found,
+        })
     }
 
-    /// Delete all generic-password entries for our service by obtaining
-    /// `SecKeychainItem` refs and calling FFI `SecKeychainItemDelete` on each.
-    /// Returns the count deleted.
-    fn delete_all_service_entries() -> Result<usize, String> {
+    /// Delete all generic-password entries matching a specific account string.
+    /// Uses an account-filtered ref search + FFI `SecKeychainItemDelete` — the
+    /// only API that can reliably remove legacy file-based items (`SecItemDelete`
+    /// returns `errSecAuthFailed` for ACL-bearing entries on some macOS versions).
+    fn delete_entry_by_account(account_str: &str) -> Result<usize, String> {
         let results = match ItemSearchOptions::new()
             .class(ItemClass::generic_password())
             .service(SERVICE)
+            .account(account_str)
             .limit(Limit::All)
             .load_refs(true)
             .load_data(false)
@@ -144,9 +143,8 @@ mod platform {
         let mut deleted = 0;
         for result in results {
             if let SearchResult::Ref(Reference::KeychainItem(item)) = result {
-                match delete_keychain_item(&item) {
-                    Ok(()) => deleted += 1,
-                    Err(_) => {} // best-effort: skip items that can't be deleted
+                if delete_keychain_item(&item).is_ok() {
+                    deleted += 1;
                 }
             }
         }
@@ -196,11 +194,6 @@ mod platform {
             Err(e) => Err(e.to_string()),
         }
     }
-
-    pub struct MigrationReport {
-        pub migrated: usize,
-        pub lost: usize,
-    }
 }
 
 pub fn set_secret(server_id: &str, key: &str, value: &str) -> Result<(), String> {
@@ -236,41 +229,55 @@ pub fn delete_secret(server_id: &str, key: &str) -> Result<(), String> {
 /// Marker file name in the Conduit data directory.
 const MIGRATION_MARKER: &str = ".keychain-migrated";
 
+/// Result of the one-time keychain migration.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MigrationReport {
+    /// Entries whose values were read and re-created via the ACL-free path.
+    pub migrated: usize,
+    /// Entries that existed but couldn't be read or re-created (locked
+    /// keychain, denied access, non-UTF-8 value). The user must
+    /// re-authenticate these servers.
+    pub failed: usize,
+    /// Keys that had no keychain entry — expected for reserved keys like
+    /// `__oauth_state__` on non-OAuth servers. Not an error.
+    pub not_found: usize,
+}
+
 /// Run the one-time legacy keychain migration. For each secret key the registry
-/// knows about, reads the current value, deletes all service entries, and
-/// re-creates each via the ACL-free `SecItemAdd` path. Guarded by a marker file
-/// so it runs exactly once. Only call from the UI app (not the gateway).
+/// knows about, reads the current value, deletes the entry, and re-creates it
+/// via the ACL-free `SecItemAdd` path. Guarded by a marker file so it runs
+/// exactly once. Only call from the UI app (not the gateway).
 ///
 /// `secret_keys` is a list of `(server_id, key)` pairs for every secret env var
 /// in the registry (and `HTTP_AUTH_KEY` for remote servers).
 ///
-/// Returns `(migrated, lost)` where `lost` counts entries whose values couldn't
-/// be recovered (the user must re-authenticate those servers).
-pub fn migrate_legacy_entries(secret_keys: &[(String, String)]) -> (usize, usize) {
+/// The marker file is **only** written when the platform migration returns `Ok`.
+/// If it returns `Err` (e.g. the keychain was locked so the search failed), the
+/// marker is not written and the migration retries on the next launch.
+pub fn migrate_legacy_entries(secret_keys: &[(String, String)]) -> MigrationReport {
     #[cfg(target_os = "macos")]
     {
         if migration_marker_exists() {
-            return (0, 0);
+            return MigrationReport::default();
         }
 
-        let (migrated, lost) = match platform::migrate_legacy_entries(secret_keys) {
-            Ok(report) => (report.migrated, report.lost),
+        let report = match platform::migrate_legacy_entries(secret_keys) {
+            Ok(report) => report,
             Err(e) => {
-                eprintln!("conduit: keychain migration skipped ({e})");
-                (0, 0)
+                // Don't write the marker — the migration didn't run, so it
+                // should retry on the next launch.
+                eprintln!("conduit: keychain migration skipped, will retry next launch ({e})");
+                return MigrationReport::default();
             }
         };
 
-        // Create the marker regardless of individual failures. The migration ran;
-        // re-running it would re-read and re-write the same (now ACL-free) entries.
         let _ = create_migration_marker();
-
-        (migrated, lost)
+        report
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = secret_keys;
-        (0, 0)
+        MigrationReport::default()
     }
 }
 
@@ -311,35 +318,59 @@ mod tests {
     /// each entry via the ACL-free `SecItemAdd` path. After migration, the value
     /// is still readable.
     ///
-    /// This test validates the read-delete-rewrite cycle for a single entry
-    /// using the public API. It does NOT call `delete_all_service_entries()`
-    /// (which would wipe all conduit-mcp entries and race with parallel tests).
+    /// This test exercises the **full platform migration function**
+    /// (`platform::migrate_legacy_entries`), including the per-key
+    /// delete-and-rewrite cycle. It creates a test entry, runs the migration
+    /// for that key, and verifies the value survives.
     #[cfg(target_os = "macos")]
     #[test]
     fn migrate_preserves_values() {
         let sid = "conduit-migrate-test";
         let key = "MIGRATE_PRESERVE_KEY";
         let original = "s3cr3t-value-to-preserve";
+
+        // Pre-create the entry so the migration has something to migrate.
         set_secret(sid, key, original).unwrap();
 
-        // Phase 1: Read the value.
-        let value = get_secret(sid, key).expect("value should exist");
+        // Run the full platform migration for this one key.
+        let keys = vec![(sid.to_string(), key.to_string())];
+        let report = platform::migrate_legacy_entries(&keys).expect("migration should succeed");
 
-        // Phase 2: Delete the entry.
-        delete_secret(sid, key).unwrap();
-        assert_eq!(get_secret(sid, key), None, "entry should be gone after delete");
+        assert_eq!(report.migrated, 1, "one entry should have been migrated");
+        assert_eq!(report.failed, 0, "no entries should have failed");
+        assert_eq!(report.not_found, 0, "no entries should have been not-found");
 
-        // Phase 3: Re-create via set_secret (SecItemAdd — fresh entry, no ACL).
-        set_secret(sid, key, &value).unwrap();
-
-        // The value must survive the cycle intact.
+        // The value must survive the read-delete-rewrite cycle intact.
         assert_eq!(
             get_secret(sid, key).as_deref(),
             Some(original),
-            "secret value must survive read-delete-rewrite"
+            "secret value must survive migration"
         );
 
         // Clean up.
         delete_secret(sid, key).unwrap();
+    }
+
+    /// The migration correctly reports `not_found` for keys that don't exist in
+    /// the keychain (e.g. `__oauth_state__` on a non-OAuth server). This should
+    /// not be counted as a failure.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn migrate_reports_not_found_for_missing_keys() {
+        let sid = "conduit-missing-test";
+        let key = "THIS_KEY_DOES_NOT_EXIST";
+
+        // Ensure the entry doesn't exist.
+        let _ = delete_secret(sid, key);
+
+        let keys = vec![(sid.to_string(), key.to_string())];
+        let report = platform::migrate_legacy_entries(&keys).expect("migration should succeed");
+
+        assert_eq!(report.migrated, 0, "nothing to migrate");
+        assert_eq!(report.failed, 0, "missing keys are not failures");
+        assert_eq!(
+            report.not_found, 1,
+            "one key should be reported as not-found"
+        );
     }
 }

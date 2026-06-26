@@ -1051,13 +1051,12 @@ pub fn run() {
                 teams::TEAM_TOKEN_SERVER.to_string(),
                 teams::TEAM_TOKEN_KEY.to_string(),
             ));
-            let (migrated, lost) = secrets::migrate_legacy_entries(&keys);
-            if migrated > 0 {
+            let report = secrets::migrate_legacy_entries(&keys);
+            if report.migrated > 0 || report.failed > 0 {
                 eprintln!(
-                    "conduit: keychain migration complete ({migrated} entries rewritten, {lost} lost)"
+                    "conduit: keychain migration complete ({} entries rewritten, {} failed, {} not found)",
+                    report.migrated, report.failed, report.not_found
                 );
-            } else if lost > 0 {
-                eprintln!("conduit: keychain migration: {lost} entries could not be recovered");
             }
         });
     }
