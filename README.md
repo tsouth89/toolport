@@ -17,10 +17,12 @@ just 3 servers (62 tools) cost ~24,000 tokens of definitions before you've asked
 anything. Conduit advertises 3 meta-tools the agent searches on demand instead,
 so it pays ~660 tokens.
 
-**Measured: 97% less tool-definition overhead per request and ~90% fewer total
-tokens, at the same task success rate** (see [BENCHMARK.md](BENCHMARK.md)). That
-holds whether you run one AI tool or five, on cloud models (where tokens are your
-bill) or local ones (where tool defs eat your context window).
+**Measured on a frontier model: up to 91% fewer total tokens at the same task
+success** (graded for correct answers, not just completion), plus 97% less
+tool-definition overhead on every request, rising to 99.6% on a real 415-tool
+catalog (see [BENCHMARK.md](BENCHMARK.md)). That holds whether you run one AI tool
+or five, on cloud models (where tokens are your bill) or local ones (where tool defs
+eat your context window).
 
 ## Screenshots
 
@@ -38,10 +40,11 @@ Conduit fixes both:
 - **~90% fewer tokens.** In lazy-discovery mode the gateway advertises three
   meta-tools (`conduit_status`, `conduit_search_tools`, `conduit_call_tool`)
   instead of the full catalog. The agent searches and calls on demand, so context
-  stays flat no matter how many servers you connect. In a measured benchmark that's
-  97% less tool-definition overhead per request and ~90% fewer total tokens at the
-  same success rate ([BENCHMARK.md](BENCHMARK.md)). Ask `conduit_status` and it
-  reports what it has saved you so far, in tokens and dollars.
+  stays flat no matter how many servers you connect. In a measured benchmark, graded
+  for correct answers, that's up to 91% fewer total tokens at the same task success,
+  and 97% less tool-definition overhead per request (99.6% at a real 415-tool catalog)
+  ([BENCHMARK.md](BENCHMARK.md)). Ask `conduit_status` and it reports what it has saved
+  you so far, in tokens and dollars.
 - **Set up once, use everywhere.** Each client points at one Conduit gateway.
   Add a server and authenticate it a single time; it appears in every client.
 - **Per-agent scoping.** Give each client only the servers it should see. A
