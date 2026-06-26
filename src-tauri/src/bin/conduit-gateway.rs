@@ -1097,8 +1097,8 @@ fn connect_one(server: &ServerEntry, dirty: &Arc<AtomicBool>) -> Option<Downstre
             Ok(t) => DownstreamServer::connect(server.id.clone(), Box::new(t)),
             Err(e) => Err(e),
         }
-    } else if let Some(url) = &server.url {
-        remote::connect_remote(&server.id, url)
+    } else if server.url.is_some() {
+        remote::connect_remote(server)
     } else {
         Err("no command or url".to_string())
     };
