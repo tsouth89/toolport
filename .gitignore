@@ -74,6 +74,9 @@ dist-ssr
 # Local ground-truth for grading (your real account items) - never commit
 /benchmark/expect.local.json
 
+# Generated at build time by the Windows signing step (holds the resolved signCommand)
+/src-tauri/tauri.signing.conf.json
+
 # Internal planning/strategy docs (kept local, like MONETIZATION/STATUS/COMPETITIVE/PLAN)
 /docs/SITE-MESSAGING.md
 /docs/specs/

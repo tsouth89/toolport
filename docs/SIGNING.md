@@ -51,8 +51,46 @@ Get an installed cert's thumbprint with:
 Get-ChildItem Cert:\CurrentUser\My | Format-List Subject, Thumbprint
 ```
 
-Keep secrets out of the repo: in CI, store the thumbprint / Azure credentials as
-encrypted secrets and inject them into the build.
+## Azure Trusted Signing in this repo's CI (the live setup)
+
+The release workflow (`.github/workflows/release.yml`) already wires this up, and
+stays **inert until the secrets exist** (the signing step is gated on
+`AZURE_CLIENT_ID`, so an earlier-tagged release just builds unsigned). It installs
+`trusted-signing-cli`, writes a `signCommand` config, and Tauri signs the app exe,
+the bundled gateway sidecar, and the NSIS installer during the build (before the
+updater `.sig` is computed, so auto-update keeps working).
+
+**One-time Azure setup:**
+1. Create an **Artifact Signing (Trusted Signing) account** + complete **Individual**
+   identity validation, then create a **Public Trust certificate profile**. Note the
+   account name, the certificate profile name, and the account's endpoint URI (e.g.
+   `https://eus.codesigning.azure.net` for East US).
+2. Create a **service principal** for CI (Entra ID → App registrations → new
+   registration → add a client secret).
+3. On the signing **account → Access control (IAM)**, assign that app the
+   **"Trusted Signing Certificate Profile Signer"** role (this is the *signer* role,
+   distinct from the *Identity Verifier* role you assign to yourself).
+
+**GitHub secrets to add** (Settings → Secrets and variables → Actions → Secrets):
+
+| Secret | Value |
+|---|---|
+| `AZURE_TENANT_ID` | the app registration's Directory (tenant) ID |
+| `AZURE_CLIENT_ID` | the app registration's Application (client) ID |
+| `AZURE_CLIENT_SECRET` | the client secret value |
+
+**GitHub variables to add** (same page → Variables tab):
+
+| Variable | Value |
+|---|---|
+| `AZURE_SIGNING_PROFILE` | your certificate profile name (**required**) |
+| `AZURE_SIGNING_ENDPOINT` | optional, defaults to `https://eus.codesigning.azure.net` |
+| `AZURE_SIGNING_ACCOUNT` | optional, defaults to `southforgesigning` |
+
+With those set, the next `v*` tag produces a **signed** Windows installer. SmartScreen
+reputation still accrues with downloads, but the "unknown publisher" warning is gone
+and the publisher shows your validated name. Until the secrets are set, Windows ships
+unsigned and the bypass note below applies.
 
 ## SmartScreen bypass (for the unsigned beta)
 

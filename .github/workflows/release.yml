@@ -10,6 +10,12 @@ name: Release
 # key lives in two repo secrets: TAURI_SIGNING_PRIVATE_KEY and
 # TAURI_SIGNING_PRIVATE_KEY_PASSWORD. The matching public key is in
 # tauri.conf.json under plugins.updater.pubkey.
+#
+# Windows installers are Authenticode-signed via Azure Trusted Signing when the
+# AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET secrets and the
+# AZURE_SIGNING_PROFILE variable are set (see docs/SIGNING.md). Until then the
+# signing step is skipped and Windows ships unsigned. macOS signing is unchanged
+# (the APPLE_* secrets below).
 on:
   push:
     tags:
@@ -35,6 +41,15 @@ jobs:
           - os: ubuntu-22.04
             bundles: deb,appimage
     runs-on: ${{ matrix.os }}
+    env:
+      # Azure Trusted Signing credentials for Windows Authenticode. These stay empty
+      # until you add the repo secrets, which keeps signing inert: the setup step
+      # below is gated on AZURE_CLIENT_ID being non-empty, so a release tagged before
+      # the secrets exist builds an unsigned Windows installer exactly as before.
+      # trusted-signing-cli reads these via DefaultAzureCredential during the build.
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v7
 
@@ -89,8 +104,33 @@ jobs:
           echo "disk:"; df -h /
           echo "mem:"; free -h
 
+      # Windows Authenticode signing via Azure Trusted Signing. Gated on the
+      # AZURE_CLIENT_ID secret being present, so until the signing secrets exist
+      # this step is skipped and the Windows build is unsigned, exactly as before.
+      # trusted-signing-cli is a small Rust tool (the runner already has cargo).
+      # Tauri runs it as a per-binary signCommand, signing the app exe, the bundled
+      # gateway sidecar, and the NSIS installer BEFORE it computes the updater
+      # signature, so auto-update keeps working (a post-build sign would invalidate
+      # the .sig). Endpoint/account default to this project's values; the cert
+      # profile name must be set as the AZURE_SIGNING_PROFILE repo variable.
+      - name: Set up Windows code signing (Azure Trusted Signing)
+        id: winsign
+        if: matrix.os == 'windows-latest' && env.AZURE_CLIENT_ID != ''
+        shell: pwsh
+        run: |
+          cargo install trusted-signing-cli --locked
+          $endpoint = "${{ vars.AZURE_SIGNING_ENDPOINT }}"; if (-not $endpoint) { $endpoint = "https://eus.codesigning.azure.net" }
+          $account  = "${{ vars.AZURE_SIGNING_ACCOUNT }}";  if (-not $account)  { $account  = "southforgesigning" }
+          $certProfile = "${{ vars.AZURE_SIGNING_PROFILE }}"
+          if (-not $certProfile) { Write-Error "AZURE_SIGNING_PROFILE repo variable is not set (the certificate profile name)"; exit 1 }
+          $cmd = "trusted-signing-cli -e $endpoint -a $account -c $certProfile -d Conduit %1"
+          $conf = @{ bundle = @{ windows = @{ signCommand = $cmd } } } | ConvertTo-Json -Depth 5
+          Set-Content -Path "src-tauri/tauri.signing.conf.json" -Value $conf -Encoding utf8
+          "config_arg=--config src-tauri/tauri.signing.conf.json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Windows signing enabled:`n$conf"
+
       - name: Build installer
-        run: npx tauri build --config src-tauri/tauri.bundle.conf.json --bundles ${{ matrix.bundles }} ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+        run: npx tauri build --config src-tauri/tauri.bundle.conf.json ${{ steps.winsign.outputs.config_arg }} --bundles ${{ matrix.bundles }} ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
         env:
           # When set, prepare-sidecar builds the gateway for this target; empty on
           # Windows/Linux, which build for the host.
