@@ -2,6 +2,8 @@
 
 **All your MCP servers in one place, with ~90% fewer tokens.**
 
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/Xsn27MxdBA)
+
 ![Conduit: every tool from all your servers, collapsed to the 3 your agent loads](docs/feature.png)
 
 ![Conduit demo: add a server, connect it to every AI tool, and the agent uses it](docs/demo.gif)
