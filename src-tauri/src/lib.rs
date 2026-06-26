@@ -75,8 +75,8 @@ fn connect_server(server: &ServerEntry) -> Result<DownstreamServer, String> {
         }
         let t = StdioTransport::spawn(command, &server.args, &env)?;
         DownstreamServer::connect(server.id.clone(), Box::new(t))
-    } else if let Some(url) = &server.url {
-        remote::connect_remote(&server.id, url)
+    } else if server.url.is_some() {
+        remote::connect_remote(server)
     } else {
         Err("no command or url".to_string())
     }

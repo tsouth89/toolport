@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::downstream::{DownstreamServer, HttpTransport};
+use crate::registry::ServerEntry;
 use crate::{oauth, secrets};
 
 const STATE_KEY: &str = "__oauth_state__";
@@ -107,10 +108,34 @@ fn authed_transport(url: &str, token: Option<String>) -> Result<HttpTransport, S
     Ok(HttpTransport::with_auth(url, token))
 }
 
+/// The first custom secret env var that has a value vaulted in the keychain.
+/// For HTTP servers that don't use OAuth (e.g. Magica with a `BEARER` API key),
+/// this is the token we send as `Authorization: Bearer ***`.
+fn first_vaulted_secret(server: &ServerEntry) -> Option<String> {
+    for e in &server.env {
+        if e.secret && e.value.is_none() {
+            if let Some(v) = secrets::get_secret(&server.id, &e.key) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
 /// Connect to a remote server, injecting any vaulted token. On an auth error,
 /// refresh the token once and retry.
-pub fn connect_remote(server_id: &str, url: &str) -> Result<DownstreamServer, String> {
-    let auth = secrets::get_secret(server_id, secrets::HTTP_AUTH_KEY);
+///
+/// Token lookup order for HTTP servers:
+/// 1. `__http_auth__` — the key used by the OAuth flow and the "paste token" UI.
+/// 2. The first vaulted custom secret env var (e.g. `BEARER`) — for servers like
+///    Magica that declare a manual API-key env var in the registry but don't use
+///    OAuth. Without this fallback, "Manage secrets" tokens were silently ignored
+///    for HTTP servers.
+pub fn connect_remote(server: &ServerEntry) -> Result<DownstreamServer, String> {
+    let url = server.url.as_deref().unwrap_or("");
+    let server_id = &server.id;
+    let auth = secrets::get_secret(server_id, secrets::HTTP_AUTH_KEY)
+        .or_else(|| first_vaulted_secret(server));
     let transport = authed_transport(url, auth)?;
     match DownstreamServer::connect(server_id.to_string(), Box::new(transport)) {
         Ok(ds) => Ok(ds),
