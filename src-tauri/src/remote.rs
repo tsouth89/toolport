@@ -12,6 +12,7 @@ use crate::registry::ServerEntry;
 use crate::{oauth, secrets};
 
 const STATE_KEY: &str = "__oauth_state__";
+pub const OAUTH_STATE_KEY: &str = STATE_KEY;
 
 #[derive(Serialize, Deserialize)]
 struct OAuthState {

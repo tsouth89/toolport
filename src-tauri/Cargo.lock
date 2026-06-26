@@ -543,11 +543,13 @@ name = "conduit"
 version = "0.4.2"
 dependencies = [
  "base64 0.22.1",
+ "core-foundation 0.10.1",
  "dirs 5.0.1",
  "getrandom 0.2.17",
  "json5",
  "keyring",
  "security-framework 3.7.0",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "serde_yaml",

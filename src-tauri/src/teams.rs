@@ -14,8 +14,8 @@ use serde_json::Value;
 use crate::registry::{EnvVar, Registry, ServerEntry, TeamConnection};
 
 /// Reserved keychain slot for the member bearer token (one team connection at a time).
-const TEAM_TOKEN_SERVER: &str = "__conduit_team__";
-const TEAM_TOKEN_KEY: &str = "member_token";
+pub const TEAM_TOKEN_SERVER: &str = "__conduit_team__";
+pub const TEAM_TOKEN_KEY: &str = "member_token";
 
 pub fn save_token(token: &str) -> Result<(), String> {
     crate::secrets::set_secret(TEAM_TOKEN_SERVER, TEAM_TOKEN_KEY, token)
