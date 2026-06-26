@@ -226,7 +226,9 @@ pub fn delete_secret(server_id: &str, key: &str) -> Result<(), String> {
 // UI app runs it — the gateway can't read legacy entries without triggering
 // prompts (it's a separately signed process without ACL grants).
 
-/// Marker file name in the Conduit data directory.
+/// Marker file name in the Conduit data directory. Only the macOS migration reads
+/// it, so it's cfg-gated to avoid a dead-code warning on Windows/Linux builds.
+#[cfg(target_os = "macos")]
 const MIGRATION_MARKER: &str = ".keychain-migrated";
 
 /// Result of the one-time keychain migration.
