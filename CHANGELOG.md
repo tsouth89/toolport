@@ -3,16 +3,14 @@
 All notable changes to Conduit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the GitHub releases.
 
-## [Unreleased]
+## [0.4.0] - 2026-06-26
+
+A security + intent-search release: Conduit now covers the whole tool-trust
+boundary (both tool definitions and tool results), searches by meaning, can be
+driven by the agent on your terms, and supports two more clients.
 
 ### Added
-- **Content defense (anti-agentjacking).** The gateway scans untrusted tool *results*
-  for injection-like content and, on a hit, wraps the offending text with a provenance
-  marker ("external data, not instructions") before the agent sees it, plus records a
-  security notice. Information-preserving (the original text stays inside the marker),
-  only flagged results are touched, never blocks. On by default (`contentDefense`). The
-  result-side companion to the definition-side integrity checks.
-- **Tool-definition integrity (rug-pull + poisoning detection).** The gateway now
+- **Tool-definition integrity (rug-pull + poisoning detection).** The gateway
   fingerprints every tool when a server is first connected and diffs it on each
   refresh. If a previously-approved tool's definition changes, or a known server adds
   a tool (the signature of a "rug pull"), it records a security event. It also scans
@@ -20,32 +18,43 @@ All notable changes to Conduit are documented here. Format loosely follows
   jumping) when first seen or when it changes. Both surface as notices in the Activity
   view. Detection only, never blocks; on by default (`integrityCheck`), fully local.
   New `get_security_events` command + `security.jsonl`.
-- **OpenRouter** added to the curated catalog (live model intelligence; OAuth).
+- **Content defense (anti-agentjacking).** The gateway scans untrusted tool *results*
+  for injection-like content and, on a hit, wraps the offending text with a provenance
+  marker ("external data, not instructions") before the agent sees it, plus records a
+  security notice. Information-preserving (the original text stays inside the marker),
+  only flagged results are touched, never blocks. On by default (`contentDefense`). The
+  result-side companion to the definition-side integrity checks.
 - **Semantic tool search (optional).** `conduit_search_tools` can blend embedding
   similarity into its lexical ranking so paraphrased needs surface the right tool, not
   just keyword matches. Off by default (`semanticSearch`); point it at any
   OpenAI-compatible `/v1/embeddings` endpoint. Tool embeddings are cached on disk; on
   any failure it falls back to pure lexical, so it can only add signal, never degrade.
   New `benchmark/retrieval.mjs` measures retrieval recall (lexical vs semantic).
-
-### Changed
-- Benchmark suite: added a graded server-sweep harness (`bench-sweep.mjs`) that
-  grades answers for correctness, not just completion, and expanded `token-cost.mjs`
-  (context-window share, scaling curve, per-tool distribution, multi-volume dollar
-  tables).
-
-## [0.3.19] - 2026-06-25
-
-### Added
 - **Controllable MCP (opt-in agent control).** A new *Allow agent control* switch
   (off by default) lets an agent enable or disable servers through the gateway
   (`conduit_enable_server` / `conduit_disable_server`). The destructive-tool block
   stays user-only, so granting it can't let an agent escalate past your governance;
   the app watches the registry and reflects an agent's change live.
+- **Two more clients / catalog entries.** **Hermes** (NousResearch Hermes Agent, YAML
+  `mcp_servers` in `~/.hermes/config.yaml`) is now supported, bringing the total to
+  **20 clients** (#20). **Firecrawl** (#19) and **OpenRouter** (live model
+  intelligence) were added to the curated catalog.
+
+### Changed
+- Benchmark suite: added a graded server-sweep harness (`bench-sweep.mjs`) that grades
+  answers for correctness, not just completion, and expanded `token-cost.mjs`
+  (context-window share, scaling curve, per-tool distribution, multi-volume dollar
+  tables). Headline numbers re-measured on a frontier model: up to ~91% fewer total
+  tokens at the same graded task success.
 
 ### Fixed
 - The Playground policy toggles lay out as an even responsive grid instead of
   orphaning the third switch onto its own row.
+
+### Internal
+- Release pipeline wired for Windows Authenticode signing via Azure Trusted Signing,
+  gated and inert until the signing secrets are configured (changes nothing until the
+  certificate is ready).
 
 ## [0.3.18] - 2026-06-25
 
