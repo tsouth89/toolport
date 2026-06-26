@@ -75,6 +75,10 @@ enum Format {
     /// `command`/`env`) and a `type` tag distinguish it from mcpServers. The file
     /// also holds the user's model config, so it's read leniently and never wiped.
     YamlExtensions,
+    /// YAML with a top-level `mcp_servers` map (Hermes). Each entry has
+    /// `command`/`args` (stdio) or `url` (http/sse), with optional `headers`,
+    /// `timeout`, `connect_timeout`, etc. The file also holds user model/config.
+    YamlMcpServers,
 }
 
 struct ClientDef {
@@ -317,6 +321,13 @@ fn zed_path() -> Option<PathBuf> {
     }
 }
 
+/// Hermes keeps MCP servers in ~/.hermes/config.yaml under the `mcp_servers:` key.
+/// The file is YAML and also holds the user's model and platform toolsets config,
+/// so it's read leniently and never wiped on a parse failure.
+fn hermes_path() -> Option<PathBuf> {
+    Some(home()?.join(".hermes").join("config.yaml"))
+}
+
 fn cursor_plugins_dir() -> Option<PathBuf> {
     Some(home()?.join(".cursor").join("plugins").join("cache"))
 }
@@ -533,6 +544,14 @@ fn defs() -> Vec<ClientDef> {
             path: goose_path,
             plugin_scan: None,
         },
+        ClientDef {
+            id: "hermes",
+            name: "Hermes",
+            format: Format::YamlMcpServers,
+            uses_connectors: false,
+            path: hermes_path,
+            plugin_scan: None,
+        },
     ]
 }
 
@@ -627,7 +646,10 @@ fn parse_json(content: &str, key: &str) -> Result<Vec<McpServer>, String> {
         None => return Ok(Vec::new()),
     };
 
-    let mut servers: Vec<McpServer> = obj.iter().map(|(name, def)| json_server(name, def)).collect();
+    let mut servers: Vec<McpServer> = obj
+        .iter()
+        .map(|(name, def)| json_server(name, def))
+        .collect();
     servers.sort_by_key(|s| s.name.to_lowercase());
     Ok(servers)
 }
@@ -642,7 +664,10 @@ fn parse_toml(content: &str) -> Result<Vec<McpServer>, String> {
     let mut servers: Vec<McpServer> = table
         .iter()
         .map(|(name, def)| {
-            let command = def.get("command").and_then(|c| c.as_str()).map(String::from);
+            let command = def
+                .get("command")
+                .and_then(|c| c.as_str())
+                .map(String::from);
             let url = def.get("url").and_then(|u| u.as_str()).map(String::from);
             let args = def
                 .get("args")
@@ -790,7 +815,14 @@ fn read_client(def: &ClientDef) -> DetectedClient {
 
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(e) => return build(config_path, true, Vec::new(), Some(format!("Could not read config: {e}"))),
+        Err(e) => {
+            return build(
+                config_path,
+                true,
+                Vec::new(),
+                Some(format!("Could not read config: {e}")),
+            )
+        }
     };
 
     if content.trim().is_empty() {
@@ -803,11 +835,17 @@ fn read_client(def: &ClientDef) -> DetectedClient {
         Format::JsonContextServers => parse_json(&content, "context_servers"),
         Format::TomlMcpServers => parse_toml(&content),
         Format::YamlExtensions => parse_yaml_extensions(&content),
+        Format::YamlMcpServers => parse_hermes_yaml_servers(&content),
     };
 
     match parsed {
         Ok(servers) => build(config_path, true, servers, None),
-        Err(e) => build(config_path, true, Vec::new(), Some(format!("Could not parse config: {e}"))),
+        Err(e) => build(
+            config_path,
+            true,
+            Vec::new(),
+            Some(format!("Could not parse config: {e}")),
+        ),
     }
 }
 
@@ -1026,12 +1064,20 @@ fn parse_yaml_extensions(content: &str) -> Result<Vec<McpServer>, String> {
             let args = def
                 .get("args")
                 .and_then(|v| v.as_sequence())
-                .map(|seq| seq.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let env_keys = def
                 .get("envs")
                 .and_then(|v| v.as_mapping())
-                .map(|m| m.keys().filter_map(|k| k.as_str().map(String::from)).collect())
+                .map(|m| {
+                    m.keys()
+                        .filter_map(|k| k.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             Some(McpServer {
                 name,
@@ -1081,8 +1127,9 @@ fn read_existing_yaml(path: &Path) -> Result<serde_yaml::Value, String> {
     if content.trim().is_empty() {
         return Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
     }
-    serde_yaml::from_str(&content)
-        .map_err(|e| format!("Could not parse the existing config.yaml ({e}); leaving it untouched."))
+    serde_yaml::from_str(&content).map_err(|e| {
+        format!("Could not parse the existing config.yaml ({e}); leaving it untouched.")
+    })
 }
 
 fn yaml_extensions_mut(root: &mut serde_yaml::Value) -> &mut serde_yaml::Mapping {
@@ -1092,7 +1139,10 @@ fn yaml_extensions_mut(root: &mut serde_yaml::Value) -> &mut serde_yaml::Mapping
     let map = root.as_mapping_mut().unwrap();
     let key = serde_yaml::Value::String("extensions".into());
     if !map.get(&key).map(|v| v.is_mapping()).unwrap_or(false) {
-        map.insert(key.clone(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        map.insert(
+            key.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
     }
     map.get_mut(&key).unwrap().as_mapping_mut().unwrap()
 }
@@ -1102,7 +1152,10 @@ fn write_yaml_extensions(path: &Path, servers: &[ServerEntry]) -> Result<(), Str
     let exts = yaml_extensions_mut(&mut root);
     exts.clear();
     for s in servers {
-        exts.insert(serde_yaml::Value::String(s.name.clone()), entry_to_goose_yaml(s));
+        exts.insert(
+            serde_yaml::Value::String(s.name.clone()),
+            entry_to_goose_yaml(s),
+        );
     }
     let out = serde_yaml::to_string(&root).map_err(|e| e.to_string())?;
     atomic_write(path, &out)
@@ -1121,6 +1174,173 @@ fn edit_yaml_gateway(path: &Path, install: bool, profile: Option<&str>) -> Resul
     atomic_write(path, &out)
 }
 
+// ---------------------------------------------------------------------------
+// Hermes (YAML `mcp_servers:` map).
+//
+// Hermes stores MCP servers in ~/.hermes/config.yaml under a top-level
+// `mcp_servers:` key — the same conceptual location as Claude Desktop's JSON
+// `mcpServers`, but in YAML. Each entry uses `command`/`args` (stdio) or `url`
+// (http/sse), with optional `headers`, `env`, `timeout`, `connect_timeout`, etc.
+// The file also holds the user's model and platform toolsets config, so it is
+// read leniently and never wiped on a parse failure.
+// ---------------------------------------------------------------------------
+
+/// Parse a Hermes `config.yaml` with a top-level `mcp_servers:` map. Each entry has
+/// `command`/`args` (stdio) or `url` (http/sse), with optional `headers`,
+/// `timeout`, `connect_timeout`, etc.
+fn parse_hermes_yaml_servers(content: &str) -> Result<Vec<McpServer>, String> {
+    if content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let value: serde_yaml::Value = serde_yaml::from_str(content).map_err(|e| e.to_string())?;
+    let servers_map = match value.get("mcp_servers").and_then(|v| v.as_mapping()) {
+        Some(m) => m,
+        None => return Ok(Vec::new()),
+    };
+    let mut servers: Vec<McpServer> = servers_map
+        .iter()
+        .filter_map(|(k, def)| {
+            let name = k.as_str()?.to_string();
+            let def = def.as_mapping()?;
+            let str_of = |key: &str| def.get(key).and_then(|v| v.as_str()).map(String::from);
+            let command = str_of("command").filter(|s| !s.is_empty());
+            let url = str_of("url").filter(|s| !s.is_empty());
+            if command.is_none() && url.is_none() {
+                return None;
+            }
+            let args = def
+                .get("args")
+                .and_then(|v| v.as_sequence())
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Extract env/header keys from `headers` and `env` sub-maps.
+            let mut env_keys: Vec<String> = Vec::new();
+            for key in &["headers", "env"] {
+                if let Some(m) = def.get(*key).and_then(|v| v.as_mapping()) {
+                    env_keys.extend(m.keys().filter_map(|k| k.as_str().map(String::from)));
+                }
+            }
+            env_keys.sort_unstable();
+            env_keys.dedup();
+            Some(McpServer {
+                name,
+                transport: if url.is_some() { "http" } else { "stdio" }.into(),
+                command,
+                args,
+                env_keys,
+                url,
+            })
+        })
+        .collect();
+    servers.sort_by_key(|s| s.name.to_lowercase());
+    Ok(servers)
+}
+
+/// Build a Hermes stdio/HTTP server entry for a server entry.
+fn entry_to_hermes_yaml(entry: &ServerEntry) -> serde_yaml::Value {
+    let mut cfg: serde_yaml::Mapping = serde_yaml::Mapping::new();
+    if let Some(cmd) = &entry.command {
+        cfg.insert(
+            serde_yaml::Value::String("command".into()),
+            serde_yaml::Value::String(cmd.clone()),
+        );
+    }
+    if !entry.args.is_empty() {
+        cfg.insert(
+            serde_yaml::Value::String("args".into()),
+            serde_yaml::Value::Sequence(
+                entry
+                    .args
+                    .iter()
+                    .map(|a| serde_yaml::Value::String(a.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(url) = &entry.url {
+        cfg.insert(
+            serde_yaml::Value::String("url".into()),
+            serde_yaml::Value::String(url.clone()),
+        );
+    }
+    // Hermes stores subprocess env vars under `env` (same purpose as Goose's `envs`).
+    // Auth headers for HTTP servers are handled at import time, not reconstructed here.
+    let env: serde_yaml::Mapping = entry
+        .env
+        .iter()
+        .filter_map(|e| {
+            e.value.as_ref().map(|v| {
+                (
+                    serde_yaml::Value::String(e.key.clone()),
+                    serde_yaml::Value::String(v.clone()),
+                )
+            })
+        })
+        .collect();
+    if !env.is_empty() {
+        cfg.insert(
+            serde_yaml::Value::String("env".into()),
+            serde_yaml::Value::Mapping(env),
+        );
+    }
+    serde_yaml::Value::Mapping(cfg)
+}
+
+/// Read a Hermes config.yaml we're about to modify. Same contract as
+/// `read_existing_yaml`: an unparseable non-empty file is an ERROR, never
+/// replaced — config.yaml also holds the user's model and toolsets.
+fn read_existing_hermes_yaml(path: &Path) -> Result<serde_yaml::Value, String> {
+    read_existing_yaml(path)
+}
+
+fn hermes_mcp_servers_mut(root: &mut serde_yaml::Value) -> &mut serde_yaml::Mapping {
+    if !root.is_mapping() {
+        *root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    let map = root.as_mapping_mut().unwrap();
+    let key = serde_yaml::Value::String("mcp_servers".into());
+    if !map.get(&key).map(|v| v.is_mapping()).unwrap_or(false) {
+        map.insert(
+            key.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+    }
+    map.get_mut(&key).unwrap().as_mapping_mut().unwrap()
+}
+
+fn write_hermes_yaml_servers(path: &Path, servers: &[ServerEntry]) -> Result<(), String> {
+    let mut root = read_existing_hermes_yaml(path)?;
+    let mcp_servers = hermes_mcp_servers_mut(&mut root);
+    mcp_servers.clear();
+    for entry in servers {
+        let name_val = serde_yaml::Value::String(entry.id.clone());
+        mcp_servers.insert(name_val, entry_to_hermes_yaml(entry));
+    }
+    let out = serde_yaml::to_string(&root).map_err(|e| e.to_string())?;
+    atomic_write(path, &out)
+}
+
+fn edit_hermes_yaml_gateway(
+    path: &Path,
+    install: bool,
+    profile: Option<&str>,
+) -> Result<(), String> {
+    let mut root = read_existing_hermes_yaml(path)?;
+    let mcp_servers = hermes_mcp_servers_mut(&mut root);
+    let key = serde_yaml::Value::String(GATEWAY_ENTRY_NAME.into());
+    if install {
+        mcp_servers.insert(key, entry_to_hermes_yaml(&gateway_entry(profile)?));
+    } else {
+        mcp_servers.remove(&key);
+    }
+    let out = serde_yaml::to_string(&root).map_err(|e| e.to_string())?;
+    atomic_write(path, &out)
+}
+
 /// Write a server set into a client's config, backing up the existing file first
 /// and preserving any unrelated top-level keys.
 pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOutcome, String> {
@@ -1133,6 +1353,7 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
         Format::JsonContextServers => write_json(&path, "context_servers", servers, true)?,
         Format::TomlMcpServers => write_toml(&path, servers)?,
         Format::YamlExtensions => write_yaml_extensions(&path, servers)?,
+        Format::YamlMcpServers => write_hermes_yaml_servers(&path, servers)?,
     }
     Ok(WriteOutcome {
         path: path.display().to_string(),
@@ -1260,7 +1481,10 @@ fn edit_json_gateway(
     }
     let obj = root.as_object_mut().unwrap();
     if !obj.get(key).map(|v| v.is_object()).unwrap_or(false) {
-        obj.insert(key.to_string(), serde_json::Value::Object(serde_json::Map::new()));
+        obj.insert(
+            key.to_string(),
+            serde_json::Value::Object(serde_json::Map::new()),
+        );
     }
     let servers = obj.get_mut(key).unwrap().as_object_mut().unwrap();
     if install {
@@ -1288,10 +1512,21 @@ fn edit_toml_gateway(path: &Path, install: bool, profile: Option<&str>) -> Resul
         root = toml::Value::Table(toml::map::Map::new());
     }
     let table = root.as_table_mut().unwrap();
-    if !table.get("mcp_servers").map(|v| v.is_table()).unwrap_or(false) {
-        table.insert("mcp_servers".to_string(), toml::Value::Table(toml::map::Map::new()));
+    if !table
+        .get("mcp_servers")
+        .map(|v| v.is_table())
+        .unwrap_or(false)
+    {
+        table.insert(
+            "mcp_servers".to_string(),
+            toml::Value::Table(toml::map::Map::new()),
+        );
     }
-    let servers = table.get_mut("mcp_servers").unwrap().as_table_mut().unwrap();
+    let servers = table
+        .get_mut("mcp_servers")
+        .unwrap()
+        .as_table_mut()
+        .unwrap();
     if install {
         servers.insert(
             GATEWAY_ENTRY_NAME.to_string(),
@@ -1321,6 +1556,7 @@ fn install_or_remove(
         }
         Format::TomlMcpServers => edit_toml_gateway(&path, install, profile)?,
         Format::YamlExtensions => edit_yaml_gateway(&path, install, profile)?,
+        Format::YamlMcpServers => edit_hermes_yaml_gateway(&path, install, profile)?,
     }
     Ok(WriteOutcome {
         path: path.display().to_string(),
@@ -1375,7 +1611,10 @@ mod tests {
             name: name.to_string(),
             transport: "stdio".to_string(),
             command: Some("npx".to_string()),
-            args: vec!["-y".to_string(), format!("@modelcontextprotocol/server-{name}")],
+            args: vec![
+                "-y".to_string(),
+                format!("@modelcontextprotocol/server-{name}"),
+            ],
             env: vec![EnvVar {
                 key: "TOKEN".to_string(),
                 value: Some("plain-value".to_string()),
@@ -1413,14 +1652,21 @@ mod tests {
         let parsed = parse_json(content, "mcpServers").unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "supabase");
-        assert_eq!(parsed[0].url.as_deref(), Some("https://mcp.supabase.com/mcp"));
+        assert_eq!(
+            parsed[0].url.as_deref(),
+            Some("https://mcp.supabase.com/mcp")
+        );
         assert_eq!(parsed[0].transport, "http");
     }
 
     #[test]
     fn json_write_preserves_unrelated_keys() {
         let path = temp_path("json-preserve");
-        std::fs::write(&path, r#"{"theme":"dark","mcpServers":{"old":{"command":"x"}}}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"theme":"dark","mcpServers":{"old":{"command":"x"}}}"#,
+        )
+        .unwrap();
         write_json(&path, "mcpServers", &[stdio("fresh")], false).unwrap();
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -1449,8 +1695,7 @@ mod tests {
         let path = temp_path("toml-preserve");
         std::fs::write(&path, "model = \"opus\"\n").unwrap();
         write_toml(&path, &[stdio("linear")]).unwrap();
-        let root: toml::Value =
-            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let root: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         std::fs::remove_file(&path).ok();
         assert_eq!(root.get("model").and_then(|v| v.as_str()), Some("opus"));
         assert!(root
@@ -1499,7 +1744,11 @@ mod tests {
         let servers = scan_cursor_plugins();
         println!("cursor plugin servers found: {}", servers.len());
         for s in &servers {
-            let target = s.command.clone().or_else(|| s.url.clone()).unwrap_or_default();
+            let target = s
+                .command
+                .clone()
+                .or_else(|| s.url.clone())
+                .unwrap_or_default();
             println!("  {} [{}] {}", s.name, s.transport, target);
         }
     }
@@ -1508,12 +1757,14 @@ mod tests {
     fn install_override_targets_the_unreliable_clients() {
         // Clients whose config-parent heuristic is wrong get an explicit install dir.
         assert!(
-            install_override("claude-code").unwrap().ends_with(".claude"),
+            install_override("claude-code")
+                .unwrap()
+                .ends_with(".claude"),
             "Claude Code must check ~/.claude, not the home dir its config sits in"
         );
         assert!(install_override("kiro").unwrap().ends_with(".kiro"));
         let _ = install_override("warp"); // env-dependent; just ensure no panic.
-        // Well-behaved clients have no override (they use the config-parent heuristic).
+                                          // Well-behaved clients have no override (they use the config-parent heuristic).
         assert!(install_override("cursor").is_none());
         assert!(install_override("codex").is_none());
         assert!(install_override("vscode").is_none());
@@ -1603,7 +1854,10 @@ mod tests {
         edit_yaml_gateway(&path, true, None).unwrap();
         let v: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v.get("GOOSE_MODEL").and_then(|x| x.as_str()), Some("gpt-4o"));
+        assert_eq!(
+            v.get("GOOSE_MODEL").and_then(|x| x.as_str()),
+            Some("gpt-4o")
+        );
         let exts = v.get("extensions").and_then(|x| x.as_mapping()).unwrap();
         assert!(exts.get("fetch").is_some());
         let conduit = exts.get("conduit").and_then(|x| x.as_mapping()).unwrap();
@@ -1615,7 +1869,10 @@ mod tests {
         edit_yaml_gateway(&path, false, None).unwrap();
         let after: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let exts2 = after.get("extensions").and_then(|x| x.as_mapping()).unwrap();
+        let exts2 = after
+            .get("extensions")
+            .and_then(|x| x.as_mapping())
+            .unwrap();
         assert!(exts2.get("conduit").is_none());
         assert!(exts2.get("fetch").is_some());
         std::fs::remove_file(&path).ok();
@@ -1636,6 +1893,90 @@ mod tests {
     fn goose_is_registered_as_yaml_extensions() {
         let d = defs().into_iter().find(|d| d.id == "goose").unwrap();
         assert!(matches!(d.format, Format::YamlExtensions));
+        assert!((d.path)().is_some());
+    }
+
+    #[test]
+    fn hermes_yaml_round_trip_preserves_config() {
+        let path = temp_path("hermes.yaml");
+        // A real config.yaml has model settings AND mcp_servers; touch neither but ours.
+        std::fs::write(
+            &path,
+            "model:\n  default: gpt-4o\nmcp_servers:\n  zread:\n    connect_timeout: 30\n    headers:\n      Authorization: Bearer token\n    timeout: 120\n    url: https://mcp.example.com/mcp\n",
+        )
+        .unwrap();
+
+        // Parse reads the existing server as an HTTP server.
+        let parsed = parse_hermes_yaml_servers(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "zread");
+        assert_eq!(
+            parsed[0].url.as_deref(),
+            Some("https://mcp.example.com/mcp")
+        );
+        assert_eq!(parsed[0].transport, "http");
+        assert_eq!(parsed[0].env_keys, vec!["Authorization".to_string()]);
+
+        // Installing the gateway preserves the model key and the existing server.
+        edit_hermes_yaml_gateway(&path, true, None).unwrap();
+        let v: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            v.get("model")
+                .and_then(|m| m.get("default"))
+                .and_then(|x| x.as_str()),
+            Some("gpt-4o")
+        );
+        let servers = v.get("mcp_servers").and_then(|x| x.as_mapping()).unwrap();
+        assert!(servers.get("zread").is_some());
+        let conduit = servers.get("conduit").and_then(|x| x.as_mapping()).unwrap();
+        assert!(conduit.get("command").and_then(|x| x.as_str()).is_some());
+
+        // Uninstall removes only conduit.
+        edit_hermes_yaml_gateway(&path, false, None).unwrap();
+        let after: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let servers2 = after
+            .get("mcp_servers")
+            .and_then(|x| x.as_mapping())
+            .unwrap();
+        assert!(servers2.get("conduit").is_none());
+        assert!(servers2.get("zread").is_some());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn hermes_yaml_edit_never_wipes_unparseable() {
+        let path = temp_path("hermes-bad.yaml");
+        let garbage = "key: value\n  - [unbalanced flow sequence\n:::not valid";
+        std::fs::write(&path, garbage).unwrap();
+        // A parse failure must error, never replace config.yaml (it holds model config).
+        assert!(edit_hermes_yaml_gateway(&path, true, None).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn hermes_mcp_servers_mut_recovers_from_non_mapping() {
+        // If mcp_servers is a scalar (corrupt but parseable YAML), the helper
+        // must replace it with an empty map instead of panicking.
+        let mut root: serde_yaml::Value = serde_yaml::from_str("mcp_servers: oops").unwrap();
+        let m = hermes_mcp_servers_mut(&mut root);
+        assert!(m.is_empty());
+        // After inserting a gateway, the key is a proper mapping.
+        m.insert(
+            serde_yaml::Value::String("conduit".into()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let back: serde_yaml::Value =
+            serde_yaml::from_str(&serde_yaml::to_string(&root).unwrap()).unwrap();
+        assert!(back.get("mcp_servers").unwrap().is_mapping());
+    }
+
+    #[test]
+    fn hermes_is_registered_as_yaml_mcp_servers() {
+        let d = defs().into_iter().find(|d| d.id == "hermes").unwrap();
+        assert!(matches!(d.format, Format::YamlMcpServers));
         assert!((d.path)().is_some());
     }
 }
