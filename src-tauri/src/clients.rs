@@ -1317,7 +1317,7 @@ fn write_hermes_yaml_servers(path: &Path, servers: &[ServerEntry]) -> Result<(),
     let mcp_servers = hermes_mcp_servers_mut(&mut root);
     mcp_servers.clear();
     for entry in servers {
-        let name_val = serde_yaml::Value::String(entry.id.clone());
+        let name_val = serde_yaml::Value::String(entry.name.clone());
         mcp_servers.insert(name_val, entry_to_hermes_yaml(entry));
     }
     let out = serde_yaml::to_string(&root).map_err(|e| e.to_string())?;
