@@ -234,6 +234,19 @@ export interface Registry {
   lazyDiscovery?: boolean;
   /** Opt-in: let an agent enable/disable servers via the gateway's control tools. */
   allowAgentControl?: boolean;
+  /** Connection to a Conduit Teams server, if joined. Token lives in the keychain. */
+  team?: TeamConnection | null;
+}
+
+/** A joined Conduit Teams server (the shared config-sync layer). */
+export interface TeamConnection {
+  serverUrl: string;
+  teamId: string;
+  /** "admin" | "member" */
+  role: string;
+  memberName?: string | null;
+  /** Last team config version pulled. */
+  lastVersion?: number;
 }
 
 export function activeProfile(registry: Registry): Profile | undefined {

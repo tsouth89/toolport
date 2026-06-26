@@ -117,6 +117,34 @@ export function setAllowAgentControl(allow: boolean): Promise<Registry> {
   return invoke<Registry>("set_allow_agent_control", { allow });
 }
 
+/** Join a Conduit Teams server with an invite code; merges the team's servers in. */
+export function teamConnect(
+  serverUrl: string,
+  inviteCode: string,
+  memberName?: string,
+): Promise<Registry> {
+  return invoke<Registry>("team_connect", {
+    serverUrl,
+    inviteCode,
+    memberName: memberName ?? null,
+  });
+}
+
+/** Pull the latest team config and re-merge it (no-op if unchanged). */
+export function teamSync(): Promise<Registry> {
+  return invoke<Registry>("team_sync");
+}
+
+/** Leave the team: remove its merged servers and clear the saved token. */
+export function teamDisconnect(): Promise<Registry> {
+  return invoke<Registry>("team_disconnect");
+}
+
+/** Admin: push the current local server set as the team's shared config; returns version. */
+export function teamPush(): Promise<number> {
+  return invoke<number>("team_push");
+}
+
 /** Probe every supported MCP client and read its current server configuration. */
 export function detectClients(): Promise<DetectedClient[]> {
   return invoke<DetectedClient[]>("detect_clients");

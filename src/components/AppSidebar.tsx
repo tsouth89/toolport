@@ -12,6 +12,7 @@ import {
   ScrollText,
   Share2,
   Store,
+  Users,
 } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -354,8 +355,8 @@ interface Props {
   onRegistryChange: (registry: Registry) => void;
   selectedClientId: string | null;
   onSelectClient: (id: string | null) => void;
-  view: "servers" | "activity" | "catalog" | "playground";
-  onSelectView: (view: "servers" | "activity" | "catalog" | "playground") => void;
+  view: "servers" | "activity" | "catalog" | "playground" | "teams";
+  onSelectView: (view: "servers" | "activity" | "catalog" | "playground" | "teams") => void;
   onReplayOnboarding: () => void;
 }
 
@@ -431,6 +432,15 @@ export function AppSidebar({
         >
           <ScrollText className="size-4 shrink-0 text-muted-foreground" />
           <span>Activity</span>
+        </button>
+        <button
+          onClick={() => onSelectView("teams")}
+          className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
+            view === "teams" ? "bg-accent" : ""
+          }`}
+        >
+          <Users className="size-4 shrink-0 text-muted-foreground" />
+          <span>Teams</span>
         </button>
       </div>
 
