@@ -3,6 +3,14 @@
 All notable changes to Conduit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the GitHub releases.
 
+## [0.4.1] - 2026-06-26
+
+### Changed
+- **Windows installers are now code-signed** via Azure Trusted Signing, so the
+  SmartScreen "unknown publisher" warning is gone (reputation still accrues with
+  downloads). macOS was already signed and notarized; Linux remains unsigned as
+  usual. No functional changes from 0.4.0.
+
 ## [0.4.0] - 2026-06-26
 
 A security + intent-search release: Conduit now covers the whole tool-trust

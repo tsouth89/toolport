@@ -159,11 +159,11 @@ the most reliable package); the **AppImage** is a portable, no-root fallback but
 can clash with very new or virtualized graphics stacks (see Troubleshooting). To
 run from source, see Development below.
 
-The installer is not yet code signed. On **Windows**, SmartScreen may show
-"Windows protected your PC", click **More info → Run anyway**. On **macOS**,
-Gatekeeper may say the app "is damaged" or cannot be opened; right-click the app
-and choose **Open**, or run `xattr -dr com.apple.quarantine /Applications/Conduit.app`.
-See [docs/SIGNING.md](docs/SIGNING.md) for the signing plan.
+Both the **Windows** and **macOS** installers are code-signed (macOS is also
+notarized), so they install without a SmartScreen or Gatekeeper warning. Windows
+SmartScreen reputation still accrues with downloads, but the "unknown publisher"
+block is gone. The **Linux** packages are unsigned, as is typical. See
+[docs/SIGNING.md](docs/SIGNING.md) for details.
 
 **Updating and uninstalling on Linux.** There is no graphical uninstaller, use the
 terminal. The package name is `conduit`.
