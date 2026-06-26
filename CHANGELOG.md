@@ -15,6 +15,12 @@ All notable changes to Conduit are documented here. Format loosely follows
   view. Detection only, never blocks; on by default (`integrityCheck`), fully local.
   New `get_security_events` command + `security.jsonl`.
 - **OpenRouter** added to the curated catalog (live model intelligence; OAuth).
+- **Semantic tool search (optional).** `conduit_search_tools` can blend embedding
+  similarity into its lexical ranking so paraphrased needs surface the right tool, not
+  just keyword matches. Off by default (`semanticSearch`); point it at any
+  OpenAI-compatible `/v1/embeddings` endpoint. Tool embeddings are cached on disk; on
+  any failure it falls back to pure lexical, so it can only add signal, never degrade.
+  New `benchmark/retrieval.mjs` measures retrieval recall (lexical vs semantic).
 
 ### Changed
 - Benchmark suite: added a graded server-sweep harness (`bench-sweep.mjs`) that

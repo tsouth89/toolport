@@ -141,8 +141,13 @@ Tier 2 - feature completeness (in progress)
       diff on every refresh, flag changed/added definitions on already-approved
       servers as a security notice (detection only, on by default). Reuses the
       existing tools/list_changed refresh hook. See `docs/specs/mcp-integrity.md`.
-- [ ] Security, next: tool-description injection scanning (poisoning / line jumping)
-      and tool-result defense (agentjacking), per `docs/specs/content-defense.md`.
+- [x] Security: tool-description injection scanning (poisoning / line jumping),
+      folded into the integrity pass.
+- [x] Semantic tool search (optional, off by default): blend embedding similarity
+      into the lexical ranker so paraphrased needs surface the right tool. Pluggable
+      `/v1/embeddings` endpoint, disk-cached, lexical fallback. Recall measured by
+      `benchmark/retrieval.mjs`. See `docs/specs/semantic-search.md`.
+- [ ] Security, next: tool-result defense (agentjacking), per `docs/specs/content-defense.md`.
 
 Tier 3 - launch prep
 - [x] Bundle the gateway sidecar; signed/notarized macOS installers (Win/Linux

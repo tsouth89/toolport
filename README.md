@@ -51,6 +51,12 @@ Conduit fixes both:
   to connected clients without a restart.
 - **A catalog to grow.** Add popular servers from a curated list or search the
   official MCP Registry, then authenticate through the same flow.
+- **Searches by intent, not just keywords.** Lazy discovery's `conduit_search_tools`
+  ranks by relevance so the agent finds the right tool across all your servers, and
+  no tool is ever hidden: any server's full tool set is one call away. Optional
+  semantic re-ranking (point it at a local or hosted embeddings endpoint) blends
+  embedding similarity into the ranking so paraphrased needs ("charge a card") still
+  surface the right tool; off by default, pure lexical otherwise.
 - **No secrets in client configs.** Clients only ever say "talk to Conduit." Keys
   live in the OS keychain and are injected at runtime.
 - **Governance built in.** Toggle any tool on or off, or flip one switch to hide

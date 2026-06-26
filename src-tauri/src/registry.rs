@@ -124,6 +124,38 @@ pub struct Registry {
     /// never blocks. On by default.
     #[serde(default = "default_true")]
     pub integrity_check: bool,
+    /// Optional semantic re-ranking for tool search (blends embedding similarity
+    /// into the lexical ranking). Off by default; when off or unconfigured, search
+    /// is pure lexical exactly as before.
+    #[serde(default)]
+    pub semantic_search: SemanticSettings,
+}
+
+/// Settings for embedding-based search re-ranking. The embedding API key, if the
+/// endpoint needs one, is read from the `CONDUIT_EMBED_KEY` env var, never stored here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// OpenAI-compatible embeddings endpoint, e.g. http://localhost:1234/v1/embeddings.
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub model: String,
+    /// Weight of semantic vs lexical, 0.0 (pure lexical) .. 1.0 (pure semantic).
+    #[serde(default = "default_blend")]
+    pub blend: f32,
+}
+
+fn default_blend() -> f32 {
+    0.5
+}
+
+impl Default for SemanticSettings {
+    fn default() -> Self {
+        SemanticSettings { enabled: false, endpoint: String::new(), model: String::new(), blend: 0.5 }
+    }
 }
 
 fn default_true() -> bool {
@@ -145,6 +177,7 @@ impl Default for Registry {
             lazy_discovery: true,
             allow_agent_control: false,
             integrity_check: true,
+            semantic_search: SemanticSettings::default(),
         }
     }
 }

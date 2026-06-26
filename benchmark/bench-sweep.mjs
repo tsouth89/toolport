@@ -42,6 +42,7 @@ import {
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir, platform, tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -197,11 +198,20 @@ async function chat(messages, tools) {
     "Content-Type": "application/json",
     ...(LLM_API_KEY ? { Authorization: `Bearer ${LLM_API_KEY}` } : {}),
   };
-  const body = JSON.stringify({ model: MODEL, messages, tools, tool_choice: "auto", temperature: 0 });
   // Retry rate limits (429) and transient 5xx with backoff, so free-tier limits
   // slow the run down instead of corrupting it. Honors Retry-After when present.
+  // Each attempt carries a fresh cache-busting nonce on the system message, so no
+  // request (or retry) can be served from a provider prompt/response cache, and
+  // repeated runs are independent samples. Token counts are unaffected (we read the
+  // full usage either way); this just guarantees fresh inference.
   let res;
   for (let attempt = 0; ; attempt++) {
+    const nonce = randomUUID();
+    const msgs =
+      messages[0]?.role === "system"
+        ? [{ ...messages[0], content: `${messages[0].content}\n[uncached: ${nonce}]` }, ...messages.slice(1)]
+        : messages;
+    const body = JSON.stringify({ model: MODEL, messages: msgs, tools, tool_choice: "auto", temperature: 0 });
     res = await fetch(LLM_URL, { method: "POST", headers, body });
     if (res.ok) break;
     if ((res.status === 429 || res.status >= 500) && attempt < 6) {

@@ -34,6 +34,7 @@ use conduit_lib::registry::{self, Registry, ServerEntry};
 use conduit_lib::remote;
 use conduit_lib::router::{Router, ToolPolicy};
 use conduit_lib::savings;
+use conduit_lib::semantic;
 use conduit_lib::secrets;
 
 fn success(id: Value, result: Value) -> Value {
@@ -367,11 +368,27 @@ fn synonym_group(token: &str) -> &'static [&'static str] {
 /// were truncated - otherwise a buried tool reads as "doesn't exist". When NOT
 /// scoped to a server, results are diversified so one chatty server can't flood
 /// the window (the bug where a "create product" query returned only RevenueCat).
+/// Lexical-only entry point used by the unit tests (the live handler calls
+/// `search_catalog_with` so it can pass the semantic config).
+#[cfg(test)]
 fn search_catalog(
     cached: &[Value],
     query: &str,
     server: Option<&str>,
     limit: usize,
+) -> (Vec<Value>, usize) {
+    search_catalog_with(cached, query, server, limit, None)
+}
+
+/// As `search_catalog`, with optional semantic re-ranking. When `sem` is None or
+/// inactive, or embeddings are unavailable, ranking is pure lexical and byte-for-byte
+/// identical to before, semantic only ever adds, never degrades.
+fn search_catalog_with(
+    cached: &[Value],
+    query: &str,
+    server: Option<&str>,
+    limit: usize,
+    sem: Option<&semantic::SemanticConfig>,
 ) -> (Vec<Value>, usize) {
     use std::collections::HashMap;
     let q = query.to_lowercase();
@@ -422,9 +439,11 @@ fn search_catalog(
         let idf = |tok: &str| ((n + 1.0) / (*df.get(tok).unwrap_or(&0) as f64 + 1.0)).ln() + 1.0;
 
         let q_tokens = index_tokens(query);
-        let mut scored: Vec<(f64, &Value)> = docs
+        // Lexical score for EVERY doc (0 if no hit), kept so optional semantic
+        // re-ranking can also surface tools the keywords missed entirely.
+        let lex: Vec<(f64, &Value)> = docs
             .iter()
-            .filter_map(|(t, name_set, desc_set)| {
+            .map(|(t, name_set, desc_set)| {
                 let mut score = 0.0_f64;
                 for qt in &q_tokens {
                     // Best field hit across the query token and its synonyms; name
@@ -447,22 +466,29 @@ fn search_catalog(
                     }
                     score += best;
                 }
-                (score > 0.0).then_some((score, *t))
+                (score, *t)
             })
             .collect();
-        // Stable, highest score first.
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let total = scored.len();
+
+        // Blended (semantic) ranking when configured and embeddings succeed; else
+        // pure lexical (positive scores only, highest first), identical to before.
+        let ranked: Vec<(f64, &Value)> = semantic_rerank(sem, query, &lex).unwrap_or_else(|| {
+            let mut s: Vec<(f64, &Value)> =
+                lex.iter().filter(|(sc, _)| *sc > 0.0).cloned().collect();
+            s.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            s
+        });
+        let total = ranked.len();
 
         // Scoped to a server: take the top `limit`. Unscoped: cap per server so one
         // server with many matching tools can't crowd the others out of the window.
         let selected: Vec<&Value> = if server_filter.is_some() {
-            scored.into_iter().take(limit).map(|(_, t)| t).collect()
+            ranked.into_iter().take(limit).map(|(_, t)| t).collect()
         } else {
             let cap = (limit / 3).max(4);
             let mut per: HashMap<String, usize> = HashMap::new();
             let mut out = Vec::new();
-            for (_, t) in scored {
+            for (_, t) in ranked {
                 if out.len() >= limit {
                     break;
                 }
@@ -479,6 +505,44 @@ fn search_catalog(
     };
 
     (project_budgeted(&selected), total)
+}
+
+/// Blend embedding similarity into the lexical scores. Returns None when semantic
+/// search is off/unconfigured or embeddings are unavailable, so the caller falls
+/// back to pure lexical ranking, semantic can only add signal, never remove it.
+fn semantic_rerank<'a>(
+    sem: Option<&semantic::SemanticConfig>,
+    query: &str,
+    lex: &[(f64, &'a Value)],
+) -> Option<Vec<(f64, &'a Value)>> {
+    let cfg = sem?;
+    if !cfg.is_active() {
+        return None;
+    }
+    let qv = semantic::embed_query(cfg, query)?;
+    let tools: Vec<&Value> = lex.iter().map(|(_, t)| *t).collect();
+    let embs = semantic::embed_tools(cfg, &tools);
+    if embs.is_empty() {
+        return None;
+    }
+    let max_lex = lex.iter().map(|(s, _)| *s).fold(0.0_f64, f64::max);
+    let blend = cfg.blend.clamp(0.0, 1.0) as f64;
+    let mut out: Vec<(f64, &Value)> = lex
+        .iter()
+        .map(|(sc, t)| {
+            let lex_norm = if max_lex > 0.0 { sc / max_lex } else { 0.0 };
+            let name = t.get("name").and_then(Value::as_str).unwrap_or("");
+            let cos = embs
+                .get(name)
+                .map(|tv| semantic::cosine(&qv, tv).max(0.0) as f64)
+                .unwrap_or(0.0);
+            ((1.0 - blend) * lex_norm + blend * cos, *t)
+        })
+        // Drop near-zero blended scores so a broad catalog doesn't return everything.
+        .filter(|(b, _)| *b > 0.02)
+        .collect();
+    out.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    Some(out)
 }
 
 /// Project selected tools to search results, bounding the total size of their
@@ -773,7 +837,13 @@ fn handle_request(
                 } else {
                     cached
                 };
-                let (mut matches, total) = search_catalog(source, query, server, limit);
+                // Semantic re-ranking if the user has configured it (off by default;
+                // falls back to lexical on any failure).
+                let s = &reg.semantic_search;
+                let sem_cfg =
+                    semantic::SemanticConfig::resolve(s.enabled, s.endpoint.clone(), s.model.clone(), s.blend);
+                let (mut matches, total) =
+                    search_catalog_with(source, query, server, limit, Some(&sem_cfg));
                 let scope = server
                     .filter(|s| !s.trim().is_empty())
                     .map(|s| format!(" on \"{s}\""))
