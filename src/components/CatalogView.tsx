@@ -280,7 +280,7 @@ function CatalogCard({
       <p className="line-clamp-2 min-h-8 text-xs text-muted-foreground">
         {entry.description}
       </p>
-      <code className="truncate font-mono text-[11px] text-muted-foreground/70">
+      <code title={target} className="truncate font-mono text-[11px] text-muted-foreground/70">
         {target}
       </code>
       <Provenance entry={entry} />

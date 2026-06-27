@@ -399,7 +399,7 @@ function App() {
                                 ? ` · ${connectedCount} connected`
                                 : "") +
                               (attentionCount
-                                ? ` · ${attentionCount} need attention`
+                                ? ` · ${attentionCount} need${attentionCount === 1 ? "s" : ""} attention`
                                 : "")}
               </p>
             </div>

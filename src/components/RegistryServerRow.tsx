@@ -74,7 +74,7 @@ export function RegistryServerRow({
 
   const label =
     status === "connected"
-      ? `${health?.toolCount ?? 0} tools`
+      ? `${health?.toolCount ?? 0} tool${health?.toolCount === 1 ? "" : "s"}`
       : status === "error"
         ? "Error"
         : status === "checking"

@@ -76,7 +76,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      toast.error("Couldn't copy automatically - select the text and copy it.");
+      toast.error("Couldn't copy automatically. Select the text and copy it.");
     }
   }
 
@@ -184,7 +184,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
               <Label className="text-sm">Your setup</Label>
               <p className="text-xs text-muted-foreground">
                 Send this to a teammate to share your server set. Secrets are never
-                included - each person adds their own keys after importing.
+                included, each person adds their own keys after importing.
               </p>
               <div className="grid grid-cols-2 gap-2">
                 <Input
