@@ -9,7 +9,6 @@ import { listen } from "@tauri-apps/api/event";
 import {
   MoreHorizontal,
   Download,
-  HeartPulse,
   Plus,
   RefreshCw,
   Search,
@@ -88,19 +87,21 @@ function App() {
 
   // Probe health quietly (no toast). Used on load and after authenticating, so
   // each server's status badge reflects reality without the user clicking around.
-  const reprobe = useCallback(async () => {
+  const reprobe = useCallback(async (): Promise<ProbeResult[]> => {
     // Never stack probes. A probe spawns/reads every server (and on macOS can
     // trigger keychain prompts); overlapping runs amplify that into a storm,
     // especially since each dismissed prompt returns focus and could re-trigger.
-    if (probingRef.current) return;
+    if (probingRef.current) return [];
     probingRef.current = true;
     lastProbeRef.current = Date.now();
     setProbing(true);
     try {
       const results = await probeServers();
       setHealth(Object.fromEntries(results.map((r) => [r.serverId, r])));
+      return results;
     } catch {
       /* non-fatal: badges just stay in "checking" */
+      return [];
     } finally {
       setProbing(false);
       probingRef.current = false;
@@ -118,21 +119,35 @@ function App() {
     return () => window.removeEventListener("focus", onFocus);
   }, [reprobe]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [reg, dc] = await Promise.all([getRegistry(), detectClients()]);
-      setRegistry(reg);
-      setClients(dc);
-      setActivityKey((k) => k + 1);
-      void reprobe();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [reprobe]);
+  // `announce` is set by the manual Refresh button: it waits for the health probe
+  // and reports a summary toast. The silent path (initial load, focus refresh)
+  // fires the probe without blocking or toasting.
+  const load = useCallback(
+    async (announce = false) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const [reg, dc] = await Promise.all([getRegistry(), detectClients()]);
+        setRegistry(reg);
+        setClients(dc);
+        setActivityKey((k) => k + 1);
+        if (announce) {
+          const results = await reprobe();
+          if (results.length > 0) {
+            const up = results.filter((r) => r.ok).length;
+            toast.success(`${up} of ${results.length} servers healthy`);
+          }
+        } else {
+          void reprobe();
+        }
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [reprobe],
+  );
 
   useEffect(() => {
     load();
@@ -297,23 +312,6 @@ function App() {
     }
   }
 
-  async function handleProbe() {
-    if (probingRef.current) return;
-    probingRef.current = true;
-    setProbing(true);
-    try {
-      const results = await probeServers();
-      setHealth(Object.fromEntries(results.map((r) => [r.serverId, r])));
-      const up = results.filter((r) => r.ok).length;
-      toast.success(`${up} of ${results.length} servers healthy`);
-    } catch (e) {
-      toast.error(`Health check failed: ${e}`);
-    } finally {
-      setProbing(false);
-      probingRef.current = false;
-    }
-  }
-
   async function handleImport() {
     try {
       const before = registry?.servers.length ?? 0;
@@ -446,14 +444,6 @@ function App() {
                           </span>
                         </DropdownMenuItem>
                       )}
-
-                      <DropdownMenuItem
-                        onClick={handleProbe}
-                        disabled={probing}
-                      >
-                        <HeartPulse className="mr-2 size-4" />
-                        <span>Check health</span>
-                      </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </>
@@ -463,11 +453,12 @@ function App() {
                 size="icon"
                 className="size-8"
                 aria-label="Refresh"
-                onClick={load}
+                title="Reload servers, clients, and health"
+                onClick={() => load(true)}
                 disabled={loading}
               >
                 <RefreshCw
-                  className={`size-4 ${loading ? "animate-spin" : ""}`}
+                  className={`size-4 ${loading || probing ? "animate-spin" : ""}`}
                 />
               </Button>
             </div>

@@ -3,6 +3,27 @@
 All notable changes to Conduit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the GitHub releases.
 
+## [Unreleased]
+
+### Added
+- **More one-click catalog servers.** Added MongoDB, Elasticsearch, Airtable, Exa,
+  Tavily, Apify, Browserbase, and the Sequential Thinking, Memory, and Time reference
+  servers, every package name verified.
+
+### Changed
+- **A calmer Servers header.** The duplicate Browse catalog button is gone (it's
+  already in the sidebar), Search and Add server stay up front, and the occasional
+  actions (Import, Enable/Disable all) move into a `...` overflow menu so the header no
+  longer crowds on narrow windows. Thanks @BharadwajKanneveti.
+- **One Refresh, not two.** The header's Refresh button now reloads servers, clients,
+  and health in a single action and reports an "N of M servers healthy" summary, so the
+  separate Check health action has been folded into it.
+
+### Fixed
+- **Onboarding no longer drops you mid-setup.** Browsing the catalog from the first-run
+  wizard used to end onboarding before the Connect-a-client step; it now resumes there
+  when you return, so new users don't silently skip connecting a client.
+
 ## [0.5.1] - 2026-06-27
 
 ### Fixed
