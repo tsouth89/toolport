@@ -42,7 +42,7 @@ keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
-security-framework = { version = "3", features = ["OSX_10_15"] }
+security-framework = "3"
 security-framework-sys = "2"
 core-foundation = "0.10"
 
