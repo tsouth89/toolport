@@ -13,6 +13,7 @@ pub mod remote;
 pub mod router;
 pub mod savings;
 pub mod semantic;
+pub mod shaping;
 pub mod secrets;
 pub mod teams;
 pub mod vendors;
