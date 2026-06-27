@@ -232,8 +232,8 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
 
   const share = async () => {
     const text =
-      `Conduit has saved me ~${fmtTokens(savings.tokensSaved)} tokens (~${fmtDollars(dollars)}) of MCP ` +
-      `tool definitions so far. One local gateway for all my MCP servers, ~90% fewer tokens: conduitmcp.app`;
+      `Conduit keeps ~${fmtTokens(savings.tokensSaved)} tokens of MCP tool definitions out of my agent's ` +
+      `context so far. One local gateway for all my MCP servers: conduitmcp.app`;
     try {
       await navigator.clipboard.writeText(text);
       toast.success("Savings copied, paste them anywhere");
@@ -247,7 +247,7 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
       <div className="flex items-center gap-2">
         <Sparkles className="size-4 text-success" />
         <span className="text-sm font-medium text-muted-foreground">
-          What lazy discovery has saved you
+          Tool definitions lazy discovery keeps out of context
         </span>
       </div>
       <div className="mt-2 flex flex-wrap items-end gap-x-6 gap-y-1">
@@ -257,8 +257,11 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
             tokens
           </span>
         </span>
-        <span className="text-3xl font-semibold tabular-nums text-success">
+        <span className="text-xl font-semibold tabular-nums text-muted-foreground">
           ≈ {fmtDollars(dollars)}
+          <span className="ml-1 text-xs font-normal text-muted-foreground/70">
+            illustrative
+          </span>
         </span>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -290,7 +293,8 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
         </button>
       </div>
       <p className="mt-2.5 text-xs text-muted-foreground">
-        {details.join(" · ")}. Estimated.
+        {details.join(" · ")}. Estimated, counted once per tool-list load. Clients
+        with built-in tool search (Claude, VS Code) benefit less.
       </p>
     </div>
   );
