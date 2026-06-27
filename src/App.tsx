@@ -358,7 +358,7 @@ function App() {
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="flex h-screen bg-background text-foreground">
+      <div className="flex h-screen overflow-hidden bg-background text-foreground">
         <AppSidebar
           clients={clients}
           registry={registry}
@@ -476,7 +476,7 @@ function App() {
             </div>
           </header>
 
-          <ScrollArea className="flex-1">
+          <ScrollArea className="min-h-0 flex-1">
             <div className="p-6">
               {view === "activity" ? (
                 <ActivityView refreshKey={activityKey} />
