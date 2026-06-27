@@ -543,6 +543,7 @@ function App() {
             setResumeAtConnect(true);
             selectView("catalog");
           }}
+          onProbe={reprobe}
           onFinish={finishOnboarding}
         />
       )}

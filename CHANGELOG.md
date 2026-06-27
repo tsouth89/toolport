@@ -23,6 +23,9 @@ All notable changes to Conduit are documented here. Format loosely follows
 - **Onboarding no longer drops you mid-setup.** Browsing the catalog from the first-run
   wizard used to end onboarding before the Connect-a-client step; it now resumes there
   when you return, so new users don't silently skip connecting a client.
+- **Onboarding tells the truth about broken servers.** The final step now probes the
+  servers you just added and flags any that can't start (usually a missing runtime like
+  Node or Python), instead of always declaring "you're set up."
 
 ## [0.5.1] - 2026-06-27
 

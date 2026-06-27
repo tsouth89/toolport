@@ -21,6 +21,7 @@ import {
   isGatewayServer,
   type CatalogEntry,
   type DetectedClient,
+  type ProbeResult,
   type Registry,
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -36,6 +37,8 @@ interface Props {
   onClientsRefresh: () => void;
   /** Hand off to the catalog; the wizard resumes at the Connect step on return. */
   onBrowseCatalog: () => void;
+  /** Probe server health for the Done step (returns per-server results). */
+  onProbe: () => Promise<ProbeResult[]>;
   /** Mark onboarding complete (skipped or finished) and close. */
   onFinish: () => void;
 }
@@ -51,6 +54,7 @@ export function Onboarding({
   onRegistryChange,
   onClientsRefresh,
   onBrowseCatalog,
+  onProbe,
   onFinish,
 }: Props) {
   const [step, setStep] = useState(initialStep);
@@ -82,8 +86,10 @@ export function Onboarding({
     />,
     <Done
       key="done"
+      registry={registry}
       serverCount={serverCount}
       connectedCount={connectedCount}
+      onProbe={onProbe}
       onFinish={onFinish}
     />,
   ];
@@ -398,14 +404,41 @@ function ConnectClients({
 }
 
 function Done({
+  registry,
   serverCount,
   connectedCount,
+  onProbe,
   onFinish,
 }: {
+  registry: Registry;
   serverCount: number;
   connectedCount: number;
+  onProbe: () => Promise<ProbeResult[]>;
   onFinish: () => void;
 }) {
+  // Probe what was just added so we report the truth, not a blanket "you're set up"
+  // over a server that can't actually start (a missing runtime is the #1 first-run
+  // failure). Auth-pending servers are an expected next step, not a fault, so they're
+  // excluded from the warning.
+  const [health, setHealth] = useState<ProbeResult[] | null>(null);
+  useEffect(() => {
+    if (serverCount === 0) {
+      setHealth([]);
+      return;
+    }
+    let alive = true;
+    onProbe()
+      .then((r) => alive && setHealth(r))
+      .catch(() => alive && setHealth([]));
+    return () => {
+      alive = false;
+    };
+  }, [serverCount, onProbe]);
+
+  const nameFor = (id: string) =>
+    registry.servers.find((s) => s.id === id)?.name ?? id;
+  const broken = (health ?? []).filter((r) => !r.ok && !r.authRequired);
+
   const ready = serverCount > 0 && connectedCount > 0;
   const missing = [
     serverCount === 0 ? "added a server" : null,
@@ -435,6 +468,20 @@ function Done({
           </>
         )}
       </StepHeader>
+
+      {broken.length > 0 && (
+        <div className="flex flex-col gap-1 rounded-md bg-amber-400/10 px-3 py-2 text-sm">
+          <span className="font-medium text-amber-500">
+            {broken.length} server{broken.length === 1 ? "" : "s"} couldn't start:{" "}
+            {broken.map((r) => nameFor(r.serverId)).join(", ")}
+          </span>
+          <span className="text-xs text-muted-foreground">
+            They likely need a runtime that isn't installed (Node/npx or Python/uvx),
+            or the command needs a fix. Retry from each server's card once it's sorted.
+          </span>
+        </div>
+      )}
+
       <Button onClick={onFinish} className="self-start">
         {ready ? "Start using Conduit" : "Got it"}
         <ArrowRight className="size-4" />
