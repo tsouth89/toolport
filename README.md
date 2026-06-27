@@ -72,8 +72,8 @@ fixes both.
   server. Newly-authed servers propagate to connected clients without a restart.
 - **No secrets in client configs.** Clients only ever say "talk to Conduit." Keys live
   in the OS keychain and are injected at runtime.
-- **A catalog to grow.** Add popular servers from a curated list or search the official
-  MCP Registry, then authenticate through the same flow.
+- **A catalog to grow.** Add popular servers from a curated list of 40+, or search the
+  official MCP Registry, then authenticate through the same flow.
 
 ### Security, because the gateway is on the path
 
@@ -138,10 +138,10 @@ Kiro, Zed, LM Studio, Jan, Goose, Hermes, and BoltAI.
 
 ## Configuration
 
-Lazy discovery and the destructive-tool policy are global settings, stored in the
-registry and toggled in the app, so they apply to every client (lazy discovery is
-on by default). Per-client behavior is set via env vars on the gateway entry,
-written for you when you connect a client:
+Lazy discovery, the destructive-tool block, and agent control are global settings,
+stored in the registry and toggled in the app's Settings view, so they apply to every
+client (lazy discovery is on by default). Per-client behavior is set via env vars on the
+gateway entry, written for you when you connect a client:
 
 - `CONDUIT_PROFILE=<name>` - scope this client to one profile's servers. Unset =
   the active profile.
@@ -149,6 +149,15 @@ written for you when you connect a client:
   setting. Rarely needed; the gateway reads the registry default otherwise.
 - `CONDUIT_REGISTRY=<path>` - override the registry file location. Defaults to a
   stable per-user path so packaged and unpackaged clients agree.
+- `CONDUIT_RESULT_BUDGET=<bytes>` - cap oversized tool results at this many bytes
+  (0 disables it). Optional; off by default.
+
+**Semantic search (optional).** Lazy discovery ranks tools lexically by default. Point it
+at any `/v1/embeddings` endpoint (LM Studio, Ollama, or a cloud provider) to blend in
+embedding similarity for paraphrased queries: `CONDUIT_SEMANTIC=on`,
+`CONDUIT_EMBED_ENDPOINT`, `CONDUIT_EMBED_MODEL`, plus optional `CONDUIT_EMBED_KEY`
+(endpoint auth) and `CONDUIT_EMBED_BLEND`. See
+[docs/specs/semantic-search.md](docs/specs/semantic-search.md).
 
 **Multiple accounts for the same service.** Credentials belong to a server, not a
 profile. To use, say, a work and a personal GitHub, add GitHub twice as two
@@ -258,9 +267,10 @@ The frontend is typechecked with `npx tsc --noEmit`.
 
 Conduit is in active development. Working end to end: the
 gateway, lazy discovery, per-agent scoping, OAuth/key auth with live propagation,
-the catalog, client import/migrate, per-tool and destructive-tool governance, an
-audit log with latency/error stats, resources + prompts proxying, and a tool
-playground. See [docs/ROADMAP.md](docs/ROADMAP.md) for what is done and planned.
+the catalog, client import/migrate, per-tool and destructive-tool governance, a global
+Settings view, tool-integrity and content-defense detection, an audit log with
+latency/error stats, resources + prompts proxying, and a tool playground. See
+[docs/ROADMAP.md](docs/ROADMAP.md) for what is done and planned.
 
 ## Known issues
 
