@@ -7,6 +7,7 @@ import {
 } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
+  MoreHorizontal,
   Download,
   HeartPulse,
   Plus,
@@ -35,6 +36,12 @@ import {
   type Registry,
   type ServerEntry,
 } from "@/lib/types";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { AppSidebar } from "@/components/AppSidebar";
 import { Onboarding } from "@/components/Onboarding";
 import { RegistryServerCard } from "@/components/RegistryServerCard";
@@ -376,10 +383,6 @@ function App() {
                       className="h-9 w-44 pl-8"
                     />
                   </div>
-                  <Button size="sm" onClick={() => selectView("catalog")}>
-                    <Store className="size-4" />
-                    Browse catalog
-                  </Button>
                   <ServerDialog
                     onSaved={setRegistry}
                     trigger={
@@ -389,35 +392,40 @@ function App() {
                       </Button>
                     }
                   />
-                  <Button variant="outline" size="sm" onClick={handleImport}>
-                    <Download className="size-4" />
-                    Import
-                  </Button>
-                  {servers.length > 0 && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={handleToggleAll}
-                      disabled={busyId !== null || togglingAll}
-                    >
-                      {togglingAll
-                        ? "Working…"
-                        : enabledCount < servers.length
-                          ? "Enable all"
-                          : "Disable all"}
-                    </Button>
-                  )}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleProbe}
-                    disabled={probing}
-                  >
-                    <HeartPulse
-                      className={`size-4 ${probing ? "animate-pulse" : ""}`}
-                    />
-                    Check health
-                  </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon">
+                        <MoreHorizontal className="size-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+
+                   <DropdownMenuContent align="end" className="w-38">
+                      <DropdownMenuItem onClick={handleImport}>
+                        <Download className="mr-2 size-4" />
+                        <span>Import</span>
+                      </DropdownMenuItem>
+
+                      {servers.length > 0 && (
+                        <DropdownMenuItem
+                          onClick={handleToggleAll}
+                          disabled={busyId !== null}
+                        >
+                          <ServerOff className="mr-2 size-4" />
+                          <span>
+                            {enabledCount < servers.length ? "Enable all" : "Disable all"}
+                          </span>
+                        </DropdownMenuItem>
+                      )}
+
+                      <DropdownMenuItem
+                        onClick={handleProbe}
+                        disabled={probing}
+                      >
+                        <HeartPulse className="mr-2 size-4" />
+                        <span>Check health</span>
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </>
               )}
               <Button
