@@ -1,9 +1,17 @@
+<div align="center">
+
+<img src="docs/logo.svg" alt="Conduit" width="84" />
+
 # Conduit
 
 **All your MCP servers in one place, with ~90% fewer tokens.**
 
 [![CI](https://github.com/tsouth89/conduit/actions/workflows/ci.yml/badge.svg)](https://github.com/tsouth89/conduit/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/tsouth89/conduit?label=release)](https://github.com/tsouth89/conduit/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/Xsn27MxdBA)
+
+</div>
 
 ![Conduit: every tool from all your servers, collapsed to the 3 your agent loads](docs/feature.png)
 
@@ -173,7 +181,7 @@ terminal. The package name is `conduit`.
 
 ```bash
 # Update to a newer version: just install the new .deb, it upgrades in place.
-sudo apt install ./Conduit_0.3.10_amd64.deb
+sudo apt install ./Conduit_0.5.2_amd64.deb
 
 # Uninstall (keeps your config + saved secrets).
 sudo apt remove conduit
