@@ -98,11 +98,31 @@ fn pins_path(profile: Option<&str>) -> Option<PathBuf> {
     Some(dir.join(file))
 }
 
-fn load_pins(profile: Option<&str>) -> Pins {
-    pins_path(profile)
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+/// Outcome of loading a profile's pin baseline.
+enum PinsLoad {
+    /// No baseline file yet, a legitimate first run for this profile.
+    Fresh,
+    /// An existing baseline, loaded successfully.
+    Loaded(Pins),
+    /// The baseline file exists but couldn't be read or parsed (corruption or
+    /// tamper). Treated as suspicious, NOT as "no baseline".
+    Corrupt,
+}
+
+fn load_pins(profile: Option<&str>) -> PinsLoad {
+    let Some(path) = pins_path(profile) else {
+        return PinsLoad::Fresh;
+    };
+    if !path.exists() {
+        return PinsLoad::Fresh;
+    }
+    match std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Pins>(&s).ok())
+    {
+        Some(pins) => PinsLoad::Loaded(pins),
+        None => PinsLoad::Corrupt,
+    }
 }
 
 fn save_pins(profile: Option<&str>, pins: &Pins) {
@@ -118,12 +138,22 @@ fn save_pins(profile: Option<&str>, pins: &Pins) {
 /// `security.jsonl`). A tool whose server has never been pinned is treated as a
 /// fresh baseline (no drift); only servers we've already seen can "drift".
 pub fn check(profile: Option<&str>, current: &[Value]) -> Vec<Value> {
-    let pins = load_pins(profile);
+    let mut events: Vec<Value> = Vec::new();
+    let pins = match load_pins(profile) {
+        PinsLoad::Loaded(p) => p,
+        PinsLoad::Fresh => Pins::new(),
+        PinsLoad::Corrupt => {
+            // The baseline existed but couldn't be loaded. Silently re-baselining
+            // would reset all drift detection, which is exactly what an attacker who
+            // can touch the config dir wants, so surface it loudly instead.
+            events.push(pins_tamper_event());
+            Pins::new()
+        }
+    };
     // Servers we've already established a baseline for.
     let established: BTreeSet<&str> = pins.keys().map(|k| server_of(k)).collect();
 
     let mut now: Pins = BTreeMap::new();
-    let mut events: Vec<Value> = Vec::new();
 
     for t in current {
         // Skip Conduit's own meta-tools (no `server__` prefix).
@@ -425,6 +455,16 @@ fn poison_event(server: &str, tool: &str, signatures: &[String]) -> Value {
         "tool": tool,
         "change": "poison",
         "signatures": signatures,
+    })
+}
+
+/// The pin baseline existed but couldn't be loaded (corrupt or tampered). Emitted so
+/// a lost drift baseline is a visible event, not a silent reset of all detection.
+fn pins_tamper_event() -> Value {
+    json!({
+        "ts": epoch_millis(),
+        "type": "pins_load_failed",
+        "change": "tamper",
     })
 }
 

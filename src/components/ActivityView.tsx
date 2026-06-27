@@ -97,6 +97,12 @@ function eventBadge(e: SecurityEvent): { label: string; cls: string } {
       cls: "bg-destructive/15 text-destructive",
     };
   }
+  if (e.type === "pins_load_failed") {
+    return {
+      label: "integrity baseline lost",
+      cls: "bg-destructive/15 text-destructive",
+    };
+  }
   if (e.change === "changed") {
     return { label: "changed", cls: "bg-amber-500/15 text-amber-300" };
   }
