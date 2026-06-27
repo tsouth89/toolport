@@ -236,6 +236,9 @@ export interface Registry {
   allowAgentControl?: boolean;
   /** Connection to a Conduit Teams server, if joined. Token lives in the keychain. */
   team?: TeamConnection | null;
+  /** Per-server result-shaping budgets in bytes, keyed by server id. Absent =
+   * global default; 0 = never shape (full fidelity); n = cap that server at n bytes. */
+  resultBudgets?: Record<string, number>;
 }
 
 /** A joined Conduit Teams server (the shared config-sync layer). */

@@ -8,6 +8,7 @@
 //! Secrets are never stored here. Env vars marked `secret` keep their value in
 //! the OS keychain; this file only records that a secret exists.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -140,6 +141,12 @@ pub struct Registry {
     /// `servers` tagged `source = "team:<id>"`, non-destructively.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<TeamConnection>,
+    /// Per-server result-shaping budgets in bytes, keyed by server id (tier-2
+    /// fidelity policy). A server absent from the map uses the global default; a
+    /// value of `0` means NEVER shape that server's results (full fidelity, for
+    /// financial/compliance APIs); `n` caps that server's results at n bytes.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub result_budgets: HashMap<String, u64>,
 }
 
 /// A joined Conduit Teams server. Holds only non-secret connection metadata; the
@@ -208,6 +215,7 @@ impl Default for Registry {
             content_defense: true,
             semantic_search: SemanticSettings::default(),
             team: None,
+            result_budgets: HashMap::new(),
         }
     }
 }

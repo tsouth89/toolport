@@ -1005,7 +1005,14 @@ fn handle_request(
                     }
                     // Result-shaping: cap an oversized result, cache the full body, and
                     // hand the model a head + a conduit_fetch_result cursor (lossless).
-                    shaping::shape_result(&mut result, shaping::budget());
+                    // Per-server fidelity policy: a server's `resultBudget` overrides the
+                    // global default (Some(0) = never shape, for full-fidelity servers).
+                    let budget = reg
+                        .result_budgets
+                        .get(srv)
+                        .map(|&b| b as usize)
+                        .unwrap_or_else(shaping::budget);
+                    shaping::shape_result(&mut result, budget);
                     Some(success(id, result))
                 }
                 Err(e) => {
