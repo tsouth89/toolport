@@ -30,6 +30,20 @@ const STDIO_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Keep at most this many bytes of a child's stderr tail for error reporting.
 const STDERR_TAIL_CAP: usize = 4096;
 
+/// Cap on how much of a downstream HTTP/SSE response body we buffer, so a malicious
+/// or broken server can't stream gigabytes to exhaust gateway memory. Generous: real
+/// MCP responses are tiny.
+const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read up to `max` bytes of a ureq response body, lossily as text, never more than
+/// the cap even if the server keeps streaming.
+fn read_capped(resp: ureq::Response, max: u64) -> String {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let _ = resp.into_reader().take(max).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// Build an `Authorization` header value from a raw token, adding the `Bearer`
 /// scheme unless the caller already included one.
 pub fn bearer_header(token: &str) -> String {
@@ -437,6 +451,11 @@ impl HttpTransport {
             url: url.to_string(),
             agent: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(30))
+                // Never follow redirects. MCP Streamable HTTP doesn't need cross-host
+                // redirects, and following one would let a malicious server bounce us to
+                // an internal address (SSRF, e.g. cloud metadata) or replay our
+                // Authorization bearer to a host of its choosing (token theft).
+                .redirects(0)
                 .build(),
             session_id: None,
             next_id: 1,
@@ -461,12 +480,7 @@ impl HttpTransport {
         let resp = match req.send_string(&body.to_string()) {
             Ok(r) => r,
             Err(ureq::Error::Status(code, r)) => {
-                let detail: String = r
-                    .into_string()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(200)
-                    .collect();
+                let detail: String = read_capped(r, 64 * 1024).chars().take(200).collect();
                 let hint = if code == 401 || code == 403 {
                     " (needs authentication)"
                 } else {
@@ -489,7 +503,7 @@ impl HttpTransport {
             .map(|c| c.to_lowercase().contains("text/event-stream"))
             .unwrap_or(false);
         let wanted = body.get("id").cloned();
-        let text = resp.into_string().map_err(|e| e.to_string())?;
+        let text = read_capped(resp, MAX_RESPONSE_BYTES);
 
         if is_sse {
             for line in text.lines() {

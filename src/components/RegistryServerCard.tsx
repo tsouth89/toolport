@@ -12,6 +12,7 @@ import { ServerDialog } from "@/components/ServerDialog";
 
 interface Props {
   server: ServerEntry;
+  registry: Registry | null;
   enabled: boolean;
   busy?: boolean;
   health?: ProbeResult;
@@ -44,7 +45,9 @@ const DOT: Record<Status, string> = {
   error: "bg-destructive",
 };
 
+
 export function RegistryServerCard({
+  registry,
   server,
   enabled,
   busy,
@@ -72,6 +75,20 @@ export function RegistryServerCard({
           : status === "checking"
             ? "Checking…"
             : "Disabled";
+
+  const existingNames = new Set(
+    registry?.servers.map((s) => s.name.toLowerCase()) ?? [],
+  );
+
+  const baseName = server.name.replace(/\s\(\d+\)$/, "");
+
+  let duplicateName = `${baseName} (2)`;
+  let index = 2;
+
+  while (existingNames.has(duplicateName.toLowerCase())) {
+    index++;
+    duplicateName = `${baseName} (${index})`;
+  }          
 
   return (
     <Card
@@ -147,10 +164,11 @@ export function RegistryServerCard({
             />
             <ServerDialog
               onSaved={onRegistryChange}
-              initial={{ ...server, name: `${server.name} 2` }}
+              initial={{ ...server, name: duplicateName }}
               trigger={
                 <button
                   aria-label={`Duplicate ${server.name}`}
+                  title="Add another account"
                   className="rounded p-1 text-muted-foreground/60 opacity-0 transition group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground"
                 >
                   <Copy className="size-3.5" />

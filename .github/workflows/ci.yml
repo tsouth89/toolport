@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to a PR cancels the in-flight run for that ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only reads the repo (checkout, build, test). No writes.
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build + test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          # Same set as the release workflow: WebKitGTK + the Secret Service
+          # (libdbus) deps the Tauri lib needs to compile on Linux.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf pkg-config libdbus-1-dev
+
+      - name: Give the runner headroom (a cold build links WebKitGTK)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/share/swift 2>/dev/null || true
+          sudo fallocate -l 8G /mnt/ci-swap && sudo chmod 600 /mnt/ci-swap && sudo mkswap /mnt/ci-swap && sudo swapon /mnt/ci-swap || true
+
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - run: npm ci
+
+      # Frontend type-check + build (`build` is `tsc && vite build`). Also produces
+      # dist/, which tauri-build expects when compiling the Rust crate below.
+      - name: Frontend type-check + build
+        run: npm run build
+
+      # The 100+ Rust unit tests, then confirm the standalone gateway binary compiles.
+      - name: Rust lib tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+      - name: Gateway binary compiles
+        run: cargo check --manifest-path src-tauri/Cargo.toml --bin conduit-gateway

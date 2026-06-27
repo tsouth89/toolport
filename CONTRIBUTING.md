@@ -4,6 +4,10 @@ Thanks for your interest. Conduit is a local-first MCP gateway and manager: a
 Tauri desktop app (Rust backend + React/TypeScript frontend) plus a separate
 `conduit-gateway` binary that AI clients spawn.
 
+Want to ask a question, float an idea, or talk through a change before you build
+it? Join the [Discord](https://discord.gg/Xsn27MxdBA). New contributors welcome,
+and we merge community PRs regularly.
+
 ## Quick start
 
 Requires Node 20+ and the Rust toolchain.

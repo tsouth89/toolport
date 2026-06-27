@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, ChevronRight, ScrollText, Share2, ShieldAlert, Sparkles, XCircle } from "lucide-react";
+import {
+  CheckCircle2,
+  ChevronRight,
+  ScrollText,
+  Share2,
+  ShieldAlert,
+  Sparkles,
+  XCircle,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   getAuditLog,
@@ -8,7 +16,21 @@ import {
   getSecurityEvents,
   type SecurityEvent,
 } from "@/lib/api";
-import type { AuditEntry, AuditStats, SavingsSummary, ServerStat } from "@/lib/types";
+import type {
+  AuditEntry,
+  AuditStats,
+  SavingsSummary,
+  ServerStat,
+} from "@/lib/types";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 /** Compact latency string: "180 ms" or "1.2 s", or a dash when unmeasured. */
 function fmtMs(ms: number | null): string {
@@ -61,15 +83,25 @@ function fmtDollars(n: number): string {
   return `$${n.toFixed(2)}`;
 }
 
-/** Hero stat: tool-definition tokens (and dollars) lazy discovery kept out of
- *  agent context, with a one-click share so users can flex their savings. */
 /** A badge describing one security event by kind. */
 function eventBadge(e: SecurityEvent): { label: string; cls: string } {
   if (e.type === "result_injection") {
-    return { label: "injected result", cls: "bg-destructive/15 text-destructive" };
+    return {
+      label: "injected result",
+      cls: "bg-destructive/15 text-destructive",
+    };
   }
   if (e.type === "tool_poison_flag") {
-    return { label: "suspicious content", cls: "bg-destructive/15 text-destructive" };
+    return {
+      label: "suspicious content",
+      cls: "bg-destructive/15 text-destructive",
+    };
+  }
+  if (e.type === "pins_load_failed") {
+    return {
+      label: "integrity baseline lost",
+      cls: "bg-destructive/15 text-destructive",
+    };
   }
   if (e.change === "changed") {
     return { label: "changed", cls: "bg-amber-500/15 text-amber-300" };
@@ -86,26 +118,32 @@ function SecurityNotices({ events }: { events: SecurityEvent[] }) {
     <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
       <div className="mb-2 flex items-center gap-2">
         <ShieldAlert className="size-4 text-amber-400" />
-        <h3 className="text-sm font-medium text-amber-300">Tool security notices</h3>
+        <h3 className="text-sm font-medium text-amber-300">
+          Tool security notices
+        </h3>
       </div>
       <p className="mb-3 max-w-2xl text-xs text-muted-foreground">
         A tool changed after you approved it, a tool's definition contains
-        instruction-like content, or a tool returned data that looks like injected
-        instructions. Usually benign, but it's how rug pulls, tool poisoning, and
-        agentjacking work, so Conduit flags it (and labels suspicious tool output as
-        data). Review before trusting these again.
+        instruction-like content, or a tool returned data that looks like
+        injected instructions. Usually benign, but it's how rug pulls, tool
+        poisoning, and agentjacking work, so Conduit flags it (and labels
+        suspicious tool output as data). Review before trusting these again.
       </p>
       <ul className="space-y-1.5 text-xs">
         {events.slice(0, 10).map((e, i) => {
           const badge = eventBadge(e);
           return (
             <li key={i} className="flex items-center gap-2">
-              <span className={`rounded px-1.5 py-0.5 font-medium ${badge.cls}`}>
+              <span
+                className={`rounded px-1.5 py-0.5 font-medium ${badge.cls}`}
+              >
                 {badge.label}
               </span>
               <code className="font-mono text-foreground">{e.tool}</code>
               {e.signatures && e.signatures.length > 0 && (
-                <span className="text-muted-foreground">({e.signatures.join(", ")})</span>
+                <span className="text-muted-foreground">
+                  ({e.signatures.join(", ")})
+                </span>
               )}
               <span className="ml-auto text-muted-foreground">
                 {new Date(e.ts).toLocaleString(undefined, {
@@ -123,6 +161,8 @@ function SecurityNotices({ events }: { events: SecurityEvent[] }) {
   );
 }
 
+/** Hero stat: tool-definition tokens (and dollars) lazy discovery kept out of
+ *  agent context, with a one-click share so users can flex their savings. */
 function SavingsBanner({ savings }: { savings: SavingsSummary }) {
   const [modelLabel, setModelLabel] = useState("Claude Sonnet");
   const price = SAVINGS_MODEL_PRICE.get(modelLabel) ?? 3;
@@ -148,7 +188,7 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
       `tool definitions so far. One local gateway for all my MCP servers, ~90% fewer tokens: conduitmcp.app`;
     try {
       await navigator.clipboard.writeText(text);
-      toast.success("Savings copied, paste it anywhere");
+      toast.success("Savings copied, paste them anywhere");
     } catch {
       toast.error("Couldn't copy to clipboard");
     }
@@ -165,32 +205,38 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
       <div className="mt-2 flex flex-wrap items-end gap-x-6 gap-y-1">
         <span className="text-3xl font-semibold tabular-nums text-emerald-400">
           ≈ {fmtTokens(savings.tokensSaved)}{" "}
-          <span className="text-base font-normal text-muted-foreground">tokens</span>
+          <span className="text-base font-normal text-muted-foreground">
+            tokens
+          </span>
         </span>
         <span className="text-3xl font-semibold tabular-nums text-emerald-400">
           ≈ {fmtDollars(dollars)}
         </span>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <select
-          value={modelLabel}
-          onChange={(e) => setModelLabel(e.target.value)}
-          aria-label="Model for the dollar estimate"
-          className="rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs text-muted-foreground"
-        >
-          {SAVINGS_MODELS.map((g) => (
-            <optgroup key={g.group} label={g.group}>
-              {g.items.map((m) => (
-                <option key={m.label} value={m.label}>
-                  at {m.label} (${m.price}/1M)
-                </option>
-              ))}
-            </optgroup>
-          ))}
-        </select>
+        <Select value={modelLabel} onValueChange={setModelLabel}>
+          <SelectTrigger
+            aria-label="Model for the dollar estimate"
+            className="h-7 w-fit gap-1.5 px-2 py-1 text-xs text-muted-foreground"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SAVINGS_MODELS.map((g) => (
+              <SelectGroup key={g.group}>
+                <SelectLabel>{g.group}</SelectLabel>
+                {g.items.map((m) => (
+                  <SelectItem key={m.label} value={m.label}>
+                    at {m.label} (${m.price}/1M)
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            ))}
+          </SelectContent>
+        </Select>
         <button
           onClick={share}
-          className="inline-flex items-center gap-1.5 rounded-md border border-white/10 px-2.5 py-1 text-xs text-muted-foreground transition hover:text-foreground"
+          className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs text-muted-foreground transition hover:text-foreground"
         >
           <Share2 className="size-3.5" /> Share
         </button>
@@ -246,7 +292,10 @@ function ServerRow({ s }: { s: ServerStat }) {
       </tr>
       {open &&
         tools.map((t) => (
-          <tr key={t.tool} className="border-b border-border/40 bg-muted/20 last:border-0">
+          <tr
+            key={t.tool}
+            className="border-b border-border/40 bg-muted/20 last:border-0"
+          >
             <td className="py-1.5 pr-3 pl-9 font-mono text-xs text-muted-foreground">
               {t.tool}
             </td>
@@ -279,12 +328,18 @@ function StatsPanel({ stats }: { stats: AuditStats }) {
     <div className="mb-6 flex flex-col gap-3">
       <div className="grid grid-cols-3 gap-3">
         <div className="rounded-lg border p-3">
-          <div className="text-2xl font-semibold tabular-nums">{stats.total}</div>
+          <div className="text-2xl font-semibold tabular-nums">
+            {stats.total}
+          </div>
           <div className="text-xs text-muted-foreground">calls logged</div>
         </div>
         <div className="rounded-lg border p-3">
-          <div className="text-2xl font-semibold tabular-nums">{stats.errors}</div>
-          <div className="text-xs text-muted-foreground">errors ({errPct}%)</div>
+          <div className="text-2xl font-semibold tabular-nums">
+            {stats.errors}
+          </div>
+          <div className="text-xs text-muted-foreground">
+            errors ({errPct}%)
+          </div>
         </div>
         <div className="rounded-lg border p-3">
           <div className="text-2xl font-semibold tabular-nums">
@@ -348,7 +403,9 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
   const banner = (
     <>
       {security.length > 0 && <SecurityNotices events={security} />}
-      {savings && savings.tokensSaved > 0 ? <SavingsBanner savings={savings} /> : null}
+      {savings && savings.tokensSaved > 0 ? (
+        <SavingsBanner savings={savings} />
+      ) : null}
     </>
   );
 
@@ -397,18 +454,22 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
       {stats && <StatsPanel stats={stats} />}
 
       <div className="mb-2 flex items-center gap-2">
-        <select
-          value={serverFilter}
-          onChange={(e) => setServerFilter(e.target.value)}
-          className="h-8 rounded-md border bg-background px-2 text-sm"
+        <Select
+          value={serverFilter || "all"}
+          onValueChange={(v) => setServerFilter(v === "all" ? "" : v)}
         >
-          <option value="">All servers</option>
-          {servers.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger className="h-8 w-fit gap-1.5 text-sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All servers</SelectItem>
+            {servers.map((s) => (
+              <SelectItem key={s} value={s}>
+                {s}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <button
           onClick={() => setErrorsOnly((v) => !v)}
           className={`h-8 rounded-md border px-2.5 text-sm transition-colors ${
@@ -441,7 +502,9 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
                 <XCircle className="size-4 shrink-0 text-destructive" />
               )}
               <span className="font-medium">{e.server}</span>
-              <span className="font-mono text-xs text-muted-foreground">{e.tool}</span>
+              <span className="font-mono text-xs text-muted-foreground">
+                {e.tool}
+              </span>
               <span className="ml-auto shrink-0 text-xs text-muted-foreground">
                 {new Date(e.ts).toLocaleString()}
               </span>

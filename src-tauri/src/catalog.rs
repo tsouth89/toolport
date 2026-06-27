@@ -85,6 +85,7 @@ pub fn curated() -> Vec<CatalogEntry> {
         cmd("PostgreSQL", "Query a Postgres database (add your connection string to args).", "npx", &["-y", "@modelcontextprotocol/server-postgres"], &[], "https://github.com/modelcontextprotocol/servers"),
         // --- Project management & docs ---
         http("Notion", "Search and edit Notion pages and databases.", "https://mcp.notion.com/mcp", "https://developers.notion.com"),
+        http("Composio", "Connect AI agents to 1,000+ apps (Gmail, Slack, GitHub, Notion, Linear, and more).", "https://connect.composio.dev/mcp", "https://composio.dev"),
         http("Linear", "Issues, projects, and cycles in Linear.", "https://mcp.linear.app/mcp", "https://linear.app/docs"),
         http("Atlassian", "Jira issues and Confluence pages.", "https://mcp.atlassian.com/v1/mcp", "https://support.atlassian.com/atlassian-rovo-mcp-server/"),
         http("Asana", "Tasks, projects, and portfolios in Asana.", "https://mcp.asana.com/mcp", "https://developers.asana.com/docs/mcp-server"),
@@ -212,6 +213,18 @@ pub fn search(query: &str) -> Vec<CatalogEntry> {
 
 /// Turn one registry `server` object into a catalog entry. Prefers a hosted
 /// remote (simplest to connect), else the first installable package.
+/// A registry package spec safe to pass as an npx/uvx/docker argument: non-empty, no
+/// leading dash (flag injection), bounded length, and only the characters real
+/// package names use. Nothing that could become a separate flag or a shell token.
+fn is_safe_package_id(spec: &str) -> bool {
+    !spec.is_empty()
+        && !spec.starts_with('-')
+        && spec.len() <= 200
+        && spec.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '@' | '/' | '-' | '_' | '.' | '+' | ':')
+        })
+}
+
 fn map_server(server: &Value) -> Option<CatalogEntry> {
     let id = server.get("name").and_then(|v| v.as_str()).unwrap_or("");
     // Friendly title when present; fall back to the namespaced id.
@@ -244,6 +257,11 @@ fn map_server(server: &Value) -> Option<CatalogEntry> {
         .and_then(|a| a.first())
     {
         if let Some(url) = remote.get("url").and_then(|v| v.as_str()) {
+            // SECURITY: only real HTTP(S) endpoints from a registry entry; a
+            // javascript:/file:/data: URL has no business here.
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                return None;
+            }
             let ty = remote.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let transport = if ty.contains("sse") { "sse" } else { "http" };
             return Some(CatalogEntry {
@@ -280,6 +298,14 @@ fn map_server(server: &Value) -> Option<CatalogEntry> {
             Some(v) if !v.is_empty() && v != "latest" => format!("{identifier}@{v}"),
             _ => identifier.to_string(),
         };
+        // SECURITY: this spec becomes an argument to npx/uvx/docker for a one-click
+        // install. Reject anything that isn't a plain package spec (a leading '-'
+        // reads as a flag; shell metacharacters have no business in a package name).
+        // Args are passed without a shell, but this is cheap defense in depth against
+        // a malicious or MITM'd registry entry.
+        if !is_safe_package_id(&spec) {
+            return None;
+        }
         let (command, args) = match registry_type {
             "pypi" => ("uvx".to_string(), vec![spec]),
             "oci" | "docker" => ("docker".to_string(), vec!["run".to_string(), "-i".to_string(), "--rm".to_string(), spec]),
@@ -330,12 +356,18 @@ pub fn search_registry(query: &str) -> Result<Vec<CatalogEntry>, String> {
     } else {
         format!("{REGISTRY_URL}?limit=50&search={}", urlencoding::encode(q))
     };
-    let body: Value = ureq::get(&url)
+    use std::io::Read;
+    let resp = ureq::get(&url)
         .timeout(std::time::Duration::from_secs(20))
         .call()
-        .map_err(|e| e.to_string())?
-        .into_json()
         .map_err(|e| e.to_string())?;
+    // Cap the registry response (defense in depth against a huge or MITM'd body).
+    let mut buf = Vec::new();
+    resp.into_reader()
+        .take(8 * 1024 * 1024)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    let body: Value = serde_json::from_slice(&buf).map_err(|e| e.to_string())?;
 
     let items = body
         .get("servers")
@@ -422,5 +454,21 @@ mod tests {
         let cur = json!({ "_meta": { "io.modelcontextprotocol.registry/official": { "isLatest": true } } });
         assert!(!is_latest(&old));
         assert!(is_latest(&cur));
+    }
+
+    #[test]
+    fn map_server_rejects_unsafe_specs() {
+        // Leading-dash identifier (flag injection into npx) is dropped.
+        let flag = json!({ "name": "io.x/y", "title": "Y",
+            "packages": [{ "registryType": "npm", "identifier": "--unsafe-flag" }] });
+        assert!(map_server(&flag).is_none(), "flag-injection identifier must be dropped");
+        // Shell metacharacters in the version are dropped.
+        let meta = json!({ "name": "io.x/z", "title": "Z",
+            "packages": [{ "registryType": "npm", "identifier": "pkg", "version": "1; rm -rf /" }] });
+        assert!(map_server(&meta).is_none(), "shell metachars must be dropped");
+        // A non-http(s) remote URL is dropped.
+        let scheme = json!({ "name": "io.x/w", "title": "W",
+            "remotes": [{ "type": "streamable-http", "url": "file:///etc/passwd" }] });
+        assert!(map_server(&scheme).is_none(), "non-http remote must be dropped");
     }
 }

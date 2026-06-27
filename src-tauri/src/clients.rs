@@ -1317,7 +1317,7 @@ fn write_hermes_yaml_servers(path: &Path, servers: &[ServerEntry]) -> Result<(),
     let mcp_servers = hermes_mcp_servers_mut(&mut root);
     mcp_servers.clear();
     for entry in servers {
-        let name_val = serde_yaml::Value::String(entry.id.clone());
+        let name_val = serde_yaml::Value::String(entry.name.clone());
         mcp_servers.insert(name_val, entry_to_hermes_yaml(entry));
     }
     let out = serde_yaml::to_string(&root).map_err(|e| e.to_string())?;
@@ -1370,7 +1370,7 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
 // edit: existing servers (and their secret env values) are left untouched.
 // ---------------------------------------------------------------------------
 
-fn resolve_gateway_path() -> Option<PathBuf> {
+pub(crate) fn resolve_gateway_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let ext = std::env::consts::EXE_SUFFIX;

@@ -14,8 +14,8 @@ self-signed certificate does not help end users.
 | Option | Cost | Notes |
 |---|---|---|
 | **Azure Trusted Signing** | ~$10/month | Cheapest real option. Cloud-based, no cert file to manage. Requires an Azure account and identity verification; orgs need 3+ years of history (individuals are eligible). Builds SmartScreen reputation immediately on a trusted root. |
-| **OV certificate** (Sectigo, DigiCert, etc.) | ~$100–400/year | Standard cert. SmartScreen reputation builds over time/downloads, so early downloads may still warn briefly. Usually requires a hardware token (or cloud HSM) now. |
-| **EV certificate** | ~$300–600/year | Instant SmartScreen reputation, no warning from day one. Hardware token required. |
+| **OV certificate** (Sectigo, DigiCert, etc.) | ~$100 to $400/year | Standard cert. SmartScreen reputation builds over time/downloads, so early downloads may still warn briefly. Usually requires a hardware token (or cloud HSM) now. |
+| **EV certificate** | ~$300 to $600/year | Instant SmartScreen reputation, no warning from day one. Hardware token required. |
 | **Ship unsigned (interim)** | free | Fine for an early beta. Users click "More info → Run anyway". Document the bypass in release notes. |
 
 For a pre-launch beta with no budget, shipping unsigned and documenting the
@@ -114,8 +114,8 @@ Developer ID cert (not an iOS distribution cert).
      Certificates → + → Developer ID Application**.
    - Then in **Keychain Access**, find that cert, expand it to include its private
      key, right-click → **Export** as a `.p12` with a password.
-2. **Team ID** — developer.apple.com → **Membership** (10-character code).
-3. **App-specific password** for notarization — appleid.apple.com → **Sign-In and
+2. **Team ID**: developer.apple.com → **Membership** (10-character code).
+3. **App-specific password** for notarization: appleid.apple.com → **Sign-In and
    Security → App-Specific Passwords → +** (label it e.g. "conduit notarization").
 
 ## GitHub Actions secrets to add

@@ -101,8 +101,19 @@ struct AsMeta {
     scopes_supported: Option<Vec<String>>,
 }
 
+/// A ureq agent with a connect + read timeout for all OAuth HTTP. These endpoints
+/// come from a fetched (and attacker-influenceable) metadata document, so a slow or
+/// black-holed host must not hang the worker indefinitely behind a spinner that
+/// never resolves. Bare `ureq::get/post` have no timeout; this does.
+fn agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+}
+
 fn get_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, String> {
-    ureq::get(url)
+    agent()
+        .get(url)
         .call()
         .map_err(|e| e.to_string())?
         .into_json::<T>()
@@ -298,7 +309,8 @@ fn register_client(registration_endpoint: &str, redirect_uri: &str) -> Result<St
         "response_types": ["code"],
         "token_endpoint_auth_method": "none"
     });
-    let resp: DcrResponse = ureq::post(registration_endpoint)
+    let resp: DcrResponse = agent()
+        .post(registration_endpoint)
         .send_json(body)
         .map_err(|e| e.to_string())?
         .into_json()
@@ -361,7 +373,8 @@ fn exchange_code(
     verifier: &str,
     resource: &str,
 ) -> Result<Tokens, String> {
-    let resp: TokenResponse = ureq::post(token_endpoint)
+    let resp: TokenResponse = agent()
+        .post(token_endpoint)
         .send_form(&[
             ("grant_type", "authorization_code"),
             ("code", code),
@@ -401,7 +414,8 @@ pub fn refresh(
     if let Some(r) = resource {
         form.push(("resource", r));
     }
-    let resp: TokenResponse = ureq::post(token_endpoint)
+    let resp: TokenResponse = agent()
+        .post(token_endpoint)
         .send_form(&form)
         .map_err(|e| e.to_string())?
         .into_json()

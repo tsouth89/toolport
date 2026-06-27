@@ -3,6 +3,96 @@
 All notable changes to Conduit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the GitHub releases.
 
+## [0.5.1] - 2026-06-27
+
+### Fixed
+- **macOS: the keychain prompts are gone.** The `conduit-gateway` helper that your
+  AI clients launch now reads your vaulted secrets (API keys, OAuth/bearer tokens)
+  with no keychain password prompt. Newly saved secrets get this automatically;
+  existing ones are upgraded on first launch. (Done with a trusted-application ACL
+  granting both the app and the gateway access, since the modern entitlement
+  approach can't work for a standalone helper binary.) Thanks @bradhallett for
+  tracing the root cause.
+
+## [0.5.0] - 2026-06-27
+
+A security-hardening release. Conduit tightens the whole tool-trust boundary,
+caps and filters what the gateway will fetch and sync, and adds accessibility and
+UI polish.
+
+### Fixed
+- **The sidebar action bar stays put.** It's pinned to the bottom of the server
+  list and always visible instead of appearing only when you scroll to the end,
+  and undetected clients collapse under a disclosure so the list stays short.
+
+### Security
+- **Hardened the anti-agentjacking scan.** Tool results are normalized before
+  scanning (lowercase, invisible/zero-width/bidi stripping, homoglyph and
+  full-width folding) and base64-decoded payloads are scanned too, so injection
+  text can't slip past with Unicode tricks or encoding. Nested `structuredContent`
+  is scanned as well.
+- **Rug-pull detection covers more of the tool definition.** Fingerprints now
+  include `outputSchema` and `annotations` (version-tagged), so a server can't
+  quietly change those behind an already-approved tool.
+- **Integrity pins fail closed.** A corrupt or tampered pin baseline now raises a
+  security event instead of silently resetting to trust-everything.
+- **Blocked RCE/SSRF from synced team config.** Team sync drops stdio/command
+  servers (remote code execution) and private-host URLs (SSRF); only public remote
+  servers sync. The gateway also stops following HTTP redirects.
+- **Capped downstream responses.** The gateway limits how much it reads from a
+  downstream MCP server (16 MiB), so a hostile or runaway server can't exhaust
+  memory.
+- **Validated catalog install specs.** Registry-supplied package IDs with shell
+  metacharacters or leading dashes are rejected, remote URLs must be http(s), and
+  the registry fetch is size-capped.
+- **Teams/OAuth hardening.** HTTP timeouts, a malformed-config guard, and token
+  cleanup after a failed connect.
+
+### Accessibility
+- **Respects "reduce motion."** When the OS prefers reduced motion, Conduit zeroes
+  out spinners, pulses, dialog and tooltip zooms, and transitions.
+
+### Internal
+- **CI on every PR**: frontend build, Rust library tests, and a gateway build
+  check now run on pull requests across the project.
+- **macOS:** newer secrets use the ACL-free SecItem keychain path, with a one-time
+  migration of older entries (#26). The fuller DataProtection-keychain change is
+  still in progress (it needs a code-signing approach that works for the gateway
+  sidecar), so prompts behave as before for now.
+- Removed leftover Vite/Tauri scaffold files and shipped a real favicon.
+
+### Thanks
+- @bradhallett (#26) for the macOS keychain migration work.
+
+## [0.4.2] - 2026-06-26
+
+### Added
+- **Conduit Teams (beta), desktop side.** A new Teams tab connects your local Conduit
+  to a self-hosted Conduit Teams server and syncs a shared MCP server set into your
+  registry. Keys never leave your machine: only the server set syncs, and you
+  authenticate each server locally. Inert until you connect to a team.
+- **Composio** in the curated catalog (connect agents to 1,000+ apps via MCP). (#23)
+
+### Fixed
+- **Custom API keys now reach HTTP servers.** A remote/HTTP server that uses a manually
+  vaulted secret (e.g. a `BEARER` key) gets it injected as the bearer token, not just
+  OAuth tokens, so "Manage secrets" works for HTTP servers. (#22)
+- **Cleaner multi-account duplicates.** Duplicating a server produces collision-free
+  names (`Server (2)`, `(3)`) instead of `Server 2`, with an "add another account"
+  hint. (#24)
+- **Hermes config keys.** Hermes `mcp_servers` entries are keyed by server name, so the
+  config round-trips correctly. (#25)
+
+### Internal
+- **macOS secret storage moved to the SecItem keychain API** for new entries, which
+  avoids the per-application ACLs behind repeated keychain prompts (#21). If you're on
+  macOS and still see prompts, they're from entries created by older versions: clear
+  Conduit's old entries in Keychain Access and re-authenticate to use the new path. A
+  confirmed prompt-elimination claim is pending validation on signed release builds.
+
+### Thanks
+- @bradhallett (#21, #22, #23, #25) and @BharadwajKanneveti (#24).
+
 ## [0.4.1] - 2026-06-26
 
 ### Changed

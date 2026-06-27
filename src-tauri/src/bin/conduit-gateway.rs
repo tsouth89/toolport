@@ -36,6 +36,7 @@ use conduit_lib::router::{Router, ToolPolicy};
 use conduit_lib::savings;
 use conduit_lib::semantic;
 use conduit_lib::secrets;
+use conduit_lib::shaping;
 
 fn success(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
@@ -107,6 +108,25 @@ fn call_tool_def() -> Value {
                 }
             },
             "required": ["name"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn fetch_result_tool_def() -> Value {
+    json!({
+        "name": "conduit_fetch_result",
+        "description": "Read more of a large tool result that Conduit truncated. When a \
+            result is too big for context, Conduit returns the head plus a cursor in a \
+            `[Conduit shaped this result]` marker; call this with that `cursor` and the \
+            `offset` shown in the marker to page through the rest. Nothing was lost.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cursor": { "type": "string", "description": "The cursor from the marker." },
+                "offset": { "type": "integer", "minimum": 0, "description": "Character offset to read from (shown in the marker)." }
+            },
+            "required": ["cursor", "offset"],
             "additionalProperties": false
         }
     })
@@ -747,7 +767,12 @@ fn handle_request(
             // holds a handful of tool defs instead of the whole catalog. The model
             // finds real tools via conduit_search_tools and runs conduit_call_tool.
             if lazy {
-                let mut tools = vec![status_tool_def(), search_tool_def(), call_tool_def()];
+                let mut tools = vec![
+                    status_tool_def(),
+                    search_tool_def(),
+                    call_tool_def(),
+                    fetch_result_tool_def(),
+                ];
                 // Opt-in: surface the agent-control tools only when the user has
                 // allowed it, so an agent can't even see them otherwise.
                 if reg.allow_agent_control {
@@ -776,7 +801,7 @@ fn handle_request(
                 gtrace("tools/list -> 3 tools (lazy discovery)");
                 return Some(success(id, json!({ "tools": tools })));
             }
-            let mut tools = vec![status_tool_def()];
+            let mut tools = vec![status_tool_def(), fetch_result_tool_def()];
             // Prefer the cached catalog (instant); fall back to the live router.
             if cached.is_empty() {
                 tools.extend(router.aggregated_tools());
@@ -805,6 +830,14 @@ fn handle_request(
             if name != "conduit_search_tools" {
                 guard.last_top = None;
                 guard.repeats = 0;
+            }
+
+            if name == "conduit_fetch_result" {
+                let cursor = arguments.get("cursor").and_then(|v| v.as_str()).unwrap_or("");
+                let offset =
+                    arguments.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let len = arguments.get("len").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                return Some(success(id, shaping::fetch_result(cursor, offset, len)));
             }
 
             if name == "conduit_status" {
@@ -970,6 +1003,9 @@ fn handle_request(
                     if reg.content_defense {
                         integrity::inspect_result(srv, tool, &mut result);
                     }
+                    // Result-shaping: cap an oversized result, cache the full body, and
+                    // hand the model a head + a conduit_fetch_result cursor (lossless).
+                    shaping::shape_result(&mut result, shaping::budget());
                     Some(success(id, result))
                 }
                 Err(e) => {
@@ -1097,8 +1133,8 @@ fn connect_one(server: &ServerEntry, dirty: &Arc<AtomicBool>) -> Option<Downstre
             Ok(t) => DownstreamServer::connect(server.id.clone(), Box::new(t)),
             Err(e) => Err(e),
         }
-    } else if let Some(url) = &server.url {
-        remote::connect_remote(&server.id, url)
+    } else if server.url.is_some() {
+        remote::connect_remote(server)
     } else {
         Err("no command or url".to_string())
     };
@@ -1332,6 +1368,58 @@ fn watch_registry(
 }
 
 fn main() {
+    // Diagnostic: `conduit-gateway --selftest-secrets` reads every vaulted secret
+    // from THIS (gateway) process and reports. Used to validate the macOS keychain
+    // shared-access ACL: this runs as a separate process from the app, exactly the
+    // cross-process read path. If it reads the secrets with NO keychain prompt, the
+    // gateway has silent access and the fix works.
+    if std::env::args().nth(1).as_deref() == Some("--selftest-secrets") {
+        let reg = match registry::load_resolved() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("selftest-secrets: could not load registry: {e}");
+                std::process::exit(1);
+            }
+        };
+        let (mut ok, mut unset, mut err) = (0u32, 0u32, 0u32);
+        for s in &reg.servers {
+            for e in &s.env {
+                if e.value.is_some() || !e.secret {
+                    continue;
+                }
+                match secrets::get_secret_result(&s.id, &e.key) {
+                    Ok(Some(_)) => {
+                        ok += 1;
+                        println!("OK     {} :: {}", s.id, e.key);
+                    }
+                    Ok(None) => {
+                        unset += 1;
+                        println!("UNSET  {} :: {}", s.id, e.key);
+                    }
+                    Err(e2) => {
+                        err += 1;
+                        println!("ERR    {} :: {}  ({e2})", s.id, e.key);
+                    }
+                }
+            }
+            // Bearer / OAuth tokens live under a reserved key, not as env vars.
+            match secrets::get_secret_result(&s.id, secrets::HTTP_AUTH_KEY) {
+                Ok(Some(_)) => {
+                    ok += 1;
+                    println!("OK     {} :: (auth token)", s.id);
+                }
+                Ok(None) => {}
+                Err(e2) => {
+                    err += 1;
+                    println!("ERR    {} :: (auth token)  ({e2})", s.id);
+                }
+            }
+        }
+        println!("\nselftest-secrets: {ok} read OK, {unset} unset, {err} errors");
+        println!("If NO keychain prompt appeared, the gateway has silent access (the ACL works).");
+        std::process::exit(0);
+    }
+
     // Lazy discovery resolves from an explicit env override first (per-client),
     // then the registry's global setting. Reading the registry means lazy mode
     // applies to EVERY client, including ones that don't forward env vars to the

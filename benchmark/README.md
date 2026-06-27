@@ -50,9 +50,9 @@ LLM_URL="http://localhost:11434/v1/chat/completions" MODEL="qwen2.5:7b" node ben
 
 Per task and as totals, for each mode:
 
-- **tokens** — summed from the LLM's `usage.total_tokens` across every request in the agent loop. This is the headline metric.
-- **tool calls** — how many tool invocations the agent made (lazy mode includes its search calls).
-- **completion** — whether the agent produced a final answer. Eyeball the printed answers for actual correctness; this is a coarse success flag, not a grader.
+- **tokens**: summed from the LLM's `usage.total_tokens` across every request in the agent loop. This is the headline metric.
+- **tool calls**: how many tool invocations the agent made (lazy mode includes its search calls).
+- **completion**: whether the agent produced a final answer. Eyeball the printed answers for actual correctness; this is a coarse success flag, not a grader.
 
 And the summary line: tools exposed (flat vs 3), total-token delta as a percent, and tasks completed.
 

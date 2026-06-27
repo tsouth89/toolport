@@ -13,6 +13,7 @@ pub mod remote;
 pub mod router;
 pub mod savings;
 pub mod semantic;
+pub mod shaping;
 pub mod secrets;
 pub mod teams;
 pub mod vendors;
@@ -76,8 +77,8 @@ fn connect_server(server: &ServerEntry) -> Result<DownstreamServer, String> {
         }
         let t = StdioTransport::spawn(command, &server.args, &env)?;
         DownstreamServer::connect(server.id.clone(), Box::new(t))
-    } else if let Some(url) = &server.url {
-        remote::connect_remote(&server.id, url)
+    } else if server.url.is_some() {
+        remote::connect_remote(server)
     } else {
         Err("no command or url".to_string())
     }
@@ -1019,6 +1020,47 @@ fn watch_registry_for_app(handle: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let registry = registry::load().unwrap_or_default();
+
+    // Migrate legacy (ACL-bearing) keychain entries in the background. On macOS,
+    // older versions of Conduit created keychain items via the `keyring` crate,
+    // which attaches per-app ACLs that trigger repeated password prompts. This
+    // reads each entry's value, deletes it, and re-creates it via the ACL-free
+    // SecItemAdd path — no secret values are lost. Guarded by a marker file so it
+    // runs exactly once. Only the app runs this (the gateway can't read legacy
+    // entries without triggering prompts). Best-effort: failures are logged but
+    // never block startup.
+    {
+        let reg = registry.clone();
+        std::thread::spawn(move || {
+            // Collect every secret key the registry knows about: env vars marked
+            // secret, plus the reserved keys for remote servers and team tokens.
+            let mut keys: Vec<(String, String)> = Vec::new();
+            for server in &reg.servers {
+                for e in &server.env {
+                    if e.secret {
+                        keys.push((server.id.clone(), e.key.clone()));
+                    }
+                }
+                if server.url.is_some() {
+                    // Remote servers store both the auth token and OAuth state.
+                    keys.push((server.id.clone(), secrets::HTTP_AUTH_KEY.to_string()));
+                    keys.push((server.id.clone(), remote::OAUTH_STATE_KEY.to_string()));
+                }
+            }
+            // Team member token (one global slot, not per-server).
+            keys.push((
+                teams::TEAM_TOKEN_SERVER.to_string(),
+                teams::TEAM_TOKEN_KEY.to_string(),
+            ));
+            let report = secrets::migrate_legacy_entries(&keys);
+            if report.migrated > 0 || report.failed > 0 {
+                eprintln!(
+                    "conduit: keychain migration complete ({} entries rewritten, {} failed, {} not found)",
+                    report.migrated, report.failed, report.not_found
+                );
+            }
+        });
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

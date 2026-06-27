@@ -77,6 +77,15 @@ dist-ssr
 # Generated at build time by the Windows signing step (holds the resolved signCommand)
 /src-tauri/tauri.signing.conf.json
 
+# Signing key material + certs - NEVER commit (private keys, .p12 bundles). The
+# real signing identity lives only in the APPLE_* / AZURE_* GitHub secrets.
+*.p12
+*.pfx
+*.key
+*.pem
+*.cer
+*.mobileprovision
+
 # Internal planning/strategy docs (kept local, like MONETIZATION/STATUS/COMPETITIVE/PLAN)
 /docs/SITE-MESSAGING.md
 /docs/specs/

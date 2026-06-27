@@ -52,8 +52,9 @@ export interface SecurityEvent {
   ts: number;
   /** "tool_drift" (definition changed/added) or "tool_poison_flag" (injection in a definition). */
   type: string;
-  server: string;
-  tool: string;
+  /** Absent for events not tied to a specific tool (e.g. pins_load_failed). */
+  server?: string;
+  tool?: string;
   change: string;
   /** For tool_poison_flag: which heuristic signatures matched. */
   signatures?: string[];
