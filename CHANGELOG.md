@@ -12,6 +12,9 @@ All notable changes to Conduit are documented here. Format loosely follows
   edit, remove) one click away in an expandable drawer. Needs-attention and disabled
   servers get their own collapsible groups (disabled starts collapsed). Roughly 2-3x
   denser at 20+ servers, and the row actions are real keyboard-reachable buttons now.
+- **The catalog browse view is grouped by category.** The default view organizes the
+  curated set into sections (Code & infrastructure, Databases, Search & knowledge, Web &
+  automation, Apps & productivity, Local tools) instead of a flat grid; search stays flat.
 
 ### Added
 - **Three more catalog servers:** Perplexity, Kubernetes, and Todoist.

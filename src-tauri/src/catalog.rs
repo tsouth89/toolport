@@ -33,6 +33,29 @@ pub struct CatalogEntry {
     /// cryptographic guarantee. `None` for curated/user entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
+    /// Curated grouping for the browse view (e.g. "Databases"). Empty for registry
+    /// and user entries, which surface flat in search results.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub category: String,
+}
+
+/// Browse-view grouping for a curated server, keyed by name. Keeps the verified
+/// entry list itself untouched; the UI orders the sections, not the arm order here.
+fn category_for(name: &str) -> &'static str {
+    match name {
+        "GitHub" | "Vercel" | "Sentry" | "Cloudflare Docs" | "AWS" | "Kubernetes" => {
+            "Code & infrastructure"
+        }
+        "Supabase" | "Neon" | "PostgreSQL" | "MongoDB" | "Elasticsearch" => "Databases",
+        "Context7" | "DeepWiki" | "Hugging Face" | "OpenRouter" | "Brave Search" | "Exa"
+        | "Tavily" | "Perplexity" => "Search & knowledge",
+        "Firecrawl" | "Apify" | "Browserbase" => "Web & automation",
+        "Stripe" | "Notion" | "Composio" | "Linear" | "Atlassian" | "Asana" | "Airtable"
+        | "Todoist" | "Slack" | "Resend" | "Figma" => "Apps & productivity",
+        "Filesystem" | "Fetch" | "Git" | "Playwright" | "Sequential Thinking" | "Memory"
+        | "Time" => "Local tools",
+        _ => "",
+    }
 }
 
 /// The hand-verified popular set. Hosted (URL) servers are favored here because
@@ -52,6 +75,7 @@ pub fn curated() -> Vec<CatalogEntry> {
         source: "curated".to_string(),
         homepage: Some(home.to_string()),
         publisher: None,
+        category: String::new(),
     };
     // Local (stdio) servers: `command` + args, with any required secret env keys.
     let cmd =
@@ -67,10 +91,11 @@ pub fn curated() -> Vec<CatalogEntry> {
                 source: "curated".to_string(),
                 homepage: Some(home.to_string()),
                 publisher: None,
+                category: String::new(),
             }
         };
 
-    vec![
+    let mut list = vec![
         // --- Payments & commerce ---
         http("Stripe", "Payments, customers, charges, and balances.", "https://mcp.stripe.com", "https://docs.stripe.com/mcp"),
         // --- Code, deploy & infra ---
@@ -120,7 +145,11 @@ pub fn curated() -> Vec<CatalogEntry> {
         cmd("Sequential Thinking", "Structured step-by-step reasoning for hard problems.", "npx", &["-y", "@modelcontextprotocol/server-sequential-thinking"], &[], "https://github.com/modelcontextprotocol/servers"),
         cmd("Memory", "A knowledge graph the agent reads and writes across sessions.", "npx", &["-y", "@modelcontextprotocol/server-memory"], &[], "https://github.com/modelcontextprotocol/servers"),
         cmd("Time", "Current time and timezone conversions.", "uvx", &["mcp-server-time"], &[], "https://github.com/modelcontextprotocol/servers"),
-    ]
+    ];
+    for e in &mut list {
+        e.category = category_for(&e.name).to_string();
+    }
+    list
 }
 
 fn user_catalog_path() -> Option<std::path::PathBuf> {
@@ -288,6 +317,7 @@ fn map_server(server: &Value) -> Option<CatalogEntry> {
                 source: "registry".to_string(),
                 homepage,
                 publisher,
+                category: String::new(),
             });
         }
     }
@@ -345,6 +375,7 @@ fn map_server(server: &Value) -> Option<CatalogEntry> {
             source: "registry".to_string(),
             homepage,
             publisher,
+            category: String::new(),
         });
     }
 
@@ -408,6 +439,8 @@ mod tests {
             assert!(!e.name.is_empty());
             // Each entry is either a remote (url) or a command, never neither.
             assert!(e.url.is_some() || e.command.is_some(), "{} has no target", e.name);
+            // Every curated entry must land in a browse-view category.
+            assert!(!e.category.is_empty(), "{} has no category", e.name);
         }
     }
 

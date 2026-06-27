@@ -154,6 +154,8 @@ export interface CatalogEntry {
   homepage: string | null;
   /** Publishing namespace from the registry (who published it), if known. */
   publisher?: string | null;
+  /** Curated browse-view grouping (e.g. "Databases"); absent for registry/user. */
+  category?: string;
 }
 
 /** A server merged across every client that has it configured. */

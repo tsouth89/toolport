@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, ExternalLink, Loader2, Plus, Search, ShieldCheck, X } from "lucide-react";
 import { toast } from "sonner";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -12,6 +12,17 @@ import type { CatalogEntry, Registry, ServerEntry } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { TransportPill } from "@/components/TransportPill";
+
+/** Section order for the browse view; categories not listed fall to the end. */
+const CATEGORY_ORDER = [
+  "Your picks",
+  "Code & infrastructure",
+  "Databases",
+  "Search & knowledge",
+  "Web & automation",
+  "Apps & productivity",
+  "Local tools",
+];
 
 interface Props {
   registry: Registry | null;
@@ -102,6 +113,37 @@ export function CatalogView({ registry, onAdded }: Props) {
   }
 
   const shown = results ?? popular;
+  const browsing = results === null;
+
+  // Browse view: group the popular picks into category sections. Search results
+  // stay flat (they're query-driven, including the long-tail registry).
+  const byCategory = useMemo(() => {
+    const groups = new Map<string, CatalogEntry[]>();
+    for (const e of popular) {
+      const cat = e.source === "user" ? "Your picks" : e.category || "Other";
+      const arr = groups.get(cat);
+      if (arr) arr.push(e);
+      else groups.set(cat, [e]);
+    }
+    const ord = (c: string) => {
+      const i = CATEGORY_ORDER.indexOf(c);
+      return i === -1 ? 999 : i;
+    };
+    return [...groups.entries()].sort((a, b) => ord(a[0]) - ord(b[0]));
+  }, [popular]);
+
+  const card = (entry: CatalogEntry) => (
+    <CatalogCard
+      key={`${entry.source}:${entry.name}`}
+      entry={entry}
+      added={have.has(entry.name.toLowerCase())}
+      busy={busy === entry.name}
+      onAdd={() => add(entry)}
+      onRemove={
+        entry.source === "user" ? () => removeFromCatalog(entry) : undefined
+      }
+    />
+  );
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-4">
@@ -140,20 +182,23 @@ export function CatalogView({ registry, onAdded }: Props) {
               ? `No servers match "${query}".`
               : "Catalog unavailable."}
         </p>
+      ) : browsing ? (
+        <div className="flex flex-col gap-6">
+          {byCategory.map(([cat, entries]) => (
+            <section key={cat}>
+              <h2 className="mb-2 flex items-center gap-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                {cat}
+                <span className="text-muted-foreground/60">{entries.length}</span>
+              </h2>
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                {entries.map(card)}
+              </div>
+            </section>
+          ))}
+        </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {shown.map((entry) => (
-            <CatalogCard
-              key={`${entry.source}:${entry.name}`}
-              entry={entry}
-              added={have.has(entry.name.toLowerCase())}
-              busy={busy === entry.name}
-              onAdd={() => add(entry)}
-              onRemove={
-                entry.source === "user" ? () => removeFromCatalog(entry) : undefined
-              }
-            />
-          ))}
+          {shown.map(card)}
         </div>
       )}
     </div>

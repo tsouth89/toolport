@@ -775,6 +775,7 @@ fn promote_to_catalog(state: State<RegistryState>, server_id: String) -> Result<
         source: "user".to_string(),
         homepage: None,
         publisher: None,
+        category: String::new(),
     };
     catalog::promote(entry)
 }
