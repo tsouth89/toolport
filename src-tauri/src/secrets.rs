@@ -389,7 +389,10 @@ mod tests {
             .expect("filebased_set_bytes: should write to login keychain");
     }
 
+    // Round-trips through the real OS keychain. Headless Linux CI has no Secret
+    // Service (D-Bus), so skip it there; it still runs on macOS and Windows.
     #[test]
+    #[cfg_attr(target_os = "linux", ignore = "no Secret Service in headless CI")]
     fn set_get_delete_round_trip() {
         // On macOS, this exercises the DataProtection keychain path, which
         // requires a signing entitlement. Skip on adhoc-signed dev builds.
