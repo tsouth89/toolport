@@ -77,6 +77,11 @@ function App() {
     () => localStorage.getItem("conduit.onboarded") === "1",
   );
   const [showOnboarding, setShowOnboarding] = useState(false);
+  // Step the wizard opens at (0 = Welcome). Set to the Connect step when resuming
+  // after a catalog detour, so a browsing user still lands on the step that wires
+  // Conduit into their tools.
+  const [onboardingStep, setOnboardingStep] = useState(0);
+  const [resumeAtConnect, setResumeAtConnect] = useState(false);
 
   const lastProbeRef = useRef(0);
   const probingRef = useRef(false);
@@ -215,16 +220,38 @@ function App() {
   // (which flips gatewayInstalled) doesn't unmount the dialog. Existing users,
   // and anyone who has dismissed it, never see it.
   useEffect(() => {
-    if (onboarded || showOnboarding || loading || !registry) return;
+    if (onboarded || showOnboarding || resumeAtConnect || loading || !registry)
+      return;
     const fresh =
       servers.length === 0 && !clients.some((c) => c.gatewayInstalled);
     if (fresh) setShowOnboarding(true);
-  }, [onboarded, showOnboarding, loading, registry, servers.length, clients]);
+  }, [
+    onboarded,
+    showOnboarding,
+    resumeAtConnect,
+    loading,
+    registry,
+    servers.length,
+    clients,
+  ]);
+
+  // The wizard hands off to the catalog mid-flow (Add-servers step). When the user
+  // navigates back out of the catalog, resume the wizard at the Connect step rather
+  // than abandoning onboarding, so they don't silently skip connecting a client.
+  useEffect(() => {
+    if (resumeAtConnect && view !== "catalog" && !onboarded) {
+      setOnboardingStep(2);
+      setShowOnboarding(true);
+      setResumeAtConnect(false);
+    }
+  }, [resumeAtConnect, view, onboarded]);
 
   function finishOnboarding() {
     localStorage.setItem("conduit.onboarded", "1");
     setOnboarded(true);
     setShowOnboarding(false);
+    setResumeAtConnect(false);
+    setOnboardingStep(0);
   }
 
   async function handleToggle(serverId: string, enabled: boolean) {
@@ -330,7 +357,10 @@ function App() {
           onSelectClient={selectClient}
           view={view}
           onSelectView={selectView}
-          onReplayOnboarding={() => setShowOnboarding(true)}
+          onReplayOnboarding={() => {
+            setOnboardingStep(0);
+            setShowOnboarding(true);
+          }}
         />
 
         <main className="flex min-w-0 flex-1 flex-col">
@@ -512,12 +542,14 @@ function App() {
       </div>
       {showOnboarding && registry && (
         <Onboarding
+          initialStep={onboardingStep}
           clients={clients}
           registry={registry}
           onRegistryChange={setRegistry}
           onClientsRefresh={load}
           onBrowseCatalog={() => {
-            finishOnboarding();
+            setShowOnboarding(false);
+            setResumeAtConnect(true);
             selectView("catalog");
           }}
           onFinish={finishOnboarding}

@@ -27,12 +27,14 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 
 interface Props {
+  /** Step to open at (0 = Welcome). Used to resume mid-flow. */
+  initialStep?: number;
   clients: DetectedClient[];
   registry: Registry;
   onRegistryChange: (registry: Registry) => void;
   /** Re-detect clients after a connect, so their status reflects reality. */
   onClientsRefresh: () => void;
-  /** Leave the wizard and open the catalog. */
+  /** Hand off to the catalog; the wizard resumes at the Connect step on return. */
   onBrowseCatalog: () => void;
   /** Mark onboarding complete (skipped or finished) and close. */
   onFinish: () => void;
@@ -43,6 +45,7 @@ interface Props {
  * import / connect / catalog flows so a new user reaches "my tools share these
  * servers" without hunting through the UI. */
 export function Onboarding({
+  initialStep = 0,
   clients,
   registry,
   onRegistryChange,
@@ -50,7 +53,7 @@ export function Onboarding({
   onBrowseCatalog,
   onFinish,
 }: Props) {
-  const [step, setStep] = useState(0);
+  const [step, setStep] = useState(initialStep);
 
   const present = clients.filter((c) => c.appPresent);
   const importable = new Set(
