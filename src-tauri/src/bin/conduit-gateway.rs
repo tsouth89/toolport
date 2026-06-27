@@ -1332,6 +1332,46 @@ fn watch_registry(
 }
 
 fn main() {
+    // Diagnostic: `conduit-gateway --selftest-secrets` reads every vaulted secret
+    // from THIS (gateway) process and reports. Used to validate the macOS keychain
+    // shared-access ACL: this runs as a separate process from the app, exactly the
+    // cross-process read path. If it reads the secrets with NO keychain prompt, the
+    // gateway has silent access and the fix works.
+    if std::env::args().nth(1).as_deref() == Some("--selftest-secrets") {
+        let reg = match registry::load_resolved() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("selftest-secrets: could not load registry: {e}");
+                std::process::exit(1);
+            }
+        };
+        let (mut ok, mut unset, mut err) = (0u32, 0u32, 0u32);
+        for s in &reg.servers {
+            for e in &s.env {
+                if e.value.is_some() || !e.secret {
+                    continue;
+                }
+                match secrets::get_secret_result(&s.id, &e.key) {
+                    Ok(Some(_)) => {
+                        ok += 1;
+                        println!("OK     {} :: {}", s.id, e.key);
+                    }
+                    Ok(None) => {
+                        unset += 1;
+                        println!("UNSET  {} :: {}", s.id, e.key);
+                    }
+                    Err(e2) => {
+                        err += 1;
+                        println!("ERR    {} :: {}  ({e2})", s.id, e.key);
+                    }
+                }
+            }
+        }
+        println!("\nselftest-secrets: {ok} read OK, {unset} unset, {err} errors");
+        println!("If NO keychain prompt appeared, the gateway has silent access (the ACL works).");
+        std::process::exit(0);
+    }
+
     // Lazy discovery resolves from an explicit env override first (per-client),
     // then the registry's global setting. Reading the registry means lazy mode
     // applies to EVERY client, including ones that don't forward env vars to the

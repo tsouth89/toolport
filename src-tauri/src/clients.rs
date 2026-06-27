@@ -1370,7 +1370,7 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
 // edit: existing servers (and their secret env values) are left untouched.
 // ---------------------------------------------------------------------------
 
-fn resolve_gateway_path() -> Option<PathBuf> {
+pub(crate) fn resolve_gateway_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let ext = std::env::consts::EXE_SUFFIX;
