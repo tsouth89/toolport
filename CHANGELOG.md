@@ -3,7 +3,7 @@
 All notable changes to Conduit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the GitHub releases.
 
-## [Unreleased]
+## [0.6.0] - 2026-06-27
 
 ### Changed
 - **The server list is a dense, scannable list now.** The bulky three-column cards are

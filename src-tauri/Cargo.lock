@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "conduit"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.1",
