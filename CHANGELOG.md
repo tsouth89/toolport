@@ -3,6 +3,24 @@
 All notable changes to Conduit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the GitHub releases.
 
+## [Unreleased]
+
+### Changed
+- **The server list is a dense, scannable list now.** The bulky three-column cards are
+  replaced by compact grouped rows: toggle, status, name, source, tool count, and
+  transport on one line, with the command and per-server actions (secrets, duplicate,
+  edit, remove) one click away in an expandable drawer. Needs-attention and disabled
+  servers get their own collapsible groups (disabled starts collapsed). Roughly 2-3x
+  denser at 20+ servers, and the row actions are real keyboard-reachable buttons now.
+
+### Added
+- **Three more catalog servers:** Perplexity, Kubernetes, and Todoist.
+
+### Fixed
+- The manual Refresh always confirms now ("Refreshed"), even when a health probe is
+  already running, so the click is never silent.
+- Hardened the first-run wizard's resume-after-catalog flow against future regressions.
+
 ## [0.5.2] - 2026-06-27
 
 ### Added
