@@ -7,6 +7,7 @@ import {
 } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
+  ChevronDown,
   MoreHorizontal,
   Download,
   Plus,
@@ -43,7 +44,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { AppSidebar } from "@/components/AppSidebar";
 import { Onboarding } from "@/components/Onboarding";
-import { RegistryServerCard } from "@/components/RegistryServerCard";
+import { RegistryServerRow } from "@/components/RegistryServerRow";
 import { ClientDetail } from "@/components/ClientDetail";
 import { ActivityView } from "@/components/ActivityView";
 import { ServerDialog } from "@/components/ServerDialog";
@@ -328,15 +329,14 @@ function App() {
     }
   }
 
-  const serverCard = (server: ServerEntry) => (
-    <RegistryServerCard
+  const serverRow = (server: ServerEntry) => (
+    <RegistryServerRow
       key={server.id}
       server={server}
       registry={registry}
       enabled={registry ? isEnabled(registry, server.id) : false}
       busy={busyId === server.id}
       health={health[server.id]}
-      probing={probing}
       onToggle={(en) => handleToggle(server.id, en)}
       onRemove={() => handleRemove(server.id, server.name)}
       onRegistryChange={setRegistry}
@@ -485,9 +485,9 @@ function App() {
                   onRegistryChange={setRegistry}
                 />
               ) : loading && registry === null ? (
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                <div className="flex flex-col gap-2">
                   {Array.from({ length: 6 }).map((_, i) => (
-                    <Skeleton key={i} className="h-28 w-full rounded-xl" />
+                    <Skeleton key={i} className="h-11 w-full rounded-lg" />
                   ))}
                 </div>
               ) : error ? (
@@ -503,27 +503,28 @@ function App() {
                   No servers match "{query}".
                 </div>
               ) : (
-                <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-5">
                   <ServerGroup
                     title="Needs attention"
                     dot="bg-amber-400"
                     count={grouped.attention.length}
                   >
-                    {grouped.attention.map(serverCard)}
+                    {grouped.attention.map(serverRow)}
                   </ServerGroup>
                   <ServerGroup
                     title="Active"
                     dot="bg-emerald-400"
                     count={grouped.active.length}
                   >
-                    {grouped.active.map(serverCard)}
+                    {grouped.active.map(serverRow)}
                   </ServerGroup>
                   <ServerGroup
                     title="Disabled"
                     dot="bg-muted-foreground/40"
                     count={grouped.disabled.length}
+                    defaultCollapsed
                   >
-                    {grouped.disabled.map(serverCard)}
+                    {grouped.disabled.map(serverRow)}
                   </ServerGroup>
                 </div>
               )}
@@ -552,30 +553,59 @@ function App() {
   );
 }
 
-/** A titled section of server cards. Renders nothing when empty, so the page
- * only shows the buckets that actually have servers. */
+/** A titled, collapsible section of server rows. Renders nothing when empty, so
+ * the page only shows the buckets that have servers. Collapse state persists per
+ * group; the Disabled bucket starts collapsed. */
 function ServerGroup({
   title,
   dot,
   count,
+  defaultCollapsed = false,
   children,
 }: {
   title: string;
   dot: string;
   count: number;
+  defaultCollapsed?: boolean;
   children: ReactNode;
 }) {
+  const storageKey = `conduit.group.${title.toLowerCase().replace(/\s+/g, "-")}`;
+  const [collapsed, setCollapsed] = useState(() => {
+    const v = localStorage.getItem(storageKey);
+    return v === null ? defaultCollapsed : v === "1";
+  });
   if (count === 0) return null;
+  function toggle() {
+    setCollapsed((c) => {
+      const next = !c;
+      localStorage.setItem(storageKey, next ? "1" : "0");
+      return next;
+    });
+  }
   return (
     <section>
-      <div className="mb-2 flex items-center gap-2">
-        <span className={`size-2 rounded-full ${dot}`} />
+      <button
+        onClick={toggle}
+        aria-expanded={!collapsed}
+        className="mb-2 flex w-full items-center gap-2 rounded text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      >
+        <ChevronDown
+          className={`size-3.5 text-muted-foreground/60 transition-transform ${
+            collapsed ? "-rotate-90" : ""
+          }`}
+          aria-hidden="true"
+        />
+        <span className={`size-2 rounded-full ${dot}`} aria-hidden="true" />
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           {title}
         </h2>
         <span className="text-xs text-muted-foreground/70">{count}</span>
-      </div>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{children}</div>
+      </button>
+      {!collapsed && (
+        <div className="overflow-hidden rounded-xl border border-border/60">
+          {children}
+        </div>
+      )}
     </section>
   );
 }
