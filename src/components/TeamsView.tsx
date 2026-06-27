@@ -2,6 +2,7 @@ import { useState } from "react";
 import { RefreshCw, LogOut, Upload, ShieldCheck, Users, Server } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { TransportPill } from "@/components/TransportPill";
 import { Input } from "@/components/ui/input";
 import { teamConnect, teamSync, teamDisconnect, teamPush } from "@/lib/api";
 import type { Registry } from "@/lib/types";
@@ -199,7 +200,7 @@ export function TeamsView({
                     <li key={s.id} className="flex items-center gap-2 text-sm">
                       <Server className="size-3.5 shrink-0 text-muted-foreground" />
                       <span className="truncate">{s.name}</span>
-                      <span className="text-xs text-muted-foreground">{s.transport}</span>
+                      <TransportPill transport={s.transport} />
                     </li>
                   ))}
                 </ul>

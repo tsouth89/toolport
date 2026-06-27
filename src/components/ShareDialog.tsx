@@ -27,6 +27,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { TransportPill } from "@/components/TransportPill";
 import { Label } from "@/components/ui/label";
 
 interface Props {
@@ -279,9 +280,7 @@ function ImportRow({ item }: { item: ImportItem }) {
     <div className="rounded-md border px-3 py-2">
       <div className="flex items-center gap-2">
         <span className="truncate text-sm font-medium">{item.name}</span>
-        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground uppercase">
-          {item.transport}
-        </span>
+        <TransportPill transport={item.transport} />
         {!item.isNew && (
           <span className="ml-auto shrink-0 text-xs text-muted-foreground">
             already added

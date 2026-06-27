@@ -451,8 +451,8 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
                     aria-pressed={selected}
                     className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
                   >
-                    <span className="flex items-center gap-2">
-                      <span className="font-mono text-sm">{t.name}</span>
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate font-mono text-sm">{t.name}</span>
                       {destructive && (
                         <Badge
                           variant="outline"

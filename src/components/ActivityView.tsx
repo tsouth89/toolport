@@ -264,7 +264,7 @@ function ServerRow({ s }: { s: ServerStat }) {
         onClick={() => expandable && setOpen((o) => !o)}
       >
         <td className="px-3 py-2 font-medium">
-          <span className="flex items-center gap-1.5">
+          <span className="flex min-w-0 items-center gap-1.5">
             {expandable ? (
               <ChevronRight
                 className={`size-3.5 text-muted-foreground transition-transform ${open ? "rotate-90" : ""}`}
@@ -272,7 +272,7 @@ function ServerRow({ s }: { s: ServerStat }) {
             ) : (
               <span className="inline-block size-3.5" />
             )}
-            {s.server}
+            <span className="truncate">{s.server}</span>
           </span>
         </td>
         <td className="px-3 py-2 text-right tabular-nums">{s.calls}</td>
@@ -502,8 +502,8 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
               ) : (
                 <XCircle className="size-4 shrink-0 text-destructive" />
               )}
-              <span className="font-medium">{e.server}</span>
-              <span className="font-mono text-xs text-muted-foreground">
+              <span className="min-w-0 truncate font-medium">{e.server}</span>
+              <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
                 {e.tool}
               </span>
               <span className="ml-auto shrink-0 text-xs text-muted-foreground">
