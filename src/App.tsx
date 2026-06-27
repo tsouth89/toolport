@@ -16,7 +16,7 @@ import {
   ServerOff,
   Store,
   TriangleAlert,
-} from "lucide-react"; 
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   detectClients,
@@ -401,7 +401,7 @@ function App() {
 
                    <DropdownMenuContent align="end" className="w-38">
                       <DropdownMenuItem onClick={handleImport}>
-                        <Download className="mr-2 h-4 w-4" />
+                        <Download className="mr-2 size-4" />
                         <span>Import</span>
                       </DropdownMenuItem>
 
@@ -410,7 +410,7 @@ function App() {
                           onClick={handleToggleAll}
                           disabled={busyId !== null}
                         >
-                          <ServerOff className="mr-2 h-4 w-4" />
+                          <ServerOff className="mr-2 size-4" />
                           <span>
                             {enabledCount < servers.length ? "Enable all" : "Disable all"}
                           </span>
@@ -421,7 +421,7 @@ function App() {
                         onClick={handleProbe}
                         disabled={probing}
                       >
-                        <HeartPulse className="mr-2 h-4 w-4" />
+                        <HeartPulse className="mr-2 size-4" />
                         <span>Check health</span>
                       </DropdownMenuItem>
                     </DropdownMenuContent>
