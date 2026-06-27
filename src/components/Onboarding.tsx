@@ -106,7 +106,7 @@ export function Onboarding({
                 <span
                   key={i}
                   className={`size-1.5 rounded-full transition-colors ${
-                    i === step ? "bg-emerald-400" : "bg-muted-foreground/30"
+                    i === step ? "bg-success" : "bg-muted-foreground/30"
                   }`}
                 />
               ))}
@@ -137,7 +137,7 @@ function StepHeader({
 }) {
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex size-10 items-center justify-center rounded-xl bg-emerald-400/10 text-emerald-400">
+      <div className="flex size-10 items-center justify-center rounded-xl bg-success/10 text-success">
         {icon}
       </div>
       <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
@@ -257,7 +257,7 @@ function AddServers({
           </Button>
         )}
         {imported !== null && (
-          <div className="flex items-center gap-2 rounded-md bg-emerald-400/10 px-3 py-2 text-sm text-emerald-400">
+          <div className="flex items-center gap-2 rounded-md bg-success/10 px-3 py-2 text-sm text-success">
             <Check className="size-4" />
             Imported. Conduit now manages {imported} server
             {imported === 1 ? "" : "s"}.
@@ -280,7 +280,7 @@ function AddServers({
                     title={s.description}
                     className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
                       isAdded
-                        ? "border-emerald-400/40 text-emerald-400"
+                        ? "border-success/40 text-success"
                         : "hover:bg-accent disabled:opacity-60"
                     }`}
                   >
@@ -369,7 +369,7 @@ function ConnectClients({
               >
                 <span className="truncate text-sm">{client.name}</span>
                 {connected ? (
-                  <span className="flex shrink-0 items-center gap-1.5 text-xs text-emerald-400">
+                  <span className="flex shrink-0 items-center gap-1.5 text-xs text-success">
                     <Check className="size-3.5" />
                     Connected
                   </span>
@@ -470,8 +470,8 @@ function Done({
       </StepHeader>
 
       {broken.length > 0 && (
-        <div className="flex flex-col gap-1 rounded-md bg-amber-400/10 px-3 py-2 text-sm">
-          <span className="font-medium text-amber-500">
+        <div className="flex flex-col gap-1 rounded-md bg-warning/10 px-3 py-2 text-sm">
+          <span className="font-medium text-warning">
             {broken.length} server{broken.length === 1 ? "" : "s"} couldn't start:{" "}
             {broken.map((r) => nameFor(r.serverId)).join(", ")}
           </span>

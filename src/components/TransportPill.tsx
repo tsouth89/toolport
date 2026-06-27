@@ -8,17 +8,17 @@ const meta: Record<
   stdio: {
     label: "stdio",
     icon: Terminal,
-    className: "text-emerald-400 border-emerald-400/30 bg-emerald-400/10",
+    className: "text-success border-success/30 bg-success/10",
   },
   http: {
     label: "http",
     icon: Globe,
-    className: "text-sky-400 border-sky-400/30 bg-sky-400/10",
+    className: "text-owned border-owned/30 bg-owned/10",
   },
   sse: {
     label: "sse",
     icon: Radio,
-    className: "text-violet-400 border-violet-400/30 bg-violet-400/10",
+    className: "text-info border-info/30 bg-info/10",
   },
   unknown: {
     label: "unknown",

@@ -368,7 +368,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
           <label className="flex items-center gap-2.5 rounded-md border px-3 py-2 text-sm">
             <Layers
-              className={`size-4 ${lazyDiscovery ? "text-violet-300" : "text-muted-foreground"}`}
+              className={`size-4 ${lazyDiscovery ? "text-info" : "text-muted-foreground"}`}
             />
             <span className="flex flex-1 flex-col leading-tight min-w-0">
               <span className="font-medium">Lazy discovery</span>
@@ -384,7 +384,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
           </label>
           <label className="flex items-center gap-2.5 rounded-md border px-3 py-2 text-sm">
             <ShieldAlert
-              className={`size-4 ${denyDestructive ? "text-amber-400" : "text-muted-foreground"}`}
+              className={`size-4 ${denyDestructive ? "text-warning" : "text-muted-foreground"}`}
             />
             <span className="flex flex-1 flex-col leading-tight min-w-0">
               <span className="font-medium">Block destructive tools</span>
@@ -400,7 +400,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
           </label>
           <label className="flex items-center gap-2.5 rounded-md border px-3 py-2 text-sm">
             <Bot
-              className={`size-4 ${allowAgentControl ? "text-emerald-400" : "text-muted-foreground"}`}
+              className={`size-4 ${allowAgentControl ? "text-success" : "text-muted-foreground"}`}
             />
             <span className="flex flex-1 flex-col leading-tight min-w-0">
               <span className="font-medium">Allow agent control</span>
@@ -456,7 +456,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
                       {destructive && (
                         <Badge
                           variant="outline"
-                          className="border-amber-500/40 text-amber-500"
+                          className="border-warning/40 text-warning"
                         >
                           destructive
                         </Badge>
@@ -497,7 +497,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
             <p className="text-sm text-muted-foreground">{tool.description}</p>
           )}
           {!isExposed(tool) && (
-            <p className="flex items-center gap-1.5 text-xs text-amber-500">
+            <p className="flex items-center gap-1.5 text-xs text-warning">
               <ShieldAlert className="size-3.5" />
               Hidden from clients by policy. You can still test it here.
             </p>
@@ -567,7 +567,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
             {result.isError ? (
               <XCircle className="size-4 text-destructive" />
             ) : (
-              <CheckCircle2 className="size-4 text-emerald-400" />
+              <CheckCircle2 className="size-4 text-success" />
             )}
             {result.isError ? "Tool returned an error" : "Result"}
           </div>

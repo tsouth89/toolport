@@ -104,9 +104,9 @@ function eventBadge(e: SecurityEvent): { label: string; cls: string } {
     };
   }
   if (e.change === "changed") {
-    return { label: "changed", cls: "bg-amber-500/15 text-amber-300" };
+    return { label: "changed", cls: "bg-warning/15 text-warning" };
   }
-  return { label: "new tool", cls: "bg-sky-500/15 text-sky-300" };
+  return { label: "new tool", cls: "bg-owned/15 text-owned" };
 }
 
 /** Surfaces tool security events: a tool you approved changed (rug-pull signal),
@@ -115,10 +115,10 @@ function eventBadge(e: SecurityEvent): { label: string; cls: string } {
  * (agentjacking, which Conduit labels as data before the agent sees it). */
 function SecurityNotices({ events }: { events: SecurityEvent[] }) {
   return (
-    <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
+    <div className="mb-4 rounded-lg border border-warning/40 bg-warning/5 p-4">
       <div className="mb-2 flex items-center gap-2">
-        <ShieldAlert className="size-4 text-amber-400" />
-        <h3 className="text-sm font-medium text-amber-300">
+        <ShieldAlert className="size-4 text-warning" />
+        <h3 className="text-sm font-medium text-warning">
           Tool security notices
         </h3>
       </div>
@@ -195,21 +195,21 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
   };
 
   return (
-    <div className="mb-6 rounded-lg border border-emerald-500/30 bg-emerald-500/[0.06] p-4">
+    <div className="mb-6 rounded-lg border border-success/30 bg-success/[0.06] p-4">
       <div className="flex items-center gap-2">
-        <Sparkles className="size-4 text-emerald-400" />
+        <Sparkles className="size-4 text-success" />
         <span className="text-sm font-medium text-muted-foreground">
           What lazy discovery has saved you
         </span>
       </div>
       <div className="mt-2 flex flex-wrap items-end gap-x-6 gap-y-1">
-        <span className="text-3xl font-semibold tabular-nums text-emerald-400">
+        <span className="text-3xl font-semibold tabular-nums text-success">
           ≈ {fmtTokens(savings.tokensSaved)}{" "}
           <span className="text-base font-normal text-muted-foreground">
             tokens
           </span>
         </span>
-        <span className="text-3xl font-semibold tabular-nums text-emerald-400">
+        <span className="text-3xl font-semibold tabular-nums text-success">
           ≈ {fmtDollars(dollars)}
         </span>
       </div>
@@ -498,7 +498,7 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
               className="flex items-center gap-3 rounded-md border border-border/50 px-3 py-2 text-sm"
             >
               {e.ok ? (
-                <CheckCircle2 className="size-4 shrink-0 text-emerald-400" />
+                <CheckCircle2 className="size-4 shrink-0 text-success" />
               ) : (
                 <XCircle className="size-4 shrink-0 text-destructive" />
               )}

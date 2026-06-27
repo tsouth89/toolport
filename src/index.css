@@ -25,6 +25,10 @@
     --color-input: var(--input);
     --color-border: var(--border);
     --color-destructive: var(--destructive);
+    --color-success: var(--success);
+    --color-warning: var(--warning);
+    --color-info: var(--info);
+    --color-owned: var(--owned);
     --color-accent-foreground: var(--accent-foreground);
     --color-accent: var(--accent);
     --color-muted-foreground: var(--muted-foreground);
@@ -65,6 +69,13 @@
     --accent: oklch(0.97 0 0);
     --accent-foreground: oklch(0.205 0 0);
     --destructive: oklch(0.577 0.245 27.325);
+    /* Semantic accent tokens, one shade each, so success/warning/info/owned render
+       identically across every view (the audit found these drifting 300/400/500).
+       Values are the Tailwind v4 *-400 palette: emerald, amber, violet, sky. */
+    --success: oklch(0.765 0.177 163.223);
+    --warning: oklch(0.828 0.189 84.429);
+    --info: oklch(0.702 0.183 293.541);
+    --owned: oklch(0.746 0.16 232.661);
     --border: oklch(0.922 0 0);
     --input: oklch(0.922 0 0);
     --ring: oklch(0.708 0 0);

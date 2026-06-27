@@ -175,7 +175,7 @@ export function ClientDetail({
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           {installed ? (
-            <span className="mb-1 inline-flex items-center gap-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-xs font-medium text-emerald-400">
+            <span className="mb-1 inline-flex items-center gap-1 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-xs font-medium text-success">
               <Link2 className="size-3" />
               connected to Conduit
             </span>
@@ -192,7 +192,7 @@ export function ClientDetail({
                 : "not installed on this machine"}
           </p>
           {!present && !installed && (
-            <p className="mt-1 text-xs text-amber-400">
+            <p className="mt-1 text-xs text-warning">
               {client.name} doesn't appear to be installed here. Install it first,
               then connect.
             </p>
@@ -248,9 +248,9 @@ export function ClientDetail({
       </p>
 
       {client.usesConnectors && (
-        <Card className="gap-0 border-violet-400/20 bg-violet-400/5">
+        <Card className="gap-0 border-info/20 bg-info/5">
           <CardContent className="flex gap-3 p-4">
-            <Puzzle className="mt-0.5 size-4 shrink-0 text-violet-400" />
+            <Puzzle className="mt-0.5 size-4 shrink-0 text-info" />
             <div className="text-sm">
               <p className="font-medium">{client.name} manages servers as connectors</p>
               <p className="mt-1 text-muted-foreground">
@@ -327,7 +327,7 @@ export function ClientDetail({
         )}
 
         {toImport.length === 0 && allServers.length > 0 && (
-          <p className="mt-3 inline-flex items-center gap-1.5 text-xs text-emerald-400">
+          <p className="mt-3 inline-flex items-center gap-1.5 text-xs text-success">
             <Check className="size-3.5" />
             Everything here is already in Conduit. Manage it under{" "}
             <span className="inline-flex items-center gap-0.5 font-medium">
@@ -352,7 +352,7 @@ export function ClientDetail({
               uses <span className="font-medium text-foreground">only the Conduit gateway</span>.
               The original config is backed up first.
             </p>
-            <p className="rounded-md bg-amber-400/10 p-2 text-xs text-amber-300">
+            <p className="rounded-md bg-warning/10 p-2 text-xs text-warning">
               Secret values (API keys, tokens) aren't carried over, they stay only
               in the backed-up config. After migrating, re-enter them under each
               server's secrets so the gateway can connect.
@@ -440,7 +440,7 @@ function ServerMiniCard({
         </code>
         <div className="flex justify-end">
           {imported ? (
-            <span className="inline-flex items-center gap-1 text-xs text-emerald-400">
+            <span className="inline-flex items-center gap-1 text-xs text-success">
               <Check className="size-3" />
               in Conduit
             </span>

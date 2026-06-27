@@ -293,7 +293,7 @@ function ImportRow({ item }: { item: ImportItem }) {
         </p>
       )}
       {shell && (
-        <p className="mt-1.5 flex items-center gap-1.5 text-xs text-amber-400">
+        <p className="mt-1.5 flex items-center gap-1.5 text-xs text-warning">
           <ShieldAlert className="size-3.5 shrink-0" />
           Runs a shell command. Only import setups you trust.
         </p>

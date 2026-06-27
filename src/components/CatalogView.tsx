@@ -235,10 +235,10 @@ export function CatalogView({ registry, onAdded }: Props) {
 function Provenance({ entry }: { entry: CatalogEntry }) {
   const tier =
     entry.source === "curated"
-      ? { label: "Conduit verified", cls: "text-emerald-400" }
+      ? { label: "Conduit verified", cls: "text-success" }
       : entry.source === "registry"
-        ? { label: "MCP Registry", cls: "text-violet-300" }
-        : { label: "Your pick", cls: "text-sky-400" };
+        ? { label: "MCP Registry", cls: "text-info" }
+        : { label: "Your pick", cls: "text-owned" };
   return (
     <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
       <ShieldCheck className={`size-3 shrink-0 ${tier.cls}`} />
@@ -274,7 +274,7 @@ function CatalogCard({
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="truncate text-sm font-medium">{entry.name}</span>
           {entry.source === "user" && (
-            <span className="shrink-0 rounded-full bg-sky-400/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-400">
+            <span className="shrink-0 rounded-full bg-owned/10 px-1.5 py-0.5 text-[10px] font-medium text-owned">
               yours
             </span>
           )}
@@ -311,7 +311,7 @@ function CatalogCard({
       <Provenance entry={entry} />
       <div className="mt-auto flex justify-end pt-1">
         {added ? (
-          <span className="inline-flex items-center gap-1 text-xs text-emerald-400">
+          <span className="inline-flex items-center gap-1 text-xs text-success">
             <Check className="size-3" />
             in Conduit
           </span>

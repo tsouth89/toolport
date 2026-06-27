@@ -45,8 +45,8 @@ function statusOf(enabled: boolean, health?: ProbeResult): Status {
 const DOT: Record<Status, string> = {
   disabled: "bg-muted-foreground/40",
   checking: "bg-muted-foreground/40 animate-pulse",
-  connected: "bg-emerald-400",
-  "needs-auth": "bg-amber-400",
+  connected: "bg-success",
+  "needs-auth": "bg-warning",
   error: "bg-destructive",
 };
 
@@ -152,7 +152,7 @@ export function RegistryServerRow({
                 <button
                   onClick={stop}
                   onKeyDown={stop}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-amber-400/40 px-2.5 py-1 text-xs text-amber-500 transition-colors hover:bg-amber-400/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-400"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-warning/40 px-2.5 py-1 text-xs text-warning transition-colors hover:bg-warning/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning"
                 >
                   <LogIn className="size-3.5" />
                   Authenticate
@@ -193,7 +193,7 @@ export function RegistryServerRow({
             </code>
           )}
           {status === "error" && health?.error && (
-            <p className="text-xs text-amber-400">{health.error}</p>
+            <p className="text-xs text-warning">{health.error}</p>
           )}
 
           <div className="flex flex-wrap items-center gap-1">
@@ -288,7 +288,7 @@ function StatusLabel({
       <Tooltip>
         <TooltipTrigger asChild>{text}</TooltipTrigger>
         <TooltipContent side="top" className="max-w-xs">
-          <p className="text-xs text-amber-400">{error}</p>
+          <p className="text-xs text-warning">{error}</p>
         </TooltipContent>
       </Tooltip>
     );

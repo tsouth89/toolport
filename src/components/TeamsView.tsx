@@ -86,7 +86,7 @@ export function TeamsView({
         </div>
       )}
       {notice && (
-        <div className="mb-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-400">
+        <div className="mb-4 rounded-lg border border-success/40 bg-success/10 px-4 py-3 text-sm text-success">
           {notice}
         </div>
       )}
@@ -173,7 +173,7 @@ export function TeamsView({
               <div className="mt-4 flex items-center justify-between gap-4 rounded-lg border border-dashed bg-muted/30 px-4 py-3">
                 <div className="min-w-0 text-sm">
                   <div className="flex items-center gap-1.5 font-medium">
-                    <ShieldCheck className="size-3.5 text-emerald-400" /> Admin
+                    <ShieldCheck className="size-3.5 text-success" /> Admin
                   </div>
                   <p className="text-xs text-muted-foreground">
                     Push your current server set to the team. Secret values are never sent.

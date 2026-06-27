@@ -15,6 +15,9 @@ All notable changes to Conduit are documented here. Format loosely follows
 - **The catalog browse view is grouped by category.** The default view organizes the
   curated set into sections (Code & infrastructure, Databases, Search & knowledge, Web &
   automation, Apps & productivity, Local tools) instead of a flat grid; search stays flat.
+- **Consistent accent colors.** Success, warning, info, and "yours" now come from four
+  semantic tokens (one shade each) instead of emerald/amber/violet/sky drifting across
+  300/400/500, so the same meaning renders identically in every view.
 
 ### Added
 - **Three more catalog servers:** Perplexity, Kubernetes, and Todoist.

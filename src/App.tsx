@@ -518,14 +518,14 @@ function App() {
                 <div className="flex flex-col gap-5">
                   <ServerGroup
                     title="Needs attention"
-                    dot="bg-amber-400"
+                    dot="bg-warning"
                     count={grouped.attention.length}
                   >
                     {grouped.attention.map(serverRow)}
                   </ServerGroup>
                   <ServerGroup
                     title="Active"
-                    dot="bg-emerald-400"
+                    dot="bg-success"
                     count={grouped.active.length}
                   >
                     {grouped.active.map(serverRow)}
@@ -661,7 +661,7 @@ function EmptyState({
 function ErrorState({ message }: { message: string }) {
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-24 text-center">
-      <TriangleAlert className="size-10 text-amber-400" />
+      <TriangleAlert className="size-10 text-warning" />
       <div>
         <p className="font-medium">Couldn't reach the backend</p>
         <p className="max-w-md text-sm text-muted-foreground">

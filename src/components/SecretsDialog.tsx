@@ -254,7 +254,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
               )}
 
               {authInfo?.kind === "none" ? (
-                <div className="flex items-start gap-2 rounded-md bg-emerald-400/10 p-2.5 text-xs text-emerald-300">
+                <div className="flex items-start gap-2 rounded-md bg-success/10 p-2.5 text-xs text-success">
                   <Check className="mt-0.5 size-3.5 shrink-0" />
                   <span>
                     This server connects without auth. Just enable it, no token needed.
@@ -271,7 +271,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                       {authInfo.tokenUrl && (
                         <button
                           onClick={() => openUrl(authInfo.tokenUrl!)}
-                          className="ml-1 inline-flex items-center gap-0.5 text-sky-400 hover:underline"
+                          className="ml-1 inline-flex items-center gap-0.5 text-owned hover:underline"
                         >
                           get a token
                           <ExternalLink className="size-3" />
@@ -284,7 +284,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                     <div className="flex items-center gap-2">
                       <Label className="text-xs">Access token</Label>
                       {authSet && (
-                        <span className="inline-flex items-center gap-1 text-xs text-emerald-400">
+                        <span className="inline-flex items-center gap-1 text-xs text-success">
                           <Check className="size-3" />
                           vaulted
                         </span>
@@ -376,7 +376,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                   {keyHint.url && (
                     <button
                       onClick={() => openUrl(keyHint.url)}
-                      className="ml-1 inline-flex items-center gap-0.5 text-sky-400 hover:underline"
+                      className="ml-1 inline-flex items-center gap-0.5 text-owned hover:underline"
                     >
                       get your key
                       <ExternalLink className="size-3" />
@@ -395,7 +395,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                       {key}
                     </code>
                     {vaulted[key] && (
-                      <span className="inline-flex items-center gap-1 text-xs text-emerald-400">
+                      <span className="inline-flex items-center gap-1 text-xs text-success">
                         <Check className="size-3" />
                         saved
                       </span>

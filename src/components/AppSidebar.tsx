@@ -126,7 +126,7 @@ function VersionFooter({
         <button
           onClick={() => setShowNotes(true)}
           disabled={installing}
-          className="flex min-w-0 items-center gap-1.5 text-emerald-400 transition hover:underline disabled:opacity-70"
+          className="flex min-w-0 items-center gap-1.5 text-success transition hover:underline disabled:opacity-70"
         >
           {installing ? (
             <Loader2 className="size-3.5 shrink-0 animate-spin" />
@@ -286,9 +286,9 @@ function statusOf(client: DetectedClient): ClientStatus {
 }
 
 const dotClass: Record<ClientStatus, string> = {
-  active: "bg-emerald-400",
+  active: "bg-success",
   empty: "bg-muted-foreground/40",
-  error: "bg-amber-400",
+  error: "bg-warning",
   missing: "bg-muted-foreground/20",
 };
 
@@ -328,9 +328,9 @@ function ClientRow({ client, importCount, selected, onSelect }: RowProps) {
           } ${missing ? "opacity-50" : ""}`}
         >
           {connected ? (
-            <Link2 className="size-3.5 shrink-0 text-emerald-400" />
+            <Link2 className="size-3.5 shrink-0 text-success" />
           ) : client.usesConnectors ? (
-            <Puzzle className="size-3.5 shrink-0 text-violet-400" />
+            <Puzzle className="size-3.5 shrink-0 text-info" />
           ) : (
             <span
               className={`size-2 shrink-0 rounded-full ${dotClass[status]}`}
@@ -339,7 +339,7 @@ function ClientRow({ client, importCount, selected, onSelect }: RowProps) {
           <span className="truncate">{client.name}</span>
           <span
             className={`ml-auto shrink-0 text-xs ${
-              importCount > 0 ? "text-sky-400" : "text-muted-foreground"
+              importCount > 0 ? "text-owned" : "text-muted-foreground"
             }`}
           >
             {right}
@@ -356,12 +356,12 @@ function ClientRow({ client, importCount, selected, onSelect }: RowProps) {
             : "Connect Conduit here, and import any servers you want it to manage."}
         </p>
         {client.usesConnectors && (
-          <p className="mt-1 text-xs text-violet-300">
+          <p className="mt-1 text-xs text-info">
             Manages servers as account connectors, outside the config file.
           </p>
         )}
         {client.error && (
-          <p className="mt-1 text-xs text-amber-400">{client.error}</p>
+          <p className="mt-1 text-xs text-warning">{client.error}</p>
         )}
       </TooltipContent>
     </Tooltip>
