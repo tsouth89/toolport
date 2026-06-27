@@ -6,15 +6,10 @@ All notable changes to Conduit are documented here. Format loosely follows
 ## [0.5.0] - 2026-06-27
 
 A security-hardening release. Conduit tightens the whole tool-trust boundary,
-caps and filters what the gateway will fetch and sync, and on macOS finally ends
-the repeated keychain prompts by moving secrets to the DataProtection keychain.
-Plus accessibility and UI polish.
+caps and filters what the gateway will fetch and sync, and adds accessibility and
+UI polish.
 
 ### Fixed
-- **macOS keychain prompts are gone.** Secrets now live in the macOS
-  **DataProtection keychain**, which has no per-application ACLs and no
-  cross-process prompts, so the app and the gateway both read them after a single
-  unlock. Existing secrets migrate automatically on first launch. (#26, #27)
 - **The sidebar action bar stays put.** It's pinned to the bottom of the server
   list and always visible instead of appearing only when you scroll to the end,
   and undetected clients collapse under a disclosure so the list stays short.
@@ -49,11 +44,14 @@ Plus accessibility and UI polish.
 ### Internal
 - **CI on every PR**: frontend build, Rust library tests, and a gateway build
   check now run on pull requests across the project.
+- **macOS:** newer secrets use the ACL-free SecItem keychain path, with a one-time
+  migration of older entries (#26). The fuller DataProtection-keychain change is
+  still in progress (it needs a code-signing approach that works for the gateway
+  sidecar), so prompts behave as before for now.
 - Removed leftover Vite/Tauri scaffold files and shipped a real favicon.
 
 ### Thanks
-- @bradhallett (#26, #27) for tracing the macOS keychain prompts to their root
-  cause and moving secrets to the DataProtection keychain.
+- @bradhallett (#26) for the macOS keychain migration work.
 
 ## [0.4.2] - 2026-06-26
 
