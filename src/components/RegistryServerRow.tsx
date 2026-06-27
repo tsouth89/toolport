@@ -157,13 +157,6 @@ export function RegistryServerRow({
 
           <TransportPill transport={server.transport} />
 
-          {secretCount > 0 && (
-            <KeyRound
-              className="size-3.5 text-muted-foreground/50"
-              aria-label={`${secretCount} secret${secretCount === 1 ? "" : "s"}`}
-            />
-          )}
-
           <button
             type="button"
             onClick={(e) => {

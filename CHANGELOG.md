@@ -18,6 +18,10 @@ All notable changes to Conduit are documented here. Format loosely follows
 - **Consistent accent colors.** Success, warning, info, and "yours" now come from four
   semantic tokens (one shade each) instead of emerald/amber/violet/sky drifting across
   300/400/500, so the same meaning renders identically in every view.
+- **A calmer Activity page.** The tool-security panel is collapsible and each notice can
+  be dismissed once reviewed; the raw call log is collapsed by default and filtered to
+  errors first, so the per-server stats table stays the headline. The "has secrets" key
+  icon on server rows is gone (it was a non-interactive indicator that looked clickable).
 
 ### Added
 - **Three more catalog servers:** Perplexity, Kubernetes, and Todoist.

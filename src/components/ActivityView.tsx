@@ -6,6 +6,7 @@ import {
   Share2,
   ShieldAlert,
   Sparkles,
+  X,
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -109,54 +110,101 @@ function eventBadge(e: SecurityEvent): { label: string; cls: string } {
   return { label: "new tool", cls: "bg-owned/15 text-owned" };
 }
 
+const SECURITY_DISMISSED_KEY = "conduit.security.dismissed";
+
+/** Stable per-event key so a dismissal sticks across refreshes. */
+function securityKey(e: SecurityEvent): string {
+  return `${e.type}:${e.tool}:${e.ts}`;
+}
+
+function loadDismissed(): Set<string> {
+  try {
+    const raw = localStorage.getItem(SECURITY_DISMISSED_KEY);
+    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+  } catch {
+    return new Set();
+  }
+}
+
 /** Surfaces tool security events: a tool you approved changed (rug-pull signal),
  * a known server added one, a tool definition contains injection-like content
  * (poisoning), or a tool returned data that looks like injected instructions
- * (agentjacking, which Conduit labels as data before the agent sees it). */
-function SecurityNotices({ events }: { events: SecurityEvent[] }) {
+ * (agentjacking, which Conduit labels as data before the agent sees it).
+ * Collapsible, and each notice can be dismissed once you've reviewed it. */
+function SecurityNotices({
+  events,
+  onDismiss,
+}: {
+  events: SecurityEvent[];
+  onDismiss: (e: SecurityEvent) => void;
+}) {
+  const [open, setOpen] = useState(true);
   return (
     <div className="mb-4 rounded-lg border border-warning/40 bg-warning/5 p-4">
-      <div className="mb-2 flex items-center gap-2">
-        <ShieldAlert className="size-4 text-warning" />
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <ShieldAlert className="size-4 shrink-0 text-warning" />
         <h3 className="text-sm font-medium text-warning">
           Tool security notices
         </h3>
-      </div>
-      <p className="mb-3 max-w-2xl text-xs text-muted-foreground">
-        A tool changed after you approved it, a tool's definition contains
-        instruction-like content, or a tool returned data that looks like
-        injected instructions. Usually benign, but it's how rug pulls, tool
-        poisoning, and agentjacking work, so Conduit flags it (and labels
-        suspicious tool output as data). Review before trusting these again.
-      </p>
-      <ul className="space-y-1.5 text-xs">
-        {events.slice(0, 10).map((e, i) => {
-          const badge = eventBadge(e);
-          return (
-            <li key={i} className="flex items-center gap-2">
-              <span
-                className={`rounded px-1.5 py-0.5 font-medium ${badge.cls}`}
-              >
-                {badge.label}
-              </span>
-              <code className="font-mono text-foreground">{e.tool}</code>
-              {e.signatures && e.signatures.length > 0 && (
-                <span className="text-muted-foreground">
-                  ({e.signatures.join(", ")})
-                </span>
-              )}
-              <span className="ml-auto text-muted-foreground">
-                {new Date(e.ts).toLocaleString(undefined, {
-                  month: "short",
-                  day: "numeric",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </span>
-            </li>
-          );
-        })}
-      </ul>
+        <span className="rounded-full bg-warning/15 px-1.5 py-0.5 text-xs font-medium text-warning">
+          {events.length}
+        </span>
+        <ChevronRight
+          className={`ml-auto size-4 text-warning/70 transition-transform ${
+            open ? "rotate-90" : ""
+          }`}
+        />
+      </button>
+      {open && (
+        <>
+          <p className="mt-2 mb-3 max-w-2xl text-xs text-muted-foreground">
+            A tool changed after you approved it, a tool's definition contains
+            instruction-like content, or a tool returned data that looks like
+            injected instructions. Usually benign, but it's how rug pulls, tool
+            poisoning, and agentjacking work, so Conduit flags it (and labels
+            suspicious tool output as data). Dismiss the ones you've reviewed.
+          </p>
+          <ul className="space-y-1.5 text-xs">
+            {events.slice(0, 10).map((e, i) => {
+              const badge = eventBadge(e);
+              return (
+                <li key={i} className="flex items-center gap-2">
+                  <span
+                    className={`rounded px-1.5 py-0.5 font-medium ${badge.cls}`}
+                  >
+                    {badge.label}
+                  </span>
+                  <code className="font-mono text-foreground">{e.tool}</code>
+                  {e.signatures && e.signatures.length > 0 && (
+                    <span className="text-muted-foreground">
+                      ({e.signatures.join(", ")})
+                    </span>
+                  )}
+                  <span className="ml-auto text-muted-foreground">
+                    {new Date(e.ts).toLocaleString(undefined, {
+                      month: "short",
+                      day: "numeric",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </span>
+                  <button
+                    onClick={() => onDismiss(e)}
+                    aria-label="Dismiss this notice"
+                    className="rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-warning/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
     </div>
   );
 }
@@ -378,8 +426,10 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
   const [stats, setStats] = useState<AuditStats | null>(null);
   const [savings, setSavings] = useState<SavingsSummary | null>(null);
   const [serverFilter, setServerFilter] = useState<string>("");
-  const [errorsOnly, setErrorsOnly] = useState(false);
+  const [errorsOnly, setErrorsOnly] = useState(true);
   const [security, setSecurity] = useState<SecurityEvent[]>([]);
+  const [dismissed, setDismissed] = useState<Set<string>>(loadDismissed);
+  const [logOpen, setLogOpen] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -400,9 +450,25 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
     };
   }, [refreshKey]);
 
+  const liveSecurity = security.filter((e) => !dismissed.has(securityKey(e)));
+  const dismissSecurity = (e: SecurityEvent) => {
+    setDismissed((prev) => {
+      const next = new Set(prev);
+      next.add(securityKey(e));
+      try {
+        localStorage.setItem(SECURITY_DISMISSED_KEY, JSON.stringify([...next]));
+      } catch {
+        // ignore storage failures; the dismissal just won't persist
+      }
+      return next;
+    });
+  };
+
   const banner = (
     <>
-      {security.length > 0 && <SecurityNotices events={security} />}
+      {liveSecurity.length > 0 && (
+        <SecurityNotices events={liveSecurity} onDismiss={dismissSecurity} />
+      )}
       {savings && savings.tokensSaved > 0 ? (
         <SavingsBanner savings={savings} />
       ) : null}
@@ -453,66 +519,88 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
       {banner}
       {stats && <StatsPanel stats={stats} />}
 
-      <div className="mb-2 flex items-center gap-2">
-        <Select
-          value={serverFilter || "all"}
-          onValueChange={(v) => setServerFilter(v === "all" ? "" : v)}
-        >
-          <SelectTrigger className="h-8 w-fit gap-1.5 text-sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All servers</SelectItem>
-            {servers.map((s) => (
-              <SelectItem key={s} value={s}>
-                {s}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <button
-          onClick={() => setErrorsOnly((v) => !v)}
-          aria-pressed={errorsOnly}
-          className={`h-8 rounded-md border px-2.5 text-sm transition-colors ${
-            errorsOnly
-              ? "border-destructive/50 bg-destructive/10 text-destructive"
-              : "text-muted-foreground hover:bg-accent"
-          }`}
-        >
-          Errors only
-        </button>
-        <span className="ml-auto text-xs text-muted-foreground">
-          {visible.length} of {entries.length}
+      <button
+        onClick={() => setLogOpen((v) => !v)}
+        aria-expanded={logOpen}
+        className="mb-2 flex w-full items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <ChevronRight
+          className={`size-4 transition-transform ${logOpen ? "rotate-90" : ""}`}
+        />
+        Recent calls
+        <span className="text-xs font-normal text-muted-foreground/70">
+          last {entries.length} {entries.length === 1 ? "call" : "calls"}
         </span>
-      </div>
+      </button>
 
-      <div className="flex flex-col gap-1">
-        {visible.length === 0 ? (
-          <p className="py-12 text-center text-sm text-muted-foreground">
-            No calls match this filter.
-          </p>
-        ) : (
-          visible.map((e, i) => (
-            <div
-              key={`${e.ts}-${e.server}-${e.tool}-${i}`}
-              className="flex items-center gap-3 rounded-md border border-border/50 px-3 py-2 text-sm"
+      {logOpen && (
+        <>
+          <div className="mb-2 flex items-center gap-2">
+            <Select
+              value={serverFilter || "all"}
+              onValueChange={(v) => setServerFilter(v === "all" ? "" : v)}
             >
-              {e.ok ? (
-                <CheckCircle2 className="size-4 shrink-0 text-success" />
-              ) : (
-                <XCircle className="size-4 shrink-0 text-destructive" />
-              )}
-              <span className="min-w-0 truncate font-medium">{e.server}</span>
-              <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-                {e.tool}
-              </span>
-              <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                {new Date(e.ts).toLocaleString()}
-              </span>
-            </div>
-          ))
-        )}
-      </div>
+              <SelectTrigger className="h-8 w-fit gap-1.5 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All servers</SelectItem>
+                {servers.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <button
+              onClick={() => setErrorsOnly((v) => !v)}
+              aria-pressed={errorsOnly}
+              className={`h-8 rounded-md border px-2.5 text-sm transition-colors ${
+                errorsOnly
+                  ? "border-destructive/50 bg-destructive/10 text-destructive"
+                  : "text-muted-foreground hover:bg-accent"
+              }`}
+            >
+              Errors only
+            </button>
+            <span className="ml-auto text-xs text-muted-foreground">
+              {visible.length} of {entries.length}
+            </span>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            {visible.length === 0 ? (
+              <p className="py-12 text-center text-sm text-muted-foreground">
+                {errorsOnly && !serverFilter
+                  ? `No errors in the last ${entries.length} calls.`
+                  : "No calls match this filter."}
+              </p>
+            ) : (
+              visible.map((e, i) => (
+                <div
+                  key={`${e.ts}-${e.server}-${e.tool}-${i}`}
+                  className="flex items-center gap-3 rounded-md border border-border/50 px-3 py-2 text-sm"
+                >
+                  {e.ok ? (
+                    <CheckCircle2 className="size-4 shrink-0 text-success" />
+                  ) : (
+                    <XCircle className="size-4 shrink-0 text-destructive" />
+                  )}
+                  <span className="min-w-0 truncate font-medium">
+                    {e.server}
+                  </span>
+                  <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+                    {e.tool}
+                  </span>
+                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                    {new Date(e.ts).toLocaleString()}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
