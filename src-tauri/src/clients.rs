@@ -661,39 +661,51 @@ fn parse_toml(content: &str) -> Result<Vec<McpServer>, String> {
         None => return Ok(Vec::new()),
     };
 
-    let mut servers: Vec<McpServer> = table
-        .iter()
-        .map(|(name, def)| {
-            let command = def
-                .get("command")
-                .and_then(|c| c.as_str())
-                .map(String::from);
-            let url = def.get("url").and_then(|u| u.as_str()).map(String::from);
-            let args = def
-                .get("args")
-                .and_then(|a| a.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let env_keys = def
-                .get("env")
-                .and_then(|e| e.as_table())
-                .map(|t| t.keys().cloned().collect())
-                .unwrap_or_default();
-            let transport = classify(&command, &url, None);
-            McpServer {
-                name: name.clone(),
-                transport,
-                command,
-                args,
-                env_keys,
-                url,
-            }
-        })
-        .collect();
+    let mut malformed = Vec::new();
+    let mut servers: Vec<McpServer> = Vec::new();
+
+    for (name, def) in table {
+        let Some(def) = def.as_table() else {
+            malformed.push(name.clone());
+            continue;
+        };
+        let command = def
+            .get("command")
+            .and_then(|c| c.as_str())
+            .map(String::from);
+        let url = def.get("url").and_then(|u| u.as_str()).map(String::from);
+        let args = def
+            .get("args")
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let env_keys = def
+            .get("env")
+            .and_then(|e| e.as_table())
+            .map(|t| t.keys().cloned().collect())
+            .unwrap_or_default();
+        let transport = classify(&command, &url, None);
+        servers.push(McpServer {
+            name: name.clone(),
+            transport,
+            command,
+            args,
+            env_keys,
+            url,
+        });
+    }
+
+    if !malformed.is_empty() {
+        malformed.sort();
+        return Err(format!(
+            "malformed mcp_servers entry (expected a table): {}",
+            malformed.join(", ")
+        ));
+    }
 
     servers.sort_by_key(|s| s.name.to_lowercase());
     Ok(servers)
@@ -1675,6 +1687,18 @@ mod tests {
         let servers = root.get("mcpServers").unwrap().as_object().unwrap();
         assert!(servers.contains_key("fresh"));
         assert!(!servers.contains_key("old"));
+    }
+
+    #[test]
+    fn toml_malformed_mcp_server_entry_returns_error() {
+        let content = r#"
+[mcp_servers]
+good = { command = "npx", args = ["-y", "server"] }
+bad = "not-a-table"
+"#;
+        let err = parse_toml(content).unwrap_err();
+        assert!(err.contains("bad"), "error should name the bad entry: {err}");
+        assert!(err.contains("malformed mcp_servers entry"));
     }
 
     #[test]
