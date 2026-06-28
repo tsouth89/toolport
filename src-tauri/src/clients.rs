@@ -112,6 +112,34 @@ fn home() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
+/// OS family for cross-platform path expectations. Production code uses
+/// `Platform::current()`; unit tests iterate all three to lock in paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Platform {
+    Windows,
+    MacOs,
+    Linux,
+}
+
+impl Platform {
+    fn current() -> Self {
+        #[cfg(windows)]
+        {
+            Platform::Windows
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Platform::MacOs
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            Platform::Linux
+        }
+    }
+
+    const ALL: [Platform; 3] = [Platform::Windows, Platform::MacOs, Platform::Linux];
+}
+
 /// Roaming app config dir: `%APPDATA%` on Windows, `~/Library/Application
 /// Support` on macOS, `~/.config` on Linux.
 ///
@@ -122,24 +150,155 @@ fn home() -> Option<PathBuf> {
 /// to that sandbox - so reads of Claude Desktop's `claude_desktop_config.json`
 /// would miss the real file and report "not configured". The user-profile path
 /// is not virtualized, matching how the registry path is anchored.
-fn config() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        Some(dirs::home_dir()?.join("AppData").join("Roaming"))
+fn roaming_config_dir(home: &std::path::Path, platform: Platform) -> PathBuf {
+    match platform {
+        Platform::Windows => home.join("AppData").join("Roaming"),
+        Platform::MacOs => home.join("Library").join("Application Support"),
+        Platform::Linux => home.join(".config"),
     }
-    #[cfg(not(windows))]
-    {
-        dirs::config_dir()
+}
+
+/// App data dir (`dirs::data_dir()`), parameterized for cross-platform tests.
+fn app_data_dir(home: &std::path::Path, platform: Platform) -> PathBuf {
+    match platform {
+        Platform::Windows | Platform::MacOs => roaming_config_dir(home, platform),
+        Platform::Linux => home.join(".local").join("share"),
     }
+}
+
+/// Resolve a client's config file path for a given home dir and platform.
+fn resolve_client_config_path(
+    client_id: &str,
+    home: &std::path::Path,
+    platform: Platform,
+) -> Option<PathBuf> {
+    let config = roaming_config_dir(home, platform);
+    let data = app_data_dir(home, platform);
+    let path = match client_id {
+        "claude-desktop" => config.join("Claude").join("claude_desktop_config.json"),
+        "cursor" => home.join(".cursor").join("mcp.json"),
+        "boltai" => home.join(".boltai").join("mcp.json"),
+        "vscode" => config.join("Code").join("User").join("mcp.json"),
+        "windsurf" => home
+            .join(".codeium")
+            .join("windsurf")
+            .join("mcp_config.json"),
+        "codex" => home.join(".codex").join("config.toml"),
+        "claude-code" => home.join(".claude.json"),
+        "gemini-cli" => home.join(".gemini").join("settings.json"),
+        "antigravity" => home
+            .join(".gemini")
+            .join("config")
+            .join("mcp_config.json"),
+        "cline" => config
+            .join("Code")
+            .join("User")
+            .join("globalStorage")
+            .join("saoudrizwan.claude-dev")
+            .join("settings")
+            .join("cline_mcp_settings.json"),
+        "roo-code" => config
+            .join("Code")
+            .join("User")
+            .join("globalStorage")
+            .join("rooveterinaryinc.roo-cline")
+            .join("settings")
+            .join("mcp_settings.json"),
+        "warp" => home.join(".warp").join(".mcp.json"),
+        "amazon-q" => home.join(".aws").join("amazonq").join("mcp.json"),
+        "kiro" => home.join(".kiro").join("settings").join("mcp.json"),
+        "lm-studio" => home.join(".lmstudio").join("mcp.json"),
+        "jan" => data.join("Jan").join("data").join("mcp_config.json"),
+        "zed" => match platform {
+            Platform::Windows => config.join("Zed").join("settings.json"),
+            Platform::MacOs | Platform::Linux => {
+                home.join(".config").join("zed").join("settings.json")
+            }
+        },
+        "goose" => match platform {
+            Platform::Windows => config
+                .join("Block")
+                .join("goose")
+                .join("config")
+                .join("config.yaml"),
+            Platform::MacOs => home
+                .join("Library")
+                .join("Application Support")
+                .join("Block")
+                .join("goose")
+                .join("config.yaml"),
+            Platform::Linux => home.join(".config").join("goose").join("config.yaml"),
+        },
+        "hermes" => home.join(".hermes").join("config.yaml"),
+        _ => return None,
+    };
+    Some(path)
+}
+
+fn client_config_path(client_id: &str) -> Option<PathBuf> {
+    let home = home()?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return resolve_client_config_path_linux(client_id, &home);
+    }
+    resolve_client_config_path(client_id, &home, Platform::current())
+}
+
+/// Linux production paths honor `XDG_CONFIG_HOME` / `XDG_DATA_HOME` via `dirs`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> Option<PathBuf> {
+    let config = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
+    let data = dirs::data_dir().unwrap_or_else(|| home.join(".local").join("share"));
+    let path = match client_id {
+        "claude-desktop" => config.join("Claude").join("claude_desktop_config.json"),
+        "cursor" => home.join(".cursor").join("mcp.json"),
+        "boltai" => home.join(".boltai").join("mcp.json"),
+        "vscode" => config.join("Code").join("User").join("mcp.json"),
+        "windsurf" => home
+            .join(".codeium")
+            .join("windsurf")
+            .join("mcp_config.json"),
+        "codex" => home.join(".codex").join("config.toml"),
+        "claude-code" => home.join(".claude.json"),
+        "gemini-cli" => home.join(".gemini").join("settings.json"),
+        "antigravity" => home
+            .join(".gemini")
+            .join("config")
+            .join("mcp_config.json"),
+        "cline" => config
+            .join("Code")
+            .join("User")
+            .join("globalStorage")
+            .join("saoudrizwan.claude-dev")
+            .join("settings")
+            .join("cline_mcp_settings.json"),
+        "roo-code" => config
+            .join("Code")
+            .join("User")
+            .join("globalStorage")
+            .join("rooveterinaryinc.roo-cline")
+            .join("settings")
+            .join("mcp_settings.json"),
+        "warp" => home.join(".warp").join(".mcp.json"),
+        "amazon-q" => home.join(".aws").join("amazonq").join("mcp.json"),
+        "kiro" => home.join(".kiro").join("settings").join("mcp.json"),
+        "lm-studio" => home.join(".lmstudio").join("mcp.json"),
+        "jan" => data.join("Jan").join("data").join("mcp_config.json"),
+        "zed" => home.join(".config").join("zed").join("settings.json"),
+        "goose" => home.join(".config").join("goose").join("config.yaml"),
+        "hermes" => home.join(".hermes").join("config.yaml"),
+        _ => return None,
+    };
+    Some(path)
 }
 
 fn claude_desktop_path() -> Option<PathBuf> {
     // Claude Desktop is MSIX-packaged, so its Roaming config can live at the real
     // %APPDATA% and/or inside the package's virtualized LocalCache. Prefer the
-    // real path (home-anchored via `config()`); if only the package copy exists,
+    // real path (home-anchored via `client_config_path`); if only the package copy exists,
     // find it by scanning for the `Claude*` package so we don't depend on a
     // process running under the same virtualization.
-    let real = config()?.join("Claude").join("claude_desktop_config.json");
+    let real = client_config_path("claude-desktop")?;
     if real.exists() {
         return Some(real);
     }
@@ -167,36 +326,31 @@ fn claude_desktop_path() -> Option<PathBuf> {
 }
 
 fn cursor_path() -> Option<PathBuf> {
-    Some(home()?.join(".cursor").join("mcp.json"))
+    client_config_path("cursor")
 }
 
 fn boltai_path() -> Option<PathBuf> {
-    Some(home()?.join(".boltai").join("mcp.json"))
+    client_config_path("boltai")
 }
 
 fn vscode_path() -> Option<PathBuf> {
-    Some(config()?.join("Code").join("User").join("mcp.json"))
+    client_config_path("vscode")
 }
 
 fn windsurf_path() -> Option<PathBuf> {
-    Some(
-        home()?
-            .join(".codeium")
-            .join("windsurf")
-            .join("mcp_config.json"),
-    )
+    client_config_path("windsurf")
 }
 
 fn codex_path() -> Option<PathBuf> {
-    Some(home()?.join(".codex").join("config.toml"))
+    client_config_path("codex")
 }
 
 fn claude_code_path() -> Option<PathBuf> {
-    Some(home()?.join(".claude.json"))
+    client_config_path("claude-code")
 }
 
 fn gemini_cli_path() -> Option<PathBuf> {
-    Some(home()?.join(".gemini").join("settings.json"))
+    client_config_path("gemini-cli")
 }
 
 /// Google Antigravity reads MCP servers from `mcp_config.json` under `~/.gemini`.
@@ -213,53 +367,40 @@ fn antigravity_path() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    Some(base.join("config").join("mcp_config.json"))
-}
-
-/// A file under a VS Code extension's globalStorage settings dir.
-fn vscode_globalstorage(ext: &str, file: &str) -> Option<PathBuf> {
-    Some(
-        config()?
-            .join("Code")
-            .join("User")
-            .join("globalStorage")
-            .join(ext)
-            .join("settings")
-            .join(file),
-    )
+    client_config_path("antigravity")
 }
 
 fn cline_path() -> Option<PathBuf> {
-    vscode_globalstorage("saoudrizwan.claude-dev", "cline_mcp_settings.json")
+    client_config_path("cline")
 }
 
 fn roo_code_path() -> Option<PathBuf> {
-    vscode_globalstorage("rooveterinaryinc.roo-cline", "mcp_settings.json")
+    client_config_path("roo-code")
 }
 
 /// Warp reads file-based MCP servers from `~/.warp/.mcp.json` (keyed under
 /// `mcpServers`), alongside its in-app UI. The file is home-anchored on every OS.
 fn warp_path() -> Option<PathBuf> {
-    Some(home()?.join(".warp").join(".mcp.json"))
+    client_config_path("warp")
 }
 
 /// Amazon Q Developer CLI global MCP config: `~/.aws/amazonq/mcp.json`
 /// (`mcpServers`). A per-workspace `.amazonq/mcp.json` also exists; we manage the
 /// global one so the gateway is available everywhere.
 fn amazon_q_path() -> Option<PathBuf> {
-    Some(home()?.join(".aws").join("amazonq").join("mcp.json"))
+    client_config_path("amazon-q")
 }
 
 /// Kiro user-level MCP config: `~/.kiro/settings/mcp.json` (`mcpServers`). A
 /// per-workspace `.kiro/settings/mcp.json` also exists and takes precedence.
 fn kiro_path() -> Option<PathBuf> {
-    Some(home()?.join(".kiro").join("settings").join("mcp.json"))
+    client_config_path("kiro")
 }
 
 /// LM Studio reads MCP servers from `~/.lmstudio/mcp.json` (`mcpServers`, plain
 /// JSON). The file is created by LM Studio, so the parent-dir presence check works.
 fn lmstudio_path() -> Option<PathBuf> {
-    Some(home()?.join(".lmstudio").join("mcp.json"))
+    client_config_path("lm-studio")
 }
 
 /// Jan keeps MCP servers in mcp_config.json (standard `mcpServers` shape) inside
@@ -267,12 +408,7 @@ fn lmstudio_path() -> Option<PathBuf> {
 /// Windows, ~/Library/Application Support/Jan/data on macOS). Jan creates the
 /// folder and a default config on first launch, so the parent-dir check detects it.
 fn jan_path() -> Option<PathBuf> {
-    Some(
-        dirs::data_dir()?
-            .join("Jan")
-            .join("data")
-            .join("mcp_config.json"),
-    )
+    client_config_path("jan")
 }
 
 /// Goose keeps extensions (its MCP servers) in config.yaml. It resolves the dir
@@ -280,52 +416,21 @@ fn jan_path() -> Option<PathBuf> {
 /// app-support path on macOS, and %APPDATA%\Block\goose\config on Windows. (The
 /// Windows path is the etcetera default and is confirmed against a real install.)
 fn goose_path() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        Some(
-            config()?
-                .join("Block")
-                .join("goose")
-                .join("config")
-                .join("config.yaml"),
-        )
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Some(
-            home()?
-                .join("Library")
-                .join("Application Support")
-                .join("Block")
-                .join("goose")
-                .join("config.yaml"),
-        )
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        Some(home()?.join(".config").join("goose").join("config.yaml"))
-    }
+    client_config_path("goose")
 }
 
 /// Zed keeps MCP ("context") servers in its main settings.json (JSONC). Windows
 /// uses %APPDATA%\Zed; macOS and Linux use ~/.config/zed (not App Support). The
 /// parent dir is created on install, so the default presence heuristic works.
 fn zed_path() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        Some(config()?.join("Zed").join("settings.json"))
-    }
-    #[cfg(not(windows))]
-    {
-        Some(home()?.join(".config").join("zed").join("settings.json"))
-    }
+    client_config_path("zed")
 }
 
 /// Hermes keeps MCP servers in ~/.hermes/config.yaml under the `mcp_servers:` key.
 /// The file is YAML and also holds the user's model and platform toolsets config,
 /// so it's read leniently and never wiped on a parse failure.
 fn hermes_path() -> Option<PathBuf> {
-    Some(home()?.join(".hermes").join("config.yaml"))
+    client_config_path("hermes")
 }
 
 fn cursor_plugins_dir() -> Option<PathBuf> {
@@ -2142,5 +2247,160 @@ bad = "not-a-table"
         let d = defs().into_iter().find(|d| d.id == "hermes").unwrap();
         assert!(matches!(d.format, Format::YamlMcpServers));
         assert!((d.path)().is_some());
+    }
+
+    fn mock_home(platform: Platform) -> PathBuf {
+        match platform {
+            Platform::Windows => PathBuf::from(r"C:\Users\alice"),
+            Platform::MacOs => PathBuf::from("/Users/alice"),
+            Platform::Linux => PathBuf::from("/home/alice"),
+        }
+    }
+
+    #[test]
+    fn client_config_paths_match_current_platform() {
+        let home = home().expect("home dir should be available in tests");
+        let platform = Platform::current();
+        for client in defs() {
+            if matches!(client.id, "antigravity" | "claude-desktop") {
+                // These probe alternate on-disk locations (Antigravity subdirs,
+                // Claude Desktop MSIX virtualized config).
+                continue;
+            }
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            let expected = resolve_client_config_path(client.id, &home, platform)
+                .unwrap_or_else(|| panic!("missing path expectation for {}", client.id));
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let expected = resolve_client_config_path_linux(client.id, &home)
+                .unwrap_or_else(|| panic!("missing linux path expectation for {}", client.id));
+            let actual = (client.path)()
+                .unwrap_or_else(|| panic!("{} path should resolve on this host", client.id));
+            assert_eq!(actual, expected, "{}", client.id);
+        }
+    }
+
+    #[test]
+    fn client_config_paths_are_stable_across_platforms() {
+        let cases: &[(&str, fn(&Path, Platform) -> PathBuf)] = &[
+            ("cursor", |home, _| home.join(".cursor").join("mcp.json")),
+            (
+                "vscode",
+                |home, platform| {
+                    roaming_config_dir(home, platform)
+                        .join("Code")
+                        .join("User")
+                        .join("mcp.json")
+                },
+            ),
+            (
+                "claude-desktop",
+                |home, platform| {
+                    roaming_config_dir(home, platform)
+                        .join("Claude")
+                        .join("claude_desktop_config.json")
+                },
+            ),
+            (
+                "cline",
+                |home, platform| {
+                    roaming_config_dir(home, platform)
+                        .join("Code")
+                        .join("User")
+                        .join("globalStorage")
+                        .join("saoudrizwan.claude-dev")
+                        .join("settings")
+                        .join("cline_mcp_settings.json")
+                },
+            ),
+            (
+                "goose",
+                |home, platform| match platform {
+                    Platform::Windows => home
+                        .join("AppData")
+                        .join("Roaming")
+                        .join("Block")
+                        .join("goose")
+                        .join("config")
+                        .join("config.yaml"),
+                    Platform::MacOs => home
+                        .join("Library")
+                        .join("Application Support")
+                        .join("Block")
+                        .join("goose")
+                        .join("config.yaml"),
+                    Platform::Linux => home.join(".config").join("goose").join("config.yaml"),
+                },
+            ),
+            (
+                "zed",
+                |home, platform| match platform {
+                    Platform::Windows => home
+                        .join("AppData")
+                        .join("Roaming")
+                        .join("Zed")
+                        .join("settings.json"),
+                    Platform::MacOs | Platform::Linux => {
+                        home.join(".config").join("zed").join("settings.json")
+                    }
+                },
+            ),
+            (
+                "jan",
+                |home, platform| match platform {
+                    Platform::Windows | Platform::MacOs => app_data_dir(home, platform)
+                        .join("Jan")
+                        .join("data")
+                        .join("mcp_config.json"),
+                    Platform::Linux => home
+                        .join(".local")
+                        .join("share")
+                        .join("Jan")
+                        .join("data")
+                        .join("mcp_config.json"),
+                },
+            ),
+        ];
+
+        for (client_id, build_expected) in cases {
+            for platform in Platform::ALL {
+                let home = mock_home(platform);
+                let path = resolve_client_config_path(client_id, &home, platform)
+                    .unwrap_or_else(|| panic!("missing path for {client_id} on {platform:?}"));
+                let expected = build_expected(&home, platform);
+                assert_eq!(path, expected, "{client_id} on {platform:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn client_config_paths_honor_xdg_dirs_on_linux() {
+        let base = std::env::temp_dir().join(format!("conduit-xdg-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let xdg_config = base.join("xdg-config");
+        let xdg_data = base.join("xdg-data");
+        std::fs::create_dir_all(&xdg_config).unwrap();
+        std::fs::create_dir_all(&xdg_data).unwrap();
+
+        std::env::set_var("XDG_CONFIG_HOME", &xdg_config);
+        std::env::set_var("XDG_DATA_HOME", &xdg_data);
+
+        let home = home().expect("home dir");
+        let vscode = client_config_path("vscode").unwrap();
+        let jan = client_config_path("jan").unwrap();
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_DATA_HOME");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(
+            vscode,
+            xdg_config.join("Code").join("User").join("mcp.json")
+        );
+        assert_eq!(
+            jan,
+            xdg_data.join("Jan").join("data").join("mcp_config.json")
+        );
+        let _ = home;
     }
 }
