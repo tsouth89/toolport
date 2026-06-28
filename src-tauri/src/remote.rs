@@ -109,6 +109,55 @@ fn authed_transport(url: &str, token: Option<String>) -> Result<HttpTransport, S
     Ok(HttpTransport::with_auth(url, token))
 }
 
+/// Provenance Conduit doesn't trust to point at the user's private network. Shared
+/// imports (`"shared"`) and public-registry entries (`"registry"`) are
+/// attacker-influenceable; user-added, client-imported, curated-catalog, and team
+/// servers are not, so their local URLs (e.g. a localhost MCP server) still connect.
+fn is_untrusted_source(source: Option<&str>) -> bool {
+    matches!(source, Some("shared") | Some("registry"))
+}
+
+/// True if `host` is a `169.254.x` literal or a name resolving to one. Link-local
+/// covers the cloud-metadata IP `169.254.169.254`, the classic SSRF target for
+/// stealing cloud credentials.
+fn host_is_link_local(host: &str) -> bool {
+    use std::net::{IpAddr, ToSocketAddrs};
+    fn link_local(ip: &IpAddr) -> bool {
+        matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 169 && v4.octets()[1] == 254)
+    }
+    let h = host.trim();
+    if let Ok(ip) = h.parse::<IpAddr>() {
+        return link_local(&ip);
+    }
+    (h, 0u16)
+        .to_socket_addrs()
+        .map(|addrs| addrs.map(|a| a.ip()).any(|ip| link_local(&ip)))
+        .unwrap_or(false)
+}
+
+/// SSRF guard run before connecting to a remote server. Link-local / cloud-metadata
+/// is refused for EVERY server (never a valid MCP target, and the classic way to
+/// steal cloud credentials). Other private/loopback hosts are refused only for
+/// untrusted-provenance servers, so the user's own localhost server still works.
+fn guard_connect_target(server: &ServerEntry) -> Result<(), String> {
+    let host = oauth::host_of_url(server.url.as_deref().unwrap_or("")).unwrap_or_default();
+    if host_is_link_local(&host) {
+        return Err(format!(
+            "Conduit refused to connect to {host}: link-local / cloud-metadata addresses \
+             (169.254.x) are never a valid MCP server and are a common SSRF target."
+        ));
+    }
+    if is_untrusted_source(server.source.as_deref()) && oauth::host_is_private(&host) {
+        return Err(format!(
+            "Conduit refused to connect \"{}\" to the private address {host}: it came from \
+             an untrusted source ({}). If you trust it, add the server yourself.",
+            server.name,
+            server.source.as_deref().unwrap_or("unknown")
+        ));
+    }
+    Ok(())
+}
+
 /// The first custom secret env var that has a value vaulted in the keychain.
 /// For HTTP servers that don't use OAuth (e.g. Magica with a `BEARER` API key),
 /// this is the token we send as `Authorization: Bearer ***`.
@@ -133,6 +182,7 @@ fn first_vaulted_secret(server: &ServerEntry) -> Option<String> {
 ///    OAuth. Without this fallback, "Manage secrets" tokens were silently ignored
 ///    for HTTP servers.
 pub fn connect_remote(server: &ServerEntry) -> Result<DownstreamServer, String> {
+    guard_connect_target(server)?;
     let url = server.url.as_deref().unwrap_or("");
     let server_id = &server.id;
     let auth = secrets::get_secret(server_id, secrets::HTTP_AUTH_KEY)
@@ -173,5 +223,63 @@ mod tests {
         // Loopback / private over http is acceptable (local dev).
         assert!(require_secure_for_auth("http://127.0.0.1:8080/mcp").is_ok());
         assert!(require_secure_for_auth("http://192.168.1.10/mcp").is_ok());
+    }
+
+    #[test]
+    fn link_local_detection() {
+        assert!(host_is_link_local("169.254.169.254")); // cloud metadata
+        assert!(host_is_link_local("169.254.0.1"));
+        assert!(!host_is_link_local("127.0.0.1"));
+        assert!(!host_is_link_local("10.0.0.1"));
+        assert!(!host_is_link_local("8.8.8.8"));
+    }
+
+    #[test]
+    fn untrusted_sources() {
+        assert!(is_untrusted_source(Some("shared")));
+        assert!(is_untrusted_source(Some("registry")));
+        assert!(!is_untrusted_source(Some("user")));
+        assert!(!is_untrusted_source(Some("manual")));
+        assert!(!is_untrusted_source(Some("curated")));
+        assert!(!is_untrusted_source(Some("imported:cursor")));
+        assert!(!is_untrusted_source(None));
+    }
+
+    fn remote_server(url: &str, source: Option<&str>) -> ServerEntry {
+        ServerEntry {
+            id: "t".into(),
+            name: "Test".into(),
+            transport: "http".into(),
+            command: None,
+            args: vec![],
+            env: vec![],
+            url: Some(url.into()),
+            source: source.map(String::from),
+            disabled_tools: vec![],
+        }
+    }
+
+    #[test]
+    fn guard_blocks_metadata_even_for_user_added() {
+        let s = remote_server("http://169.254.169.254/latest/meta-data/", Some("user"));
+        assert!(guard_connect_target(&s).is_err());
+    }
+
+    #[test]
+    fn guard_blocks_private_for_untrusted_source() {
+        let s = remote_server("http://127.0.0.1:6379/", Some("shared"));
+        assert!(guard_connect_target(&s).is_err());
+    }
+
+    #[test]
+    fn guard_allows_localhost_for_user_added() {
+        let s = remote_server("http://127.0.0.1:8080/mcp", Some("user"));
+        assert!(guard_connect_target(&s).is_ok());
+    }
+
+    #[test]
+    fn guard_allows_public_host_for_any_source() {
+        let s = remote_server("https://8.8.8.8/mcp", Some("shared"));
+        assert!(guard_connect_target(&s).is_ok());
     }
 }

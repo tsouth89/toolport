@@ -111,6 +111,18 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
+/// Like [`agent`] but refuses to follow redirects. Used for the credential-bearing
+/// POSTs (DCR, token exchange, refresh): a hostile authorization-server metadata
+/// document could otherwise 302 the token POST to a host it controls and capture the
+/// auth code or refresh token. Metadata discovery (a read-only GET) keeps following
+/// redirects so providers that redirect their `.well-known` still resolve.
+fn agent_no_redirect() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirects(0)
+        .build()
+}
+
 fn get_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, String> {
     agent()
         .get(url)
@@ -309,7 +321,7 @@ fn register_client(registration_endpoint: &str, redirect_uri: &str) -> Result<St
         "response_types": ["code"],
         "token_endpoint_auth_method": "none"
     });
-    let resp: DcrResponse = agent()
+    let resp: DcrResponse = agent_no_redirect()
         .post(registration_endpoint)
         .send_json(body)
         .map_err(|e| e.to_string())?
@@ -373,7 +385,7 @@ fn exchange_code(
     verifier: &str,
     resource: &str,
 ) -> Result<Tokens, String> {
-    let resp: TokenResponse = agent()
+    let resp: TokenResponse = agent_no_redirect()
         .post(token_endpoint)
         .send_form(&[
             ("grant_type", "authorization_code"),
@@ -414,7 +426,7 @@ pub fn refresh(
     if let Some(r) = resource {
         form.push(("resource", r));
     }
-    let resp: TokenResponse = agent()
+    let resp: TokenResponse = agent_no_redirect()
         .post(token_endpoint)
         .send_form(&form)
         .map_err(|e| e.to_string())?
