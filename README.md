@@ -131,10 +131,33 @@ and refreshes too.
 
 ## Supported clients
 
-Conduit detects **19 AI clients**, installs the gateway into each with one click, and
-can import a client's existing servers: Cursor, Claude Desktop, Claude Code, Codex,
-Google Antigravity, VS Code, Windsurf, Gemini CLI, Cline, Roo Code, Warp, Amazon Q,
-Kiro, Zed, LM Studio, Jan, Goose, Hermes, and BoltAI.
+Conduit auto-detects these **19 AI clients**, installs the gateway into each with one
+click, and can import a client's existing servers. It writes the config file shown
+below for you, so you never have to edit these by hand.
+
+| Client | Config file | Format |
+| --- | --- | --- |
+| Claude Desktop | `<config>/Claude/claude_desktop_config.json` | JSON (`mcpServers`) |
+| Claude Code | `~/.claude.json` | JSON (`mcpServers`) |
+| Cursor | `~/.cursor/mcp.json` | JSON (`mcpServers`) |
+| VS Code | `<config>/Code/User/mcp.json` | JSON (`servers`) |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | JSON (`mcpServers`) |
+| Codex | `~/.codex/config.toml` | TOML (`mcp_servers`) |
+| Antigravity | `~/.gemini/config/mcp_config.json` | JSON (`mcpServers`) |
+| Gemini CLI | `~/.gemini/settings.json` | JSON (`mcpServers`) |
+| Cline | `<config>/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` | JSON (`mcpServers`) |
+| Roo Code | `<config>/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json` | JSON (`mcpServers`) |
+| Warp | `~/.warp/.mcp.json` | JSON (`mcpServers`) |
+| Amazon Q | `~/.aws/amazonq/mcp.json` | JSON (`mcpServers`) |
+| Kiro | `~/.kiro/settings/mcp.json` | JSON (`mcpServers`) |
+| Zed | `~/.config/zed/settings.json` | JSON (`context_servers`) |
+| LM Studio | `~/.lmstudio/mcp.json` | JSON (`mcpServers`) |
+| Jan | `<data>/Jan/data/mcp_config.json` | JSON (`mcpServers`) |
+| BoltAI | `~/.boltai/mcp.json` | JSON (`mcpServers`) |
+| Goose | `~/.config/goose/config.yaml` | YAML (`extensions`) |
+| Hermes | `~/.hermes/config.yaml` | YAML (`mcp_servers`) |
+
+`<config>` is your OS application-config dir (`%APPDATA%` on Windows, `~/Library/Application Support` on macOS, `~/.config` on Linux); `<data>` is the data dir (`~/.local/share` on Linux, the same as `<config>` elsewhere). Zed and Goose paths vary slightly by OS; Conduit resolves the right one automatically.
 
 ## Configuration
 
