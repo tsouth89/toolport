@@ -1072,6 +1072,15 @@ fn start_http_bridge(
     if http_bridge_alive(&mut bridge) {
         return Ok(HttpBridgeStatus::from_port(bridge.port));
     }
+    // Fail fast if the port is already taken (another instance, or a stray
+    // gateway). Otherwise the child would just exit on the bind error and we'd
+    // wrongly report success while the user is actually talking to whatever
+    // already owns the port.
+    if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+        return Err(format!(
+            "Port {port} is already in use. Stop whatever is using it, then try again."
+        ));
+    }
     let bin = clients::resolve_gateway_path()
         .ok_or_else(|| "conduit-gateway binary not found next to the app".to_string())?;
     let mut cmd = std::process::Command::new(&bin);
@@ -1086,9 +1095,30 @@ fn start_http_bridge(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not start the HTTP bridge: {e}"))?;
+    // Confirm it actually came up rather than dying on startup (bind race,
+    // bad binary, etc.). Poll the port; if the child exits or never answers,
+    // surface a real error instead of a false success.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!(
+                "The HTTP endpoint exited on startup ({status}). Is port {port} already in use?"
+            ));
+        }
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break; // it's listening
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            return Err(format!(
+                "The HTTP endpoint did not come up on port {port} within 5s."
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     bridge.child = Some(child);
     bridge.port = Some(port);
     Ok(HttpBridgeStatus::from_port(Some(port)))
