@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Plus, X } from "lucide-react";
+import { Loader2, Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import { addServer, setSecret, updateServer } from "@/lib/api";
 import type { Registry, ServerEntry, Transport } from "@/lib/types";
@@ -45,6 +45,7 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
   const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>(
     initial?.env.map((e) => ({ key: e.key, value: "" })) ?? [],
   );
+  const [busy, setBusy] = useState(false);
   const isStdio = form.transport === "stdio";
   const editing = editId !== undefined;
 
@@ -94,6 +95,7 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
       url: isStdio ? null : form.url.trim() || null,
       source: initial?.source ?? "manual",
     };
+    setBusy(true);
     try {
       let result = editing ? await updateServer(entry) : await addServer(entry);
       // Vault any values the user entered now. setSecret keys by server id. For a
@@ -112,6 +114,8 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
       setOpen(false);
     } catch (e) {
       toast.error(`Couldn't save ${entry.name}: ${e}`);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -228,11 +232,20 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setOpen(false)}>
+          <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>
             Cancel
           </Button>
-          <Button onClick={handleSave} disabled={!form.name.trim()}>
-            {editing ? "Save" : "Add"}
+          <Button onClick={handleSave} disabled={busy || !form.name.trim()}>
+            {busy ? (
+              <>
+                <Loader2 className="size-4 animate-spin" />
+                {editing ? "Saving…" : "Adding…"}
+              </>
+            ) : editing ? (
+              "Save"
+            ) : (
+              "Add"
+            )}
           </Button>
         </DialogFooter>
       </DialogContent>

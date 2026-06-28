@@ -1,5 +1,5 @@
 import { useRef, useState, type ReactNode } from "react";
-import { Check, ExternalLink, KeyRound, Plus, Trash2 } from "lucide-react";
+import { Check, ExternalLink, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -85,7 +85,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
   const [authSet, setAuthSet] = useState(false);
   const [authInput, setAuthInput] = useState("");
   const [oauthBusy, setOauthBusy] = useState(false);
@@ -137,7 +137,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
 
   async function saveAuth() {
     if (!authInput) return;
-    setBusy(true);
+    setBusyKey("auth");
     try {
       await setAuthToken(server.id, authInput);
       setAuthSet(true);
@@ -147,12 +147,12 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
     } catch (e) {
       toast.error(secretErrorMessage(e));
     } finally {
-      setBusy(false);
+      setBusyKey(null);
     }
   }
 
   async function clearAuth() {
-    setBusy(true);
+    setBusyKey("auth-clear");
     try {
       await clearAuthToken(server.id);
       setAuthSet(false);
@@ -161,7 +161,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
     } catch (e) {
       toast.error(secretErrorMessage(e));
     } finally {
-      setBusy(false);
+      setBusyKey(null);
     }
   }
 
@@ -192,7 +192,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
 
   async function save(key: string, value: string) {
     if (!value) return;
-    setBusy(true);
+    setBusyKey(key);
     try {
       onSaved(await setSecret(server.id, key, value));
       setVaulted((v) => ({ ...v, [key]: true }));
@@ -202,12 +202,12 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
     } catch (e) {
       toast.error(secretErrorMessage(e));
     } finally {
-      setBusy(false);
+      setBusyKey(null);
     }
   }
 
   async function remove(key: string) {
-    setBusy(true);
+    setBusyKey(`remove:${key}`);
     try {
       onSaved(await deleteSecret(server.id, key));
       toast.success(`Removed ${key}`);
@@ -215,16 +215,27 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
     } catch (e) {
       toast.error(secretErrorMessage(e));
     } finally {
-      setBusy(false);
+      setBusyKey(null);
     }
   }
 
   async function addNew() {
     const k = newKey.trim();
     if (!k || !newValue) return;
-    await save(k, newValue);
-    setNewKey("");
-    setNewValue("");
+    setBusyKey("add");
+    try {
+      onSaved(await setSecret(server.id, k, newValue));
+      setVaulted((v) => ({ ...v, [k]: true }));
+      setInputs((i) => ({ ...i, [k]: "" }));
+      toast.success(`Saved ${k}`);
+      onChanged?.();
+      setNewKey("");
+      setNewValue("");
+    } catch (e) {
+      toast.error(secretErrorMessage(e));
+    } finally {
+      setBusyKey(null);
+    }
   }
 
   return (
@@ -303,10 +314,17 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={busy || !authInput}
+                        disabled={busyKey !== null || !authInput}
                         onClick={saveAuth}
                       >
-                        Save
+                        {busyKey === "auth" ? (
+                          <>
+                            <Loader2 className="size-4 animate-spin" />
+                            Saving…
+                          </>
+                        ) : (
+                          "Save"
+                        )}
                       </Button>
                       {authSet && (
                         <Button
@@ -314,10 +332,14 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                           variant="ghost"
                           className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
                           aria-label="Clear auth token"
-                          disabled={busy}
+                          disabled={busyKey !== null}
                           onClick={clearAuth}
                         >
-                          <Trash2 className="size-4" />
+                          {busyKey === "auth-clear" ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="size-4" />
+                          )}
                         </Button>
                       )}
                     </div>
@@ -333,9 +355,14 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                         disabled={oauthBusy}
                         onClick={doOauth}
                       >
-                        {oauthBusy
-                          ? "Waiting for browser sign-in…"
-                          : "Sign in with OAuth"}
+                        {oauthBusy ? (
+                          <>
+                            <Loader2 className="size-4 animate-spin" />
+                            Waiting for browser sign-in…
+                          </>
+                        ) : (
+                          "Sign in with OAuth"
+                        )}
                       </Button>
                       {!oauthBusy && /mac/i.test(navigator.userAgent) && (
                         <p className="text-[11px] text-muted-foreground">
@@ -419,10 +446,17 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                     />
                     <Button
                       size="sm"
-                      disabled={busy || !(inputs[key] ?? "")}
+                      disabled={busyKey !== null || !(inputs[key] ?? "")}
                       onClick={() => save(key, inputs[key] ?? "")}
                     >
-                      Save
+                      {busyKey === key ? (
+                        <>
+                          <Loader2 className="size-4 animate-spin" />
+                          Saving…
+                        </>
+                      ) : (
+                        "Save"
+                      )}
                     </Button>
                     {vaulted[key] && (
                       <Button
@@ -430,10 +464,14 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                         variant="ghost"
                         className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
                         aria-label={`Remove ${key}`}
-                        disabled={busy}
+                        disabled={busyKey !== null}
                         onClick={() => remove(key)}
                       >
-                        <Trash2 className="size-4" />
+                        {busyKey === `remove:${key}` ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="size-4" />
+                        )}
                       </Button>
                     )}
                   </div>
@@ -475,10 +513,14 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                 size="icon"
                 className="size-8 shrink-0"
                 aria-label="Add secret"
-                disabled={busy || !newKey.trim() || !newValue}
+                disabled={busyKey !== null || !newKey.trim() || !newValue}
                 onClick={addNew}
               >
-                <Plus className="size-4" />
+                {busyKey === "add" ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Plus className="size-4" />
+                )}
               </Button>
             </div>
           </details>

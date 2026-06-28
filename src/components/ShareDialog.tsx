@@ -5,6 +5,7 @@ import {
   Copy,
   FileDown,
   FileUp,
+  Loader2,
   ShieldAlert,
   Upload,
 } from "lucide-react";
@@ -50,7 +51,9 @@ export function ShareDialog({ trigger, onImported }: Props) {
   const [exported, setExported] = useState("");
   const [paste, setPaste] = useState("");
   const [copied, setCopied] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<
+    "preview-paste" | "preview-file" | "import" | null
+  >(null);
   // When set, the dialog shows the review-and-confirm view for `pendingJson`.
   const [preview, setPreview] = useState<ImportItem[] | null>(null);
   const [pendingJson, setPendingJson] = useState("");
@@ -98,8 +101,8 @@ export function ShareDialog({ trigger, onImported }: Props) {
   }
 
   // Parse + preview a candidate setup (paste or file) before importing anything.
-  async function startPreview(json: string) {
-    setBusy(true);
+  async function startPreview(json: string, source: "preview-paste" | "preview-file") {
+    setBusyAction(source);
     try {
       const items = await previewImport(json);
       setPendingJson(json);
@@ -107,7 +110,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
     } catch (e) {
       toast.error(`Couldn't read that setup: ${e}`);
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
@@ -121,14 +124,14 @@ export function ShareDialog({ trigger, onImported }: Props) {
       });
       if (!path || typeof path !== "string") return;
       const json = await readSetupFile(path);
-      await startPreview(json);
+      await startPreview(json, "preview-file");
     } catch (e) {
       toast.error(`Couldn't open that file: ${e}`);
     }
   }
 
   async function confirmImport() {
-    setBusy(true);
+    setBusyAction("import");
     try {
       onImported(await importConfig(pendingJson));
       toast.success("Imported shared setup", {
@@ -138,7 +141,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
     } catch (e) {
       toast.error(`Couldn't import: ${e}`);
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
@@ -165,15 +168,24 @@ export function ShareDialog({ trigger, onImported }: Props) {
               ))}
             </div>
             <div className="flex items-center justify-between gap-2 border-t pt-3">
-              <Button variant="ghost" onClick={() => setPreview(null)} disabled={busy}>
+              <Button variant="ghost" onClick={() => setPreview(null)} disabled={busyAction !== null}>
                 <ArrowLeft className="size-4" />
                 Back
               </Button>
-              <Button onClick={confirmImport} disabled={busy || newCount === 0}>
-                <Check className="size-4" />
-                {newCount === 0
-                  ? "Nothing new to import"
-                  : `Import ${newCount} server${newCount === 1 ? "" : "s"}`}
+              <Button onClick={confirmImport} disabled={busyAction !== null || newCount === 0}>
+                {busyAction === "import" ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" />
+                    Importing…
+                  </>
+                ) : (
+                  <>
+                    <Check className="size-4" />
+                    {newCount === 0
+                      ? "Nothing new to import"
+                      : `Import ${newCount} server${newCount === 1 ? "" : "s"}`}
+                  </>
+                )}
               </Button>
             </div>
           </div>
@@ -248,15 +260,33 @@ export function ShareDialog({ trigger, onImported }: Props) {
               />
               <div className="flex flex-wrap gap-2">
                 <Button
-                  onClick={() => startPreview(paste)}
-                  disabled={busy || !paste.trim()}
+                  onClick={() => startPreview(paste, "preview-paste")}
+                  disabled={busyAction !== null || !paste.trim()}
                 >
-                  <Upload className="size-4" />
-                  Review and import
+                  {busyAction === "preview-paste" ? (
+                    <>
+                      <Loader2 className="size-4 animate-spin" />
+                      Reviewing…
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="size-4" />
+                      Review and import
+                    </>
+                  )}
                 </Button>
-                <Button variant="outline" onClick={loadFromFile} disabled={busy}>
-                  <FileUp className="size-4" />
-                  Load from file
+                <Button variant="outline" onClick={loadFromFile} disabled={busyAction !== null}>
+                  {busyAction === "preview-file" ? (
+                    <>
+                      <Loader2 className="size-4 animate-spin" />
+                      Loading…
+                    </>
+                  ) : (
+                    <>
+                      <FileUp className="size-4" />
+                      Load from file
+                    </>
+                  )}
                 </Button>
               </div>
             </div>
