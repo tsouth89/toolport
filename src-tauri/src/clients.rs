@@ -222,6 +222,7 @@ fn resolve_client_config_path(
                 home.join(".config").join("zed").join("settings.json")
             }
         },
+        "continue" => home.join(".continue").join("config.yaml"),
         "goose" => match platform {
             Platform::Windows => config
                 .join("Block")
@@ -293,6 +294,7 @@ fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> 
         "jan" => data.join("Jan").join("data").join("mcp_config.json"),
         "zed" => home.join(".config").join("zed").join("settings.json"),
         "goose" => home.join(".config").join("goose").join("config.yaml"),
+        "continue" => home.join(".continue").join("config.yaml"),
         "hermes" => home.join(".hermes").join("config.yaml"),
         _ => return None,
     };
