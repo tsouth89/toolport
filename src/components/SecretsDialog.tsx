@@ -1,6 +1,7 @@
 import { useRef, useState, type ReactNode } from "react";
 import { Check, ExternalLink, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   authenticateOauth,
@@ -145,7 +146,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
       toast.success("Saved auth token");
       onChanged?.();
     } catch (e) {
-      toast.error(secretErrorMessage(e));
+      toastError(secretErrorMessage(e));
     } finally {
       setBusyKey(null);
     }
@@ -159,7 +160,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
       toast.success("Cleared auth token");
       onChanged?.();
     } catch (e) {
-      toast.error(secretErrorMessage(e));
+      toastError(secretErrorMessage(e));
     } finally {
       setBusyKey(null);
     }
@@ -180,7 +181,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
     } catch (e) {
       const msg = `${e}`;
       const blankHint = /state mismatch|timed out|closed/i.test(msg);
-      toast.error(`OAuth failed: ${msg}`, {
+      toastError(`OAuth failed: ${msg}`, {
         description: blankHint
           ? "If the sign-in page was blank, your default browser (e.g. Safari) may block the local redirect. Set Chrome or Brave as default and try once more, or paste an access token above instead."
           : undefined,
@@ -200,7 +201,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
       toast.success(`Saved ${key}`);
       onChanged?.();
     } catch (e) {
-      toast.error(secretErrorMessage(e));
+      toastError(secretErrorMessage(e));
     } finally {
       setBusyKey(null);
     }
@@ -213,7 +214,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
       toast.success(`Removed ${key}`);
       onChanged?.();
     } catch (e) {
-      toast.error(secretErrorMessage(e));
+      toastError(secretErrorMessage(e));
     } finally {
       setBusyKey(null);
     }
@@ -232,7 +233,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
       setNewKey("");
       setNewValue("");
     } catch (e) {
-      toast.error(secretErrorMessage(e));
+      toastError(secretErrorMessage(e));
     } finally {
       setBusyKey(null);
     }

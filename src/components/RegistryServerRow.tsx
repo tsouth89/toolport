@@ -9,6 +9,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import { promoteToCatalog } from "@/lib/api";
 import type { ProbeResult, Registry, ServerEntry } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
@@ -200,7 +201,7 @@ export function RegistryServerRow({
                   .then(() =>
                     toast.success(`Added ${server.name} to your catalog`),
                   )
-                  .catch((e) => toast.error(`${e}`))
+                  .catch((e) => toastError(`${e}`))
               }
             >
               <Star className="size-3.5" />

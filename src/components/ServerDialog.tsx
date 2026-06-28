@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Loader2, Plus, X } from "lucide-react";
 import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import { addServer, setSecret, updateServer } from "@/lib/api";
 import type { Registry, ServerEntry, Transport } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -113,7 +114,7 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
       toast.success(editing ? `Saved ${entry.name}` : `Added ${entry.name}`);
       setOpen(false);
     } catch (e) {
-      toast.error(`Couldn't save ${entry.name}: ${e}`);
+      toastError(`Couldn't save ${entry.name}: ${e}`);
     } finally {
       setBusy(false);
     }

@@ -7,7 +7,7 @@ import {
   ShieldAlert,
   XCircle,
 } from "lucide-react";
-import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import {
   callTool,
   listServerTools,
@@ -228,7 +228,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
     try {
       onRegistryChange(await setToolEnabled(serverId, toolName, enabled));
     } catch (e) {
-      toast.error(`Couldn't update the tool: ${e}`);
+      toastError(`Couldn't update the tool: ${e}`);
     } finally {
       setPolicyBusy(false);
     }

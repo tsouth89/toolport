@@ -10,6 +10,7 @@ import {
   Waypoints,
 } from "lucide-react";
 import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import {
   addCatalogServer,
   importServers,
@@ -219,7 +220,7 @@ function AddServers({
       setImported(next.servers.filter((s) => !isGatewayServer(s)).length);
       toast.success("Imported servers from your clients");
     } catch (e) {
-      toast.error(`Import failed: ${e}`);
+      toastError(`Import failed: ${e}`);
     } finally {
       setBusy(false);
     }
@@ -232,7 +233,7 @@ function AddServers({
       setAdded((prev) => new Set(prev).add(entry.name));
       toast.success(`Added ${entry.name}`);
     } catch (e) {
-      toast.error(`Couldn't add ${entry.name}: ${e}`);
+      toastError(`Couldn't add ${entry.name}: ${e}`);
     } finally {
       setAdding(null);
     }
@@ -340,7 +341,7 @@ function ConnectClients({
       onConnected();
       toast.success(`Connected Conduit to ${client.name}`);
     } catch (e) {
-      toast.error(`Couldn't connect: ${e}`);
+      toastError(`Couldn't connect: ${e}`);
     } finally {
       setBusyId(null);
     }

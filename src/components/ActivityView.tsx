@@ -10,6 +10,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import {
   getAuditLog,
   getAuditStats,
@@ -238,7 +239,7 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
       await navigator.clipboard.writeText(text);
       toast.success("Savings copied, paste them anywhere");
     } catch {
-      toast.error("Couldn't copy to clipboard");
+      toastError("Couldn't copy to clipboard");
     }
   };
 

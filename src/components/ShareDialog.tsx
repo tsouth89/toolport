@@ -10,6 +10,7 @@ import {
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import { open as openFile, save } from "@tauri-apps/plugin-dialog";
 import {
   exportConfig,
@@ -81,7 +82,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      toast.error("Couldn't copy automatically. Select the text and copy it.");
+      toastError("Couldn't copy automatically. Select the text and copy it.");
     }
   }
 
@@ -96,7 +97,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
       await exportConfigToPath(path, name, description);
       toast.success("Saved setup to file");
     } catch (e) {
-      toast.error(`Couldn't save: ${e}`);
+      toastError(`Couldn't save: ${e}`);
     }
   }
 
@@ -108,7 +109,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
       setPendingJson(json);
       setPreview(items);
     } catch (e) {
-      toast.error(`Couldn't read that setup: ${e}`);
+      toastError(`Couldn't read that setup: ${e}`);
     } finally {
       setBusyAction(null);
     }
@@ -126,7 +127,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
       const json = await readSetupFile(path);
       await startPreview(json, "preview-file");
     } catch (e) {
-      toast.error(`Couldn't open that file: ${e}`);
+      toastError(`Couldn't open that file: ${e}`);
     }
   }
 
@@ -139,7 +140,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
       });
       setOpen(false);
     } catch (e) {
-      toast.error(`Couldn't import: ${e}`);
+      toastError(`Couldn't import: ${e}`);
     } finally {
       setBusyAction(null);
     }
