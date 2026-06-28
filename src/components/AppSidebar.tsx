@@ -28,13 +28,6 @@ import {
   type View,
 } from "@/lib/types";
 import { gatherDiagnostics, openDataDir } from "@/lib/api";
-
-const FOCUS_RING =
-  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
-
-const NAV_ITEM = `flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${FOCUS_RING}`;
-
-const ICON_BTN = `rounded text-muted-foreground transition hover:text-foreground ${FOCUS_RING}`;
 import { checkForUpdate, installUpdate } from "@/lib/updater";
 import { Button } from "@/components/ui/button";
 import {
@@ -50,6 +43,11 @@ import {
 } from "@/components/ui/tooltip";
 import { ProfileBar } from "@/components/ProfileBar";
 import { ShareDialog } from "@/components/ShareDialog";
+
+const FOCUS_RING =
+  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+const NAV_ITEM = `flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${FOCUS_RING}`;
+const ICON_BTN = `rounded text-muted-foreground transition hover:text-foreground ${FOCUS_RING}`;
 
 /** Footer showing the running version, and an in-app update button when a newer
  * release is published. The check is best-effort: any failure (dev build,
