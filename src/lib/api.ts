@@ -118,6 +118,27 @@ export function setAllowAgentControl(allow: boolean): Promise<Registry> {
   return invoke<Registry>("set_allow_agent_control", { allow });
 }
 
+export interface HttpBridgeStatus {
+  running: boolean;
+  port: number | null;
+  url: string | null;
+}
+
+/** Start the supervised conduit-gateway HTTP/OpenAPI server (Open WebUI etc.). */
+export function startHttpBridge(port?: number): Promise<HttpBridgeStatus> {
+  return invoke<HttpBridgeStatus>("start_http_bridge", { port: port ?? null });
+}
+
+/** Stop the supervised HTTP/OpenAPI server. */
+export function stopHttpBridge(): Promise<HttpBridgeStatus> {
+  return invoke<HttpBridgeStatus>("stop_http_bridge");
+}
+
+/** Current HTTP/OpenAPI bridge status (reaps the child if it exited). */
+export function httpBridgeStatus(): Promise<HttpBridgeStatus> {
+  return invoke<HttpBridgeStatus>("http_bridge_status");
+}
+
 /** Join a Conduit Teams server with an invite code; merges the team's servers in. */
 export function teamConnect(
   serverUrl: string,
