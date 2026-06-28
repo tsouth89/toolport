@@ -616,12 +616,32 @@ fn json_server(name: &str, def: &serde_json::Value) -> McpServer {
 /// trailing commas, as in Zed's settings.json) as a fallback. None only if even
 /// JSON5 can't read it. Used so a commented config is never mistaken for corrupt.
 fn read_json_lenient(content: &str) -> Option<serde_json::Value> {
+    parse_json_value(content).ok()
+}
+
+/// Parse JSON or JSON5, returning a syntax error with line/column when possible.
+fn parse_json_value(content: &str) -> Result<serde_json::Value, String> {
     if content.trim().is_empty() {
-        return Some(serde_json::Value::Object(serde_json::Map::new()));
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
     }
-    serde_json::from_str(content)
-        .ok()
-        .or_else(|| json5::from_str(content).ok())
+    if let Ok(v) = serde_json::from_str(content) {
+        return Ok(v);
+    }
+    if let Ok(v) = json5::from_str(content) {
+        return Ok(v);
+    }
+    let err = serde_json::from_str::<serde_json::Value>(content).unwrap_err();
+    Err(format!(
+        "JSON syntax error at line {} column {}: {}",
+        err.line(),
+        err.column(),
+        err
+    ))
+}
+
+/// Parse YAML, preserving serde_yaml's line/column in the error text.
+fn parse_yaml_value(content: &str) -> Result<serde_yaml::Value, String> {
+    serde_yaml::from_str(content).map_err(|e| format!("YAML syntax error: {e}"))
 }
 
 /// Read an existing JSON config we're about to modify. Tolerant of JSONC. When
@@ -630,46 +650,82 @@ fn read_json_lenient(content: &str) -> Option<serde_json::Value> {
 /// so Conduit can't wipe it. For the well-behaved JSON configs, an unparseable file
 /// falls back to empty (start fresh), preserving prior behavior.
 fn read_existing_json(content: &str, lenient: bool) -> Result<serde_json::Value, String> {
-    match read_json_lenient(content) {
-        Some(v) => Ok(v),
-        None if lenient => {
-            Err("Could not parse the existing config; leaving it untouched.".to_string())
-        }
-        None => Ok(serde_json::Value::Object(serde_json::Map::new())),
+    match parse_json_value(content) {
+        Ok(v) => Ok(v),
+        Err(e) if lenient => Err(format!(
+            "Could not parse the existing config ({e}); leaving it untouched."
+        )),
+        Err(_) => Ok(serde_json::Value::Object(serde_json::Map::new())),
     }
 }
 
 fn parse_json(content: &str, key: &str) -> Result<Vec<McpServer>, String> {
-    let value = read_json_lenient(content).ok_or("could not parse JSON config")?;
-    let obj = match value.get(key).and_then(|v| v.as_object()) {
-        Some(o) => o,
+    let value = parse_json_value(content)?;
+    let obj = match value.get(key) {
         None => return Ok(Vec::new()),
+        Some(v) if v.is_object() => v.as_object().unwrap(),
+        Some(_) => {
+            return Err(format!(
+                "'{key}' must be an object mapping server names to definitions"
+            ));
+        }
     };
 
-    let mut servers: Vec<McpServer> = obj
-        .iter()
-        .map(|(name, def)| json_server(name, def))
-        .collect();
+    let mut malformed = Vec::new();
+    let mut servers: Vec<McpServer> = Vec::new();
+    for (name, def) in obj {
+        if def.is_object() {
+            servers.push(json_server(name, def));
+        } else {
+            malformed.push(name.clone());
+        }
+    }
+    if !malformed.is_empty() {
+        malformed.sort();
+        return Err(format!(
+            "malformed '{key}' entry (expected an object): {}",
+            malformed.join(", ")
+        ));
+    }
     servers.sort_by_key(|s| s.name.to_lowercase());
     Ok(servers)
 }
 
 fn parse_toml(content: &str) -> Result<Vec<McpServer>, String> {
-    let value: toml::Value = toml::from_str(content).map_err(|e| e.to_string())?;
-    let table = match value.get("mcp_servers").and_then(|v| v.as_table()) {
-        Some(t) => t,
+    let value: toml::Value =
+        toml::from_str(content).map_err(|e| format!("TOML syntax error: {e}"))?;
+    let table = match value.get("mcp_servers") {
         None => return Ok(Vec::new()),
+        Some(v) if v.is_table() => v.as_table().unwrap(),
+        Some(_) => {
+            return Err(
+                "'mcp_servers' must be a table mapping server names to definitions".into(),
+            );
+        }
     };
 
-    let mut servers: Vec<McpServer> = table
-        .iter()
-        .map(|(name, def)| {
-            let command = def
+    let mut malformed = Vec::new();
+    let mut servers: Vec<McpServer> = Vec::new();
+    for (name, def) in table {
+        let Some(def) = def.as_table() else {
+            malformed.push(name.clone());
+            continue;
+        };
+        servers.push(McpServer {
+            name: name.clone(),
+            transport: classify(
+                &def
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .map(String::from),
+                &def.get("url").and_then(|u| u.as_str()).map(String::from),
+                None,
+            ),
+            command: def
                 .get("command")
                 .and_then(|c| c.as_str())
-                .map(String::from);
-            let url = def.get("url").and_then(|u| u.as_str()).map(String::from);
-            let args = def
+                .map(String::from),
+            args: def
                 .get("args")
                 .and_then(|a| a.as_array())
                 .map(|arr| {
@@ -677,23 +733,23 @@ fn parse_toml(content: &str) -> Result<Vec<McpServer>, String> {
                         .filter_map(|x| x.as_str().map(String::from))
                         .collect()
                 })
-                .unwrap_or_default();
-            let env_keys = def
+                .unwrap_or_default(),
+            env_keys: def
                 .get("env")
                 .and_then(|e| e.as_table())
                 .map(|t| t.keys().cloned().collect())
-                .unwrap_or_default();
-            let transport = classify(&command, &url, None);
-            McpServer {
-                name: name.clone(),
-                transport,
-                command,
-                args,
-                env_keys,
-                url,
-            }
-        })
-        .collect();
+                .unwrap_or_default(),
+            url: def.get("url").and_then(|u| u.as_str()).map(String::from),
+        });
+    }
+
+    if !malformed.is_empty() {
+        malformed.sort();
+        return Err(format!(
+            "malformed mcp_servers entry (expected a table): {}",
+            malformed.join(", ")
+        ));
+    }
 
     servers.sort_by_key(|s| s.name.to_lowercase());
     Ok(servers)
@@ -1043,52 +1099,68 @@ fn parse_yaml_extensions(content: &str) -> Result<Vec<McpServer>, String> {
     if content.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let value: serde_yaml::Value = serde_yaml::from_str(content).map_err(|e| e.to_string())?;
-    let exts = match value.get("extensions").and_then(|v| v.as_mapping()) {
-        Some(m) => m,
+    let value = parse_yaml_value(content)?;
+    let exts = match value.get("extensions") {
         None => return Ok(Vec::new()),
+        Some(v) if v.is_mapping() => v.as_mapping().unwrap(),
+        Some(_) => {
+            return Err(
+                "'extensions' must be a mapping of extension names to definitions".into(),
+            );
+        }
     };
-    let mut servers: Vec<McpServer> = exts
-        .iter()
-        .filter_map(|(k, def)| {
-            let name = k.as_str()?.to_string();
-            let def = def.as_mapping()?;
-            let str_of = |key: &str| def.get(key).and_then(|v| v.as_str()).map(String::from);
-            let command = str_of("cmd").filter(|s| !s.is_empty());
-            let url = str_of("url").filter(|s| !s.is_empty());
-            // Goose's `builtin`/`platform` extensions are internal to Goose, not
-            // proxiable external MCP servers, so skip them (they have no cmd/url).
-            if command.is_none() && url.is_none() {
-                return None;
-            }
-            let args = def
-                .get("args")
-                .and_then(|v| v.as_sequence())
-                .map(|seq| {
-                    seq.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let env_keys = def
-                .get("envs")
-                .and_then(|v| v.as_mapping())
-                .map(|m| {
-                    m.keys()
-                        .filter_map(|k| k.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some(McpServer {
-                name,
-                transport: str_of("type").unwrap_or_else(|| "unknown".into()),
-                command,
-                args,
-                env_keys,
-                url,
+    let mut malformed = Vec::new();
+    let mut servers: Vec<McpServer> = Vec::new();
+    for (k, def) in exts {
+        let Some(name) = k.as_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(def) = def.as_mapping() else {
+            malformed.push(name);
+            continue;
+        };
+        let str_of = |key: &str| def.get(key).and_then(|v| v.as_str()).map(String::from);
+        let command = str_of("cmd").filter(|s| !s.is_empty());
+        let url = str_of("url").filter(|s| !s.is_empty());
+        // Goose's `builtin`/`platform` extensions are internal to Goose, not
+        // proxiable external MCP servers, so skip them (they have no cmd/url).
+        if command.is_none() && url.is_none() {
+            continue;
+        }
+        let args = def
+            .get("args")
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
             })
-        })
-        .collect();
+            .unwrap_or_default();
+        let env_keys = def
+            .get("envs")
+            .and_then(|v| v.as_mapping())
+            .map(|m| {
+                m.keys()
+                    .filter_map(|k| k.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        servers.push(McpServer {
+            name,
+            transport: str_of("type").unwrap_or_else(|| "unknown".into()),
+            command,
+            args,
+            env_keys,
+            url,
+        });
+    }
+    if !malformed.is_empty() {
+        malformed.sort();
+        return Err(format!(
+            "malformed 'extensions' entry (expected a mapping): {}",
+            malformed.join(", ")
+        ));
+    }
     servers.sort_by_key(|s| s.name.to_lowercase());
     Ok(servers)
 }
@@ -1192,50 +1264,66 @@ fn parse_hermes_yaml_servers(content: &str) -> Result<Vec<McpServer>, String> {
     if content.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let value: serde_yaml::Value = serde_yaml::from_str(content).map_err(|e| e.to_string())?;
-    let servers_map = match value.get("mcp_servers").and_then(|v| v.as_mapping()) {
-        Some(m) => m,
+    let value = parse_yaml_value(content)?;
+    let servers_map = match value.get("mcp_servers") {
         None => return Ok(Vec::new()),
+        Some(v) if v.is_mapping() => v.as_mapping().unwrap(),
+        Some(_) => {
+            return Err(
+                "'mcp_servers' must be a mapping of server names to definitions".into(),
+            );
+        }
     };
-    let mut servers: Vec<McpServer> = servers_map
-        .iter()
-        .filter_map(|(k, def)| {
-            let name = k.as_str()?.to_string();
-            let def = def.as_mapping()?;
-            let str_of = |key: &str| def.get(key).and_then(|v| v.as_str()).map(String::from);
-            let command = str_of("command").filter(|s| !s.is_empty());
-            let url = str_of("url").filter(|s| !s.is_empty());
-            if command.is_none() && url.is_none() {
-                return None;
-            }
-            let args = def
-                .get("args")
-                .and_then(|v| v.as_sequence())
-                .map(|seq| {
-                    seq.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            // Extract env/header keys from `headers` and `env` sub-maps.
-            let mut env_keys: Vec<String> = Vec::new();
-            for key in &["headers", "env"] {
-                if let Some(m) = def.get(*key).and_then(|v| v.as_mapping()) {
-                    env_keys.extend(m.keys().filter_map(|k| k.as_str().map(String::from)));
-                }
-            }
-            env_keys.sort_unstable();
-            env_keys.dedup();
-            Some(McpServer {
-                name,
-                transport: if url.is_some() { "http" } else { "stdio" }.into(),
-                command,
-                args,
-                env_keys,
-                url,
+    let mut malformed = Vec::new();
+    let mut servers: Vec<McpServer> = Vec::new();
+    for (k, def) in servers_map {
+        let Some(name) = k.as_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(def) = def.as_mapping() else {
+            malformed.push(name);
+            continue;
+        };
+        let str_of = |key: &str| def.get(key).and_then(|v| v.as_str()).map(String::from);
+        let command = str_of("command").filter(|s| !s.is_empty());
+        let url = str_of("url").filter(|s| !s.is_empty());
+        if command.is_none() && url.is_none() {
+            continue;
+        }
+        let args = def
+            .get("args")
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
             })
-        })
-        .collect();
+            .unwrap_or_default();
+        // Extract env/header keys from `headers` and `env` sub-maps.
+        let mut env_keys: Vec<String> = Vec::new();
+        for key in &["headers", "env"] {
+            if let Some(m) = def.get(*key).and_then(|v| v.as_mapping()) {
+                env_keys.extend(m.keys().filter_map(|k| k.as_str().map(String::from)));
+            }
+        }
+        env_keys.sort_unstable();
+        env_keys.dedup();
+        servers.push(McpServer {
+            name,
+            transport: if url.is_some() { "http" } else { "stdio" }.into(),
+            command,
+            args,
+            env_keys,
+            url,
+        });
+    }
+    if !malformed.is_empty() {
+        malformed.sort();
+        return Err(format!(
+            "malformed 'mcp_servers' entry (expected a mapping): {}",
+            malformed.join(", ")
+        ));
+    }
     servers.sort_by_key(|s| s.name.to_lowercase());
     Ok(servers)
 }
@@ -1675,6 +1763,82 @@ mod tests {
         let servers = root.get("mcpServers").unwrap().as_object().unwrap();
         assert!(servers.contains_key("fresh"));
         assert!(!servers.contains_key("old"));
+    }
+
+    #[test]
+    fn json_parse_error_includes_line_and_column() {
+        let content = r#"{"mcpServers": {broken"#;
+        let err = parse_json(content, "mcpServers").unwrap_err();
+        assert!(err.contains("JSON syntax error"), "got: {err}");
+        assert!(err.contains("line"), "got: {err}");
+    }
+
+    #[test]
+    fn json_malformed_server_entry_names_key() {
+        let content = r#"{"mcpServers":{"good":{"command":"npx"},"bad":"not-an-object"}}"#;
+        let err = parse_json(content, "mcpServers").unwrap_err();
+        assert!(err.contains("bad"), "error should name the bad entry: {err}");
+        assert!(err.contains("malformed 'mcpServers' entry"));
+    }
+
+    #[test]
+    fn json_wrong_key_type_is_reported() {
+        let content = r#"{"mcpServers":"not-an-object"}"#;
+        let err = parse_json(content, "mcpServers").unwrap_err();
+        assert!(err.contains("mcpServers"), "got: {err}");
+        assert!(err.contains("must be an object"), "got: {err}");
+    }
+
+    #[test]
+    fn toml_malformed_mcp_server_entry_returns_error() {
+        let content = r#"
+[mcp_servers]
+good = { command = "npx", args = ["-y", "server"] }
+bad = "not-a-table"
+"#;
+        let err = parse_toml(content).unwrap_err();
+        assert!(err.contains("bad"), "error should name the bad entry: {err}");
+        assert!(err.contains("malformed mcp_servers entry"));
+    }
+
+    #[test]
+    fn toml_syntax_error_includes_location() {
+        let content = "[mcp_servers]\nbad = { command = \"unclosed\n";
+        let err = parse_toml(content).unwrap_err();
+        assert!(err.contains("TOML syntax error"), "got: {err}");
+        assert!(err.contains("line"), "got: {err}");
+    }
+
+    #[test]
+    fn yaml_extensions_syntax_error_includes_location() {
+        let content = "extensions:\n  fetch:\n    cmd: uvx\n bad-indent: true\n";
+        let err = parse_yaml_extensions(content).unwrap_err();
+        assert!(err.contains("YAML syntax error"), "got: {err}");
+        assert!(err.contains("line"), "got: {err}");
+    }
+
+    #[test]
+    fn yaml_extensions_malformed_entry_names_key() {
+        let content = "extensions:\n  good:\n    type: stdio\n    cmd: uvx\n  bad: not-a-mapping\n";
+        let err = parse_yaml_extensions(content).unwrap_err();
+        assert!(err.contains("bad"), "error should name the bad entry: {err}");
+        assert!(err.contains("malformed 'extensions' entry"));
+    }
+
+    #[test]
+    fn hermes_yaml_syntax_error_includes_location() {
+        let content = "mcp_servers:\n  srv:\n    url: https://example.com\n  bad:\n  - [unbalanced\n";
+        let err = parse_hermes_yaml_servers(content).unwrap_err();
+        assert!(err.contains("YAML syntax error"), "got: {err}");
+        assert!(err.contains("line"), "got: {err}");
+    }
+
+    #[test]
+    fn hermes_yaml_malformed_entry_names_key() {
+        let content = "mcp_servers:\n  good:\n    url: https://example.com\n  bad: not-a-mapping\n";
+        let err = parse_hermes_yaml_servers(content).unwrap_err();
+        assert!(err.contains("bad"), "error should name the bad entry: {err}");
+        assert!(err.contains("malformed 'mcp_servers' entry"));
     }
 
     #[test]
