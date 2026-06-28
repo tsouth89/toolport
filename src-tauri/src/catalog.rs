@@ -152,64 +152,9 @@ pub fn curated() -> Vec<CatalogEntry> {
     list
 }
 
-fn user_catalog_path() -> Option<std::path::PathBuf> {
-    // Anchor to the same home-based dir as the registry (see registry::conduit_dir),
-    // so a packaged (client-spawned) process and the unpackaged app don't read/write
-    // the user catalog in different, MSIX-virtualized locations.
-    Some(crate::registry::conduit_dir()?.join("user-catalog.json"))
-}
-
-/// Servers the user has promoted into their own catalog (their real-world picks).
-/// Always tagged source "user" so the UI can badge and un-promote them.
-pub fn promoted() -> Vec<CatalogEntry> {
-    let mut list: Vec<CatalogEntry> = user_catalog_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    for e in &mut list {
-        e.source = "user".to_string();
-    }
-    list
-}
-
-fn save_promoted(list: &[CatalogEntry]) -> Result<(), String> {
-    let path = user_catalog_path().ok_or("no config dir")?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())
-}
-
-/// Add an entry to the user's catalog (no-op if a same-named one exists).
-pub fn promote(entry: CatalogEntry) -> Result<(), String> {
-    let mut list = promoted();
-    if !list.iter().any(|e| e.name.eq_ignore_ascii_case(&entry.name)) {
-        list.push(entry);
-        save_promoted(&list)?;
-    }
-    Ok(())
-}
-
-/// Remove an entry from the user's catalog by name.
-pub fn unpromote(name: &str) -> Result<(), String> {
-    let mut list = promoted();
-    list.retain(|e| !e.name.eq_ignore_ascii_case(name));
-    save_promoted(&list)
-}
-
-/// The popular set shown by default: the user's promoted picks first, then the
-/// curated set, de-duplicated by name (user wins).
+/// The popular set shown by default: the curated catalog.
 pub fn popular() -> Vec<CatalogEntry> {
-    let mut out = promoted();
-    let mut seen: std::collections::HashSet<String> =
-        out.iter().map(|e| e.name.to_lowercase()).collect();
-    for e in curated() {
-        if seen.insert(e.name.to_lowercase()) {
-            out.push(e);
-        }
-    }
-    out
+    curated()
 }
 
 /// Filter a catalog list by a query (name or description). Substring match, plus

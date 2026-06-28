@@ -26,16 +26,6 @@ export function searchCatalog(query: string): Promise<CatalogEntry[]> {
   return invoke<CatalogEntry[]>("search_catalog", { query });
 }
 
-/** Promote one of your registry servers into your personal catalog. */
-export function promoteToCatalog(serverId: string): Promise<void> {
-  return invoke<void>("promote_to_catalog", { serverId });
-}
-
-/** Remove an entry from your personal catalog by name. */
-export function unpromoteFromCatalog(name: string): Promise<void> {
-  return invoke<void>("unpromote_from_catalog", { name });
-}
-
 /** Recent tool-call audit entries (newest first). */
 export function getAuditLog(limit = 200): Promise<AuditEntry[]> {
   return invoke<AuditEntry[]>("get_audit_log", { limit });

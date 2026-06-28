@@ -186,7 +186,6 @@ Phase 3 - Scaling & UX
 - [x] Lazy discovery: `CONDUIT_DISCOVERY=lazy` exposes 3 meta-tools (search/call)
 - [x] Per-agent scoping: `CONDUIT_PROFILE` + per-client profile picker, per-profile cache
 - [x] Catalog: curated popular set + live official MCP Registry search, type-ahead
-- [x] Promote-to-catalog (a user's own picks seed the catalog)
 - [x] Catalog as a left-nav destination; status grouping; non-blocking UI commands
 
 ## Next (tiered)

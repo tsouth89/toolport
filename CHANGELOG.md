@@ -3,6 +3,17 @@
 All notable changes to Conduit are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the GitHub releases.
 
+## [Unreleased]
+
+### Added
+- **Continue** client support (`~/.continue/config.yaml`). Thanks @BharadwajKanneveti (#49).
+
+### Removed
+- **"Add to catalog" (promote-to-catalog).** It only pinned a server you already had into
+  a local discovery view, with no sync or sharing, so it added clutter without real value.
+  Browse Catalog still does what matters: discover and add new servers (curated set + live
+  MCP-registry search).
+
 ## [0.7.0] - 2026-06-28
 
 ### Added

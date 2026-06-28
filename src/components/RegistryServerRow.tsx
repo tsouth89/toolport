@@ -5,12 +5,8 @@ import {
   KeyRound,
   LogIn,
   Pencil,
-  Star,
   Trash2,
 } from "lucide-react";
-import { toast } from "sonner";
-import { toastError } from "@/lib/toast";
-import { promoteToCatalog } from "@/lib/api";
 import type { ProbeResult, Registry, ServerEntry } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -210,20 +206,6 @@ export function RegistryServerRow({
           )}
 
           <div className="flex flex-wrap items-center gap-1">
-            <button
-              className={ACTION}
-              onClick={() =>
-                promoteToCatalog(server.id)
-                  .then(() =>
-                    toast.success(`Added ${server.name} to your catalog`),
-                  )
-                  .catch((e) => toastError(`${e}`))
-              }
-            >
-              <Star className="size-3.5" />
-              Add to catalog
-            </button>
-
             <SecretsDialog
               server={server}
               onSaved={onRegistryChange}

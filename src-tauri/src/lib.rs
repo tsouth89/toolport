@@ -781,42 +781,10 @@ async fn authenticate_oauth(
     Ok(())
 }
 
-/// The popular catalog (the user's promoted picks + the curated set).
+/// The popular catalog (the curated set).
 #[tauri::command]
 fn popular_catalog() -> Vec<catalog::CatalogEntry> {
     catalog::popular()
-}
-
-/// Promote one of the user's registry servers into their personal catalog, so it
-/// shows up (and is searchable) under popular picks.
-#[tauri::command]
-fn promote_to_catalog(state: State<RegistryState>, server_id: String) -> Result<(), String> {
-    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let server = reg
-        .servers
-        .iter()
-        .find(|s| s.id == server_id)
-        .ok_or_else(|| format!("No server with id '{server_id}'"))?;
-    let entry = catalog::CatalogEntry {
-        name: server.name.clone(),
-        description: "Added from your servers.".to_string(),
-        transport: server.transport.clone(),
-        command: server.command.clone(),
-        args: server.args.clone(),
-        url: server.url.clone(),
-        env_keys: server.env.iter().map(|e| e.key.clone()).collect(),
-        source: "user".to_string(),
-        homepage: None,
-        publisher: None,
-        category: String::new(),
-    };
-    catalog::promote(entry)
-}
-
-/// Remove an entry from the user's personal catalog by name.
-#[tauri::command]
-fn unpromote_from_catalog(name: String) -> Result<(), String> {
-    catalog::unpromote(&name)
 }
 
 /// Search the official MCP Registry for servers to add. Network call, so it runs
@@ -1252,8 +1220,6 @@ pub fn run() {
             probe_auth,
             popular_catalog,
             search_catalog,
-            promote_to_catalog,
-            unpromote_from_catalog,
             open_data_dir,
             set_all_enabled,
             export_config,

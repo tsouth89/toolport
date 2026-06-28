@@ -1,14 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, ExternalLink, Loader2, Plus, Search, ShieldCheck, X } from "lucide-react";
+import { Check, ExternalLink, Loader2, Plus, Search, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import {
-  addServer,
-  popularCatalog,
-  searchCatalog,
-  unpromoteFromCatalog,
-} from "@/lib/api";
+import { addServer, popularCatalog, searchCatalog } from "@/lib/api";
 import type { CatalogEntry, Registry, ServerEntry } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,7 +11,6 @@ import { TransportPill } from "@/components/TransportPill";
 
 /** Section order for the browse view; categories not listed fall to the end. */
 const CATEGORY_ORDER = [
-  "Your picks",
   "Code & infrastructure",
   "Databases",
   "Search & knowledge",
@@ -53,17 +47,6 @@ export function CatalogView({ registry, onAdded }: Props) {
   useEffect(() => {
     reloadPopular();
   }, [reloadPopular]);
-
-  async function removeFromCatalog(entry: CatalogEntry) {
-    try {
-      await unpromoteFromCatalog(entry.name);
-      setResults((r) => r?.filter((e) => e.name !== entry.name) ?? null);
-      reloadPopular();
-      toast.success(`Removed ${entry.name} from your catalog`);
-    } catch (e) {
-      toastError(`Couldn't remove ${entry.name}: ${e}`);
-    }
-  }
 
   // Live search as you type: debounce, and ignore stale responses so a slow
   // earlier query can't overwrite a newer one.
@@ -126,7 +109,7 @@ export function CatalogView({ registry, onAdded }: Props) {
   const byCategory = useMemo(() => {
     const groups = new Map<string, CatalogEntry[]>();
     for (const e of popular) {
-      const cat = e.source === "user" ? "Your picks" : e.category || "Other";
+      const cat = e.category || "Other";
       const arr = groups.get(cat);
       if (arr) arr.push(e);
       else groups.set(cat, [e]);
@@ -145,9 +128,6 @@ export function CatalogView({ registry, onAdded }: Props) {
       added={have.has(entry.name.toLowerCase())}
       busy={busy === entry.name}
       onAdd={() => add(entry)}
-      onRemove={
-        entry.source === "user" ? () => removeFromCatalog(entry) : undefined
-      }
     />
   );
 
@@ -258,13 +238,11 @@ function CatalogCard({
   added,
   busy,
   onAdd,
-  onRemove,
 }: {
   entry: CatalogEntry;
   added: boolean;
   busy: boolean;
   onAdd: () => void;
-  onRemove?: () => void;
 }) {
   const target = entry.command
     ? [entry.command, ...entry.args].join(" ")
@@ -274,11 +252,6 @@ function CatalogCard({
       <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="truncate text-sm font-medium">{entry.name}</span>
-          {entry.source === "user" && (
-            <span className="shrink-0 rounded-full bg-owned/10 px-1.5 py-0.5 text-[10px] font-medium text-owned">
-              yours
-            </span>
-          )}
           {entry.homepage && (
             <button
               onClick={() => openUrl(entry.homepage!)}
@@ -290,16 +263,7 @@ function CatalogCard({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          {onRemove && (
-            <button
-              onClick={onRemove}
-              aria-label="Remove from your catalog"
-              title="Remove from your catalog"
-              className="rounded p-0.5 text-muted-foreground/50 hover:bg-destructive/10 hover:text-destructive"
-            >
-              <X className="size-3.5" />
-            </button>
-          )}
+
           <TransportPill transport={entry.transport} />
         </div>
       </div>
