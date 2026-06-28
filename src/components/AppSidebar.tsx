@@ -28,6 +28,13 @@ import {
   type View,
 } from "@/lib/types";
 import { gatherDiagnostics, openDataDir } from "@/lib/api";
+
+const FOCUS_RING =
+  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+const NAV_ITEM = `flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${FOCUS_RING}`;
+
+const ICON_BTN = `rounded text-muted-foreground transition hover:text-foreground ${FOCUS_RING}`;
 import { checkForUpdate, installUpdate } from "@/lib/updater";
 import { Button } from "@/components/ui/button";
 import {
@@ -129,7 +136,7 @@ function VersionFooter({
         <button
           onClick={() => setShowNotes(true)}
           disabled={installing}
-          className="flex min-w-0 items-center gap-1.5 text-success transition hover:underline disabled:opacity-70"
+          className={`flex min-w-0 items-center gap-1.5 rounded text-success transition hover:underline disabled:opacity-70 ${FOCUS_RING}`}
         >
           {installing ? (
             <Loader2 className="size-3.5 shrink-0 animate-spin" />
@@ -145,7 +152,7 @@ function VersionFooter({
           onClick={manualCheck}
           disabled={checking}
           title="Check for updates"
-          className="text-muted-foreground transition hover:text-foreground disabled:opacity-70"
+          className={`rounded text-muted-foreground transition hover:text-foreground disabled:opacity-70 ${FOCUS_RING}`}
         >
           {checking ? "Checking…" : `Conduit v${version}`}
         </button>
@@ -165,7 +172,7 @@ function VersionFooter({
             <button
               title="Share or import a setup"
               aria-label="Share setup"
-              className="text-muted-foreground transition hover:text-foreground"
+              className={ICON_BTN}
             >
               <Share2 className="size-3.5" />
             </button>
@@ -175,7 +182,7 @@ function VersionFooter({
           onClick={onReplay}
           title="Run setup again"
           aria-label="Run setup again"
-          className="text-muted-foreground transition hover:text-foreground"
+          className={ICON_BTN}
         >
           <Compass className="size-3.5" />
         </button>
@@ -183,7 +190,7 @@ function VersionFooter({
           onClick={() => openDataDir().catch(() => {})}
           title="Open data folder (config, logs)"
           aria-label="Open data folder"
-          className="text-muted-foreground transition hover:text-foreground"
+          className={ICON_BTN}
         >
           <FolderOpen className="size-3.5" />
         </button>
@@ -200,7 +207,7 @@ function VersionFooter({
           }}
           title="Copy diagnostics for a bug report"
           aria-label="Copy diagnostics"
-          className="text-muted-foreground transition hover:text-foreground"
+          className={ICON_BTN}
         >
           <ClipboardList className="size-3.5" />
         </button>
@@ -326,9 +333,9 @@ function ClientRow({ client, importCount, selected, onSelect }: RowProps) {
       <TooltipTrigger asChild>
         <button
           onClick={onSelect}
-          className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
-            selected ? "bg-accent" : ""
-          } ${missing ? "opacity-50" : ""}`}
+          className={`${NAV_ITEM} ${selected ? "bg-accent" : ""} ${
+            missing ? "opacity-50" : ""
+          }`}
         >
           {connected ? (
             <Link2 className="size-3.5 shrink-0 text-success" />
@@ -408,9 +415,7 @@ export function AppSidebar({
     <button
       onClick={onClick}
       aria-current={active ? "page" : undefined}
-      className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent ${
-        active ? "bg-accent" : ""
-      }`}
+      className={`${NAV_ITEM} ${active ? "bg-accent" : ""}`}
     >
       <Icon
         className={`size-4 shrink-0 ${active ? "text-foreground" : "text-muted-foreground"}`}
@@ -504,7 +509,7 @@ export function AppSidebar({
                   <>
                     <button
                       onClick={() => setShowMissing((v) => !v)}
-                      className="mt-1 flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      className={`mt-1 flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground ${FOCUS_RING}`}
                     >
                       <ChevronRight
                         className={`size-3.5 shrink-0 transition-transform ${showMissing ? "rotate-90" : ""}`}
