@@ -30,6 +30,7 @@ type RegistryState = Mutex<Registry>;
 struct HttpBridge {
     child: Option<std::process::Child>,
     port: Option<u16>,
+    token: Option<String>,
 }
 type HttpBridgeState = Mutex<HttpBridge>;
 
@@ -39,14 +40,18 @@ struct HttpBridgeStatus {
     running: bool,
     port: Option<u16>,
     url: Option<String>,
+    /// The bearer token the client must send (Authorization: Bearer ...). Shown
+    /// in the UI to copy; required on every request to the endpoint.
+    token: Option<String>,
 }
 
 impl HttpBridgeStatus {
-    fn from_port(port: Option<u16>) -> Self {
+    fn new(port: Option<u16>, token: Option<String>) -> Self {
         HttpBridgeStatus {
             running: port.is_some(),
-            port,
             url: port.map(|p| format!("http://localhost:{p}")),
+            port,
+            token,
         }
     }
 }
@@ -1055,6 +1060,7 @@ fn http_bridge_alive(bridge: &mut HttpBridge) -> bool {
     if !alive {
         bridge.child = None;
         bridge.port = None;
+        bridge.token = None;
     }
     alive
 }
@@ -1070,7 +1076,7 @@ fn start_http_bridge(
     let port = port.unwrap_or(8765);
     let mut bridge = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if http_bridge_alive(&mut bridge) {
-        return Ok(HttpBridgeStatus::from_port(bridge.port));
+        return Ok(HttpBridgeStatus::new(bridge.port, bridge.token.clone()));
     }
     // Fail fast if the port is already taken (another instance, or a stray
     // gateway). Otherwise the child would just exit on the bind error and we'd
@@ -1083,9 +1089,16 @@ fn start_http_bridge(
     }
     let bin = clients::resolve_gateway_path()
         .ok_or_else(|| "conduit-gateway binary not found next to the app".to_string())?;
+    // Auto-generate a bearer token the client must send on every request.
+    // Without it, any local process (including a web page open in the user's
+    // browser) could POST to the port and run their tools.
+    let mut tok = [0u8; 24];
+    getrandom::getrandom(&mut tok).map_err(|e| format!("could not generate a token: {e}"))?;
+    let token: String = tok.iter().map(|b| format!("{b:02x}")).collect();
     let mut cmd = std::process::Command::new(&bin);
     cmd.arg("--http")
         .arg(port.to_string())
+        .env("CONDUIT_HTTP_TOKEN", &token)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1121,7 +1134,8 @@ fn start_http_bridge(
     }
     bridge.child = Some(child);
     bridge.port = Some(port);
-    Ok(HttpBridgeStatus::from_port(Some(port)))
+    bridge.token = Some(token.clone());
+    Ok(HttpBridgeStatus::new(Some(port), Some(token)))
 }
 
 /// Stop the supervised HTTP bridge child, if any.
@@ -1133,7 +1147,8 @@ fn stop_http_bridge(state: State<HttpBridgeState>) -> Result<HttpBridgeStatus, S
         let _ = child.wait();
     }
     bridge.port = None;
-    Ok(HttpBridgeStatus::from_port(None))
+    bridge.token = None;
+    Ok(HttpBridgeStatus::new(None, None))
 }
 
 /// Report whether the HTTP bridge is running, reaping it if it has exited.
@@ -1141,7 +1156,7 @@ fn stop_http_bridge(state: State<HttpBridgeState>) -> Result<HttpBridgeStatus, S
 fn http_bridge_status(state: State<HttpBridgeState>) -> Result<HttpBridgeStatus, String> {
     let mut bridge = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     http_bridge_alive(&mut bridge);
-    Ok(HttpBridgeStatus::from_port(bridge.port))
+    Ok(HttpBridgeStatus::new(bridge.port, bridge.token.clone()))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

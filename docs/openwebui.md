@@ -8,16 +8,19 @@ server you've connected through Conduit, including chained multi-step tool flows
 ## The recipe
 
 **1. Turn on the HTTP endpoint.** In the Conduit app: **Settings ->
-Integrations -> "Open WebUI / HTTP endpoint"**, flip it on, and copy the URL it
-shows (`http://localhost:8765`). The app supervises the gateway for you and
-shuts it down when you quit.
+Integrations -> "Open WebUI / HTTP endpoint"**, flip it on, and copy the **URL**
+(`http://localhost:8765`) and the **token** it shows. The app supervises the
+gateway for you and shuts it down when you quit.
 
 > Prefer the command line? `conduit-gateway --http 8765` (or `CONDUIT_HTTP=8765`)
-> does the same thing. Either way it serves an OpenAPI spec at
+> does the same thing; set `CONDUIT_HTTP_TOKEN=<your-token>` to require auth (the
+> app does this automatically). It serves an OpenAPI spec at
 > `http://localhost:8765/openapi.json` and a POST endpoint per tool.
 
 **2. Add it to Open WebUI.** Settings -> Tools -> add an OpenAPI tool server
-pointing at `http://localhost:8765`. The `conduit_*` tools appear.
+pointing at `http://localhost:8765`, and paste the **token** as its API key
+(Bearer auth). The `conduit_*` tools appear. The token matters: without it, any
+web page open in your browser could call your tools, so the endpoint requires it.
 
 **3. Set Function Calling to Native (per chat).** This is the setting that
 silently breaks things. In the chat's **Controls** panel -> **Advanced Params**,

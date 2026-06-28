@@ -27,7 +27,7 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const [busy, setBusy] = useState(false);
   const [bridge, setBridge] = useState<HttpBridgeStatus | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
 
   useEffect(() => {
     httpBridgeStatus()
@@ -46,11 +46,11 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
     }
   };
 
-  const copyUrl = (url: string) => {
-    navigator.clipboard.writeText(url).then(
+  const copy = (text: string, which: string) => {
+    navigator.clipboard.writeText(text).then(
       () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
+        setCopied(which);
+        setTimeout(() => setCopied(null), 1500);
       },
       () => {},
     );
@@ -146,23 +146,45 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           {bridge?.running && bridge.url && (
             <>
               <div className="flex items-center gap-2 rounded border bg-muted/40 px-2 py-1.5">
+                <span className="shrink-0 text-[11px] font-medium text-muted-foreground">URL</span>
                 <code className="min-w-0 flex-1 truncate text-xs">{bridge.url}</code>
                 <button
                   type="button"
-                  onClick={() => copyUrl(bridge.url!)}
+                  onClick={() => copy(bridge.url!, "url")}
                   title="Copy URL"
                   className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
                 >
-                  {copied ? (
+                  {copied === "url" ? (
                     <Check className="size-3.5 text-success" />
                   ) : (
                     <Copy className="size-3.5" />
                   )}
                 </button>
               </div>
+              {bridge.token && (
+                <div className="flex items-center gap-2 rounded border bg-muted/40 px-2 py-1.5">
+                  <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
+                    Token
+                  </span>
+                  <code className="min-w-0 flex-1 truncate text-xs">{bridge.token}</code>
+                  <button
+                    type="button"
+                    onClick={() => copy(bridge.token!, "token")}
+                    title="Copy token"
+                    className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    {copied === "token" ? (
+                      <Check className="size-3.5 text-success" />
+                    ) : (
+                      <Copy className="size-3.5" />
+                    )}
+                  </button>
+                </div>
+              )}
               <p className="text-xs text-muted-foreground">
-                In Open WebUI: Settings &rarr; Tools &rarr; add this as an OpenAPI server, then
-                set Function Calling to Native (per chat). See docs/openwebui.md.
+                In Open WebUI: Settings &rarr; Tools &rarr; add the URL as an OpenAPI server and paste
+                the token as its API key (Bearer auth), then set Function Calling to Native (per chat).
+                The token stops other local apps from calling your tools.
               </p>
             </>
           )}

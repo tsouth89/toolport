@@ -18,7 +18,7 @@
 //!   model searches and calls on demand, keeping context flat.
 //! - Records every tool call to a local audit log.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1879,11 +1879,54 @@ fn handle_http(
 /// Run the blocking HTTP/OpenAPI server. Binds 127.0.0.1 by default (local
 /// only); set `CONDUIT_HTTP_HOST=0.0.0.0` to expose it (unauthenticated, so
 /// only on a trusted network).
+/// Cap on an inbound HTTP request body. Tool arguments are tiny; this just stops
+/// an unauthenticated caller from forcing the gateway to buffer a huge body.
+const MAX_HTTP_BODY: u64 = 4 * 1024 * 1024;
+
+/// Parse a `Bearer <token>` Authorization value. Pure, so it's unit-testable.
+fn parse_bearer(auth_value: &str) -> Option<&str> {
+    let mut parts = auth_value.splitn(2, ' ');
+    let scheme = parts.next()?;
+    let tok = parts.next()?;
+    scheme.eq_ignore_ascii_case("bearer").then(|| tok.trim())
+}
+
+/// Strip control characters and bound the length of a header value we reflect
+/// back (the caller-controlled Origin / requested headers), so a crafted value
+/// can't inject a header or make `Header::from_bytes` reject and panic.
+fn sanitize_header_value(v: &str) -> String {
+    v.chars().filter(|c| !c.is_control()).take(512).collect()
+}
+
 fn serve_http(state: GatewayState, port: u16) {
     let host = std::env::var("CONDUIT_HTTP_HOST")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "127.0.0.1".to_string());
+    // A bearer token, when set, is required on every request. The desktop app
+    // always sets one (auto-generated) and shows it for the user to paste into
+    // their client; manual `--http` users can set it themselves.
+    let token = std::env::var("CONDUIT_HTTP_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+
+    let loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
+    // Fail closed: a non-loopback endpoint runs the user's credentials for
+    // anyone who can reach the port, so refuse to bind one without a token.
+    if !loopback && token.is_none() {
+        eprintln!(
+            "conduit-gateway: refusing to bind {host}:{port} without CONDUIT_HTTP_TOKEN. \
+             A non-loopback HTTP endpoint would be unauthenticated. Set a token, or bind 127.0.0.1."
+        );
+        std::process::exit(1);
+    }
+    if token.is_none() {
+        eprintln!(
+            "conduit-gateway: WARNING - HTTP endpoint has no token; any local process (including a \
+             web page open in your browser) can call your tools. Set CONDUIT_HTTP_TOKEN to require auth."
+        );
+    }
 
     // When binding the default IPv4 loopback, ALSO listen on the IPv6 loopback
     // (best-effort). Many systems resolve "localhost" to ::1 first, and clients
@@ -1892,7 +1935,8 @@ fn serve_http(state: GatewayState, port: u16) {
     if host == "127.0.0.1" {
         if let Ok(server6) = tiny_http::Server::http(("::1", port)) {
             let state6 = state.clone();
-            std::thread::spawn(move || serve_http_loop(server6, state6));
+            let token6 = token.clone();
+            std::thread::spawn(move || serve_http_loop(server6, state6, token6));
             glog(&format!("HTTP/OpenAPI also listening on http://[::1]:{port}"));
         }
     }
@@ -1904,42 +1948,82 @@ fn serve_http(state: GatewayState, port: u16) {
             std::process::exit(1);
         }
     };
-    glog(&format!("HTTP/OpenAPI mode on http://{host}:{port}"));
+    glog(&format!(
+        "HTTP/OpenAPI mode on http://{host}:{port} (auth={})",
+        token.is_some()
+    ));
     eprintln!("conduit-gateway: HTTP/OpenAPI on http://localhost:{port}  (OpenAPI spec at /openapi.json)");
-    serve_http_loop(server, state);
+    serve_http_loop(server, state, token);
 }
 
 /// The blocking accept loop for one listener. Each listener keeps its own
 /// SearchGuard; they share the gateway state, so the IPv4 and IPv6 loopback
 /// sockets serve identically.
-fn serve_http_loop(server: tiny_http::Server, state: GatewayState) {
+fn serve_http_loop(server: tiny_http::Server, state: GatewayState, token: Option<String>) {
     let mut guard = SearchGuard::default();
     for mut request in server.incoming_requests() {
         let method = request.method().to_string().to_uppercase();
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or("/").to_string();
-        // Reflect the caller's Origin and the headers its CORS preflight asks
-        // for. Browser clients (Open WebUI calls tools from the page) may send
-        // credentials, and `*` is forbidden with credentials, so echo the origin
-        // and allow them. This is loopback-only and unauthenticated anyway.
+        // Reflect the caller's (sanitized) Origin and requested headers so the
+        // CORS preflight passes for browser clients. The bearer token, not CORS,
+        // is what actually authorizes a call.
         let origin = request
             .headers()
             .iter()
             .find(|h| h.field.equiv("Origin"))
-            .map(|h| h.value.as_str().to_string())
+            .map(|h| sanitize_header_value(h.value.as_str()))
+            .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "*".to_string());
         let allow_headers = request
             .headers()
             .iter()
             .find(|h| h.field.equiv("Access-Control-Request-Headers"))
-            .map(|h| h.value.as_str().to_string())
+            .map(|h| sanitize_header_value(h.value.as_str()))
+            .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "Content-Type, Authorization".to_string());
-        eprintln!("conduit-gateway http: {method} {path} (origin: {origin})");
-        let mut body = String::new();
-        if method == "POST" {
-            let _ = request.as_reader().read_to_string(&mut body);
-        }
-        let (status, ctype, payload) = handle_http(&state, &mut guard, &method, &path, &body);
+
+        // Auth gate: when a token is configured it's required on every request
+        // except the CORS preflight (browsers send OPTIONS without auth). A bad
+        // or missing token is rejected before we read the body or route anything.
+        let provided = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Authorization"))
+            .map(|h| h.value.as_str().to_string());
+        let authorized = match &token {
+            None => true,
+            Some(t) => {
+                method == "OPTIONS"
+                    || provided.as_deref().and_then(parse_bearer) == Some(t.as_str())
+            }
+        };
+
+        let (status, ctype, payload): (u16, &str, String) = if !authorized {
+            (
+                401,
+                "application/json",
+                json!({ "error": "missing or invalid bearer token" }).to_string(),
+            )
+        } else {
+            let mut body = String::new();
+            if method == "POST" {
+                let _ = request
+                    .as_reader()
+                    .take(MAX_HTTP_BODY)
+                    .read_to_string(&mut body);
+            }
+            // A panic in a handler must return 500, not kill the listener thread.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handle_http(&state, &mut guard, &method, &path, &body)
+            }))
+            .unwrap_or((
+                500,
+                "application/json",
+                "{\"error\":\"internal error\"}".to_string(),
+            ))
+        };
+
         let mut response = tiny_http::Response::from_string(payload).with_status_code(status);
         let cors: [(&[u8], &[u8]); 5] = [
             (b"Content-Type", ctype.as_bytes()),
@@ -1949,8 +2033,10 @@ fn serve_http_loop(server: tiny_http::Server, state: GatewayState) {
             (b"Access-Control-Allow-Headers", allow_headers.as_bytes()),
         ];
         for (name, value) in cors {
-            response = response
-                .with_header(tiny_http::Header::from_bytes(name, value).expect("static header"));
+            // Skip a header that won't encode rather than panicking the thread.
+            if let Ok(h) = tiny_http::Header::from_bytes(name, value) {
+                response = response.with_header(h);
+            }
         }
         let _ = request.respond(response);
     }
@@ -2278,6 +2364,26 @@ mod tests {
         assert!(!hits.iter().any(|h| h.starts_with("resend")));
         assert_eq!(resource_stem("teamId"), "team");
         assert_eq!(resource_stem("account_id"), "account");
+    }
+
+    #[test]
+    fn parse_bearer_extracts_token_case_insensitively() {
+        assert_eq!(parse_bearer("Bearer abc123"), Some("abc123"));
+        assert_eq!(parse_bearer("bearer  spaced  "), Some("spaced"));
+        assert_eq!(parse_bearer("Basic abc"), None);
+        assert_eq!(parse_bearer("abc"), None);
+        assert_eq!(parse_bearer(""), None);
+    }
+
+    #[test]
+    fn sanitize_header_value_strips_control_chars() {
+        assert_eq!(sanitize_header_value("http://localhost:8080"), "http://localhost:8080");
+        // CR/LF injection attempt is stripped to a flat value.
+        assert_eq!(
+            sanitize_header_value("evil\r\nSet-Cookie: x=1"),
+            "evilSet-Cookie: x=1"
+        );
+        assert!(sanitize_header_value(&"a".repeat(9999)).len() <= 512);
     }
 
     #[test]

@@ -122,6 +122,7 @@ export interface HttpBridgeStatus {
   running: boolean;
   port: number | null;
   url: string | null;
+  token: string | null;
 }
 
 /** Start the supervised conduit-gateway HTTP/OpenAPI server (Open WebUI etc.). */

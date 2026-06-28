@@ -183,10 +183,11 @@ gateway entry, written for you when you connect a client:
   stable per-user path so packaged and unpackaged clients agree.
 - `CONDUIT_RESULT_BUDGET=<bytes>` - cap oversized tool results at this many bytes
   (0 disables it). Optional; off by default.
-- `CONDUIT_HTTP=<port>` (with optional `CONDUIT_HTTP_HOST`, default `127.0.0.1`) -
-  run the gateway in HTTP/OpenAPI mode instead of stdio, for Open WebUI and other
-  OpenAPI clients (see above). The in-app Settings -> Integrations toggle sets this
-  for you.
+- `CONDUIT_HTTP=<port>` (with optional `CONDUIT_HTTP_HOST`, default `127.0.0.1`,
+  and `CONDUIT_HTTP_TOKEN` for the required bearer token) - run the gateway in
+  HTTP/OpenAPI mode instead of stdio, for Open WebUI and other OpenAPI clients (see
+  above). The in-app Settings -> Integrations toggle sets these for you, and the
+  gateway refuses a non-loopback bind without a token.
 
 **Semantic search (optional).** Lazy discovery ranks tools lexically by default. Point it
 at any `/v1/embeddings` endpoint (LM Studio, Ollama, or a cloud provider) to blend in
