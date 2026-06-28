@@ -51,6 +51,21 @@ const DOT: Record<Status, string> = {
   error: "bg-destructive",
 };
 
+function statusAriaLabel(status: Status, label: string): string {
+  switch (status) {
+    case "disabled":
+      return "Server disabled";
+    case "checking":
+      return "Checking connection";
+    case "connected":
+      return `Connected, ${label}`;
+    case "needs-auth":
+      return "Authentication required";
+    case "error":
+      return "Connection error";
+  }
+}
+
 const ACTION =
   "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
@@ -119,7 +134,8 @@ export function RegistryServerRow({
 
         <span
           className={`size-2 shrink-0 rounded-full ${DOT[status]}`}
-          aria-hidden="true"
+          aria-label={statusAriaLabel(status, label)}
+          role="status"
         />
 
         <span className="min-w-0 truncate text-sm font-medium">
@@ -276,7 +292,10 @@ function StatusLabel({
   error: string | null;
 }) {
   const text = (
-    <span className="text-xs whitespace-nowrap text-muted-foreground">
+    <span
+      aria-hidden="true"
+      className="text-xs whitespace-nowrap text-muted-foreground"
+    >
       {label}
     </span>
   );

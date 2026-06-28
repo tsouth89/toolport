@@ -32,10 +32,11 @@ export function TransportPill({ transport }: { transport: Transport }) {
   const Icon = m.icon;
   return (
     <span
+      aria-label={`Transport: ${m.label}`}
       className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${m.className}`}
     >
-      <Icon className="size-3" />
-      {m.label}
+      <Icon className="size-3" aria-hidden="true" />
+      <span aria-hidden="true">{m.label}</span>
     </span>
   );
 }

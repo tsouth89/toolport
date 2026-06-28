@@ -421,7 +421,10 @@ function ServerMiniCard({
   onImport: () => void;
 }) {
   return (
-    <Card className={`gap-0 ${imported ? "opacity-70" : ""}`}>
+    <Card
+      aria-disabled={imported}
+      className={`gap-0 ${imported ? "opacity-70" : ""}`}
+    >
       <CardContent className="flex flex-col gap-2 p-3">
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
