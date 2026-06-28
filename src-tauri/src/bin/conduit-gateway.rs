@@ -1660,6 +1660,11 @@ fn handle_http(
     body: &str,
 ) -> (u16, &'static str, String) {
     match (method, path) {
+        // CORS preflight: browsers (Open WebUI fetches tool specs client-side)
+        // send OPTIONS before a cross-origin POST. Answer it so the real request
+        // is allowed through. The CORS headers themselves are added to every
+        // response in serve_http_loop.
+        ("OPTIONS", _) => (204, "text/plain", String::new()),
         ("GET", "/openapi.json") => (200, "application/json", openapi_spec(state).to_string()),
         ("GET", "/") | ("GET", "/docs") => (
             200,
@@ -1770,11 +1775,20 @@ fn serve_http_loop(server: tiny_http::Server, state: GatewayState) {
             let _ = request.as_reader().read_to_string(&mut body);
         }
         let (status, ctype, payload) = handle_http(&state, &mut guard, &method, &path, &body);
-        let header =
-            tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).expect("static header");
-        let response = tiny_http::Response::from_string(payload)
-            .with_status_code(status)
-            .with_header(header);
+        // Browser clients (Open WebUI fetches OpenAPI tool specs and calls tools
+        // from the page) need permissive CORS, the endpoint is unauthenticated
+        // and loopback-only, so `*` is fine here.
+        let cors: [(&[u8], &[u8]); 4] = [
+            (b"Content-Type", ctype.as_bytes()),
+            (b"Access-Control-Allow-Origin", b"*"),
+            (b"Access-Control-Allow-Methods", b"GET, POST, OPTIONS"),
+            (b"Access-Control-Allow-Headers", b"Content-Type, Authorization"),
+        ];
+        let mut response = tiny_http::Response::from_string(payload).with_status_code(status);
+        for (name, value) in cors {
+            response = response
+                .with_header(tiny_http::Header::from_bytes(name, value).expect("static header"));
+        }
         let _ = request.respond(response);
     }
 }
@@ -2055,6 +2069,17 @@ mod tests {
         // Agent-control tools stay hidden unless the registry opts in.
         assert!(!paths.contains_key("/conduit_enable_server"));
         assert_eq!(spec.get("openapi").unwrap(), "3.1.0");
+    }
+
+    #[test]
+    fn http_options_preflight_is_answered() {
+        // Browsers preflight a cross-origin POST; we must answer OPTIONS so the
+        // real request goes through (CORS headers themselves are added per-response).
+        let state = http_state(true);
+        let (status, _, body) =
+            handle_http(&state, &mut SearchGuard::default(), "OPTIONS", "/conduit_search_tools", "");
+        assert_eq!(status, 204);
+        assert!(body.is_empty());
     }
 
     #[test]
