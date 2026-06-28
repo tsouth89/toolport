@@ -32,8 +32,8 @@ pub fn sanitize_segment(s: &str) -> String {
 /// real servers like revenuecat use to share subschemas). mcpo (the MCP-to-OpenAPI
 /// proxy OpenWebUI uses) aborts with "Custom field not found" on an unresolved
 /// `$ref`, so one such server would otherwise break the whole full-discovery bridge.
-/// Refs resolve against a snapshot of the original schema; recursive refs are left
-/// in place (cycle guard) to avoid infinite expansion.
+/// Refs resolve against a snapshot of the original schema; a recursive or otherwise
+/// unresolvable ref collapses to a permissive `{}`, so the output is always ref-free.
 pub fn inline_refs(schema: &mut Value) {
     if !has_ref(schema) {
         return;
@@ -57,23 +57,26 @@ fn has_ref(node: &Value) -> bool {
 }
 
 /// Replace a `{"$ref": "#/..."}` node with a copy of what that JSON Pointer resolves
-/// to in `root` (itself inlined). `active` holds the ref strings currently expanding,
-/// so a cycle stops instead of recursing forever; external refs (no `#` prefix) and
-/// unresolvable pointers are left as-is.
+/// to in `root` (itself inlined). `active` holds the ref strings currently expanding;
+/// a ref into one (a cycle), an external ref (no `#` prefix), or an unresolvable
+/// pointer collapses to a permissive `{}` so NO `$ref` ever leaks to a consumer that
+/// can't resolve it. Cycles thus terminate with a wildcard rather than recursing.
 fn inline_node(node: &mut Value, root: &Value, active: &mut HashSet<String>) {
     let ref_str = node.get("$ref").and_then(|v| v.as_str()).map(str::to_string);
     if let Some(r) = ref_str {
+        let mut resolved = None;
         if let Some(ptr) = r.strip_prefix('#') {
             if !active.contains(&r) {
                 if let Some(target) = root.pointer(ptr).cloned() {
-                    let mut resolved = target;
+                    let mut sub = target;
                     active.insert(r.clone());
-                    inline_node(&mut resolved, root, active);
+                    inline_node(&mut sub, root, active);
                     active.remove(&r);
-                    *node = resolved;
+                    resolved = Some(sub);
                 }
             }
         }
+        *node = resolved.unwrap_or_else(|| json!({}));
         return;
     }
     match node {
@@ -368,6 +371,8 @@ mod tests {
         });
         inline_refs(&mut schema); // must terminate, not recurse forever
         assert_eq!(schema["type"], "object");
+        // the cyclic inner ref collapses to {}, so nothing references out
+        assert!(!serde_json::to_string(&schema).unwrap().contains("$ref"));
     }
 
     #[test]
