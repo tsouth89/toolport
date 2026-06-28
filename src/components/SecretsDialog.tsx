@@ -257,7 +257,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
         </DialogHeader>
 
         <div className="flex flex-col gap-3 py-1">
-          {isRemote && (
+          {isRemote && server.url && (
             <div className="flex flex-col gap-2.5 border-b pb-3">
               {probing && (
                 <p className="text-xs text-muted-foreground">

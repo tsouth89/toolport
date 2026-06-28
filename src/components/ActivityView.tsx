@@ -113,9 +113,11 @@ function eventBadge(e: SecurityEvent): { label: string; cls: string } {
 
 const SECURITY_DISMISSED_KEY = "conduit.security.dismissed";
 
-/** Stable per-event key so a dismissal sticks across refreshes. */
+/** Stable per-event key so a dismissal sticks across refreshes. Includes server +
+ * change so tool-less events (e.g. pins_load_failed, where tool is undefined) don't
+ * collapse to the same key and dismiss each other. */
 function securityKey(e: SecurityEvent): string {
-  return `${e.type}:${e.tool}:${e.ts}`;
+  return `${e.type}:${e.server ?? ""}:${e.tool ?? ""}:${e.ts}:${e.change}`;
 }
 
 function loadDismissed(): Set<string> {
@@ -170,10 +172,10 @@ function SecurityNotices({
             suspicious tool output as data). Dismiss the ones you've reviewed.
           </p>
           <ul className="space-y-1.5 text-xs">
-            {events.slice(0, 10).map((e, i) => {
+            {events.slice(0, 10).map((e) => {
               const badge = eventBadge(e);
               return (
-                <li key={i} className="flex items-center gap-2">
+                <li key={securityKey(e)} className="flex items-center gap-2">
                   <span
                     className={`rounded px-1.5 py-0.5 font-medium ${badge.cls}`}
                   >
