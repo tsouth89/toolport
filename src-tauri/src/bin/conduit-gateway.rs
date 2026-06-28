@@ -56,49 +56,35 @@ fn status_tool_def() -> Value {
 
 /// The two meta-tools that power lazy discovery: search then call. In lazy mode
 /// these (plus conduit_status) are the ONLY tools advertised, so the client's
-/// context holds 3 tool defs instead of hundreds - the model discovers the real
-/// tool on demand and dispatches through `conduit_call_tool`.
-/// Unique connected-server prefixes from the catalog (e.g. "github, resend, stripe,
-/// vercel"), advertised in the search tool so the model knows which capabilities are
-/// reachable through Conduit and reaches for it over a narrower, unrelated tool.
-fn server_prefixes(catalog: &[Value]) -> String {
-    let mut set = std::collections::BTreeSet::new();
-    for t in catalog {
-        if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
-            if let Some((prefix, _)) = name.split_once("__") {
-                set.insert(prefix);
-            }
-        }
-    }
-    set.into_iter().collect::<Vec<_>>().join(", ")
-}
-
-fn search_tool_def(servers: &str) -> Value {
-    let connected = if servers.is_empty() {
-        String::new()
-    } else {
-        format!(" Connected servers (search any of these): {servers}.")
-    };
-    let description = format!(
-        "Your single gateway to every connected MCP server and ALL their tools. Try this FIRST for \
-         ANY external action or data the user asks for - sending or listing email, deployments, \
-         payments, databases, repos, issues, files, web search, etc. Do NOT reach for an unrelated \
-         tool or tell the user a capability is unavailable until you have searched here; if the \
-         service is connected, its tool is here.{connected} Returns matching tools with their exact \
-         name, description, and input schema; call one with conduit_call_tool. Once a result matches \
-         what you need, call it - do NOT keep searching for a better one (the first result includes \
-         its full schema and is ready to call). Pass `server` (a name/prefix like \"resend\") to \
-         scope to one server, and pass an EMPTY `query` with `server` to list ALL of that server's \
-         tools. If the result says more tools matched than were shown, narrow with `server` or raise \
-         `limit` before concluding a capability is missing - many servers expose a generic API bridge \
-         (a single write/create tool), so search by capability, not just an exact operation name. \
-         conduit_status lists every server prefix and its tool count. Large input schemas may be \
-         omitted from broad results (flagged schemaOmitted) to keep responses small - search a tool's \
-         exact name to get its full schema."
-    );
+/// context holds a handful of tool defs instead of hundreds - the model discovers
+/// the real tool on demand and dispatches through `conduit_call_tool`.
+///
+/// The description leads with a directive plus GENERIC capability examples (email,
+/// payments, deployments, ...) so the model treats Conduit as the front door for any
+/// external action rather than grabbing a loosely-matched competitor tool or giving
+/// up. We intentionally do NOT list the user's specific connected servers here: that
+/// would scale the description with server count, go stale, and leak the user's stack
+/// into a (possibly remote) model's context on every request. The generic examples
+/// carry the routing without any of that; `conduit_status` names the actual servers
+/// on demand if the model needs them.
+fn search_tool_def() -> Value {
     json!({
         "name": "conduit_search_tools",
-        "description": description,
+        "description": "Your single gateway to every connected MCP server and ALL their tools. \
+            Try this FIRST for ANY external action or data the user asks for - sending or listing \
+            email, deployments, payments, databases, repos, issues, files, web search, etc. Do NOT \
+            reach for an unrelated tool or tell the user a capability is unavailable until you have \
+            searched here; if the service is connected, its tool is here. Returns matching tools with \
+            their exact name, description, and input schema; call one with conduit_call_tool. Once a \
+            result matches what you need, call it - do NOT keep searching for a better one (the first \
+            result includes its full schema and is ready to call). Pass `server` (a name/prefix like \
+            \"resend\") to scope to one server, and pass an EMPTY `query` with `server` to list ALL of \
+            that server's tools. If the result says more tools matched than were shown, narrow with \
+            `server` or raise `limit` before concluding a capability is missing - many servers expose \
+            a generic API bridge (a single write/create tool), so search by capability, not just an \
+            exact operation name. conduit_status lists every server prefix and its tool count. Large \
+            input schemas may be omitted from broad results (flagged schemaOmitted) to keep responses \
+            small - search a tool's exact name to get its full schema.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -793,20 +779,9 @@ fn handle_request(
             // holds a handful of tool defs instead of the whole catalog. The model
             // finds real tools via conduit_search_tools and runs conduit_call_tool.
             if lazy {
-                // The connected catalog (cached if available, else the live router).
-                // Used to advertise the server list in the search tool's description so
-                // the model knows what's reachable, and to record what lazy discovery
-                // kept out of the client's context (the savings) below.
-                let agg;
-                let catalog: &[Value] = if cached.is_empty() {
-                    agg = router.aggregated_tools();
-                    &agg
-                } else {
-                    cached
-                };
                 let mut tools = vec![
                     status_tool_def(),
-                    search_tool_def(&server_prefixes(catalog)),
+                    search_tool_def(),
                     call_tool_def(),
                     fetch_result_tool_def(),
                 ];
@@ -816,6 +791,17 @@ fn handle_request(
                     tools.push(enable_server_tool_def());
                     tools.push(disable_server_tool_def());
                 }
+                // Record what lazy discovery kept out of the client's context: the
+                // full catalog we'd otherwise serve (status + every downstream tool)
+                // minus these 3 meta-tools. Estimating over the cached slice avoids
+                // cloning the whole catalog on a serve.
+                let agg;
+                let catalog: &[Value] = if cached.is_empty() {
+                    agg = router.aggregated_tools();
+                    &agg
+                } else {
+                    cached
+                };
                 let status = status_tool_def();
                 let full_tokens = savings::estimate_tokens(catalog)
                     + savings::estimate_tokens(std::slice::from_ref(&status));
