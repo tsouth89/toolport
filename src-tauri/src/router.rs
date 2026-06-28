@@ -26,6 +26,83 @@ pub fn sanitize_segment(s: &str) -> String {
         .collect()
 }
 
+/// Inline internal `$ref` pointers (`#/$defs/X`, `#/definitions/X`) into a JSON
+/// Schema so downstream consumers that can't resolve refs get a self-contained
+/// schema. mcpo (the MCP-to-OpenAPI proxy OpenWebUI uses) aborts on an unresolved
+/// `$ref` ("Custom field not found"), so a single server whose tool schema uses
+/// `$defs` (e.g. revenuecat) would otherwise break the entire full-mode bridge.
+/// Recursive refs are left in place to avoid infinite expansion.
+pub fn inline_refs(schema: &mut Value) {
+    let defs = collect_defs(schema);
+    if defs.is_empty() {
+        return;
+    }
+    let mut active = HashSet::new();
+    inline_node(schema, &defs, &mut active);
+    if let Some(obj) = schema.as_object_mut() {
+        obj.remove("$defs");
+        obj.remove("definitions");
+    }
+}
+
+/// Collect the root `$defs` and `definitions` maps as name -> subschema.
+fn collect_defs(schema: &Value) -> HashMap<String, Value> {
+    let mut out = HashMap::new();
+    for key in ["$defs", "definitions"] {
+        if let Some(map) = schema.get(key).and_then(|v| v.as_object()) {
+            for (name, sub) in map {
+                out.insert(name.clone(), sub.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The def name in a local ref like `#/$defs/Foo`; `None` for external or
+/// sub-path refs we can't inline by simple substitution.
+fn ref_name(r: &str) -> Option<String> {
+    for p in ["#/$defs/", "#/definitions/"] {
+        if let Some(rest) = r.strip_prefix(p) {
+            if !rest.is_empty() && !rest.contains('/') {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Replace a `{"$ref": "#/$defs/X"}` node with a copy of def X (itself inlined).
+/// `active` holds the refs currently expanding, so a cycle stops instead of
+/// recursing forever.
+fn inline_node(node: &mut Value, defs: &HashMap<String, Value>, active: &mut HashSet<String>) {
+    let ref_target = node.get("$ref").and_then(|v| v.as_str()).and_then(ref_name);
+    if let Some(name) = ref_target {
+        if !active.contains(&name) {
+            if let Some(def) = defs.get(&name) {
+                let mut resolved = def.clone();
+                active.insert(name.clone());
+                inline_node(&mut resolved, defs, active);
+                active.remove(&name);
+                *node = resolved;
+            }
+        }
+        return;
+    }
+    match node {
+        Value::Object(map) => {
+            for v in map.values_mut() {
+                inline_node(v, defs, active);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                inline_node(v, defs, active);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// True if a tool advertises `destructiveHint: true` (MCP tool annotations).
 /// Accepts the spec's nested `annotations.destructiveHint` and a top-level
 /// fallback some servers emit.
@@ -116,6 +193,9 @@ impl Router {
             }
             let mut t = tool.clone();
             t["name"] = json!(exposed);
+            if let Some(schema) = t.get_mut("inputSchema") {
+                inline_refs(schema);
+            }
             self.tools.push(t);
             self.routes
                 .insert(exposed, (server.id.clone(), orig.to_string()));
@@ -266,6 +346,49 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_refs_resolves_defs() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": { "a": { "$ref": "#/$defs/Foo" } },
+            "$defs": { "Foo": { "type": "string", "enum": ["x", "y"] } }
+        });
+        inline_refs(&mut schema);
+        assert!(schema.get("$defs").is_none(), "defs should be dropped");
+        assert_eq!(schema["properties"]["a"]["type"], "string");
+        assert_eq!(schema["properties"]["a"]["enum"][0], "x");
+        assert!(!serde_json::to_string(&schema).unwrap().contains("$ref"));
+    }
+
+    #[test]
+    fn inline_refs_handles_definitions_keyword() {
+        let mut schema = json!({
+            "properties": { "b": { "$ref": "#/definitions/Bar" } },
+            "definitions": { "Bar": { "type": "number" } }
+        });
+        inline_refs(&mut schema);
+        assert_eq!(schema["properties"]["b"]["type"], "number");
+        assert!(schema.get("definitions").is_none());
+    }
+
+    #[test]
+    fn inline_refs_breaks_cycles() {
+        let mut schema = json!({
+            "$ref": "#/$defs/Node",
+            "$defs": { "Node": { "type": "object", "properties": { "next": { "$ref": "#/$defs/Node" } } } }
+        });
+        inline_refs(&mut schema); // must terminate, not recurse forever
+        assert_eq!(schema["type"], "object");
+    }
+
+    #[test]
+    fn inline_refs_noop_without_defs() {
+        let mut schema = json!({ "type": "object", "properties": { "x": { "type": "string" } } });
+        let before = schema.clone();
+        inline_refs(&mut schema);
+        assert_eq!(schema, before);
+    }
     use crate::downstream::{DownstreamServer, Transport};
 
     /// A fake downstream server: advertises `echo` + `add`, echoes calls back.
