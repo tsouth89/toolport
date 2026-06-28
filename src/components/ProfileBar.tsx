@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import {
   createProfile,
   deleteProfile,
@@ -40,7 +41,7 @@ export function ProfileBar({ registry, onChange }: Props) {
     try {
       onChange(await setActiveProfile(id));
     } catch (e) {
-      toast.error(`Couldn't switch profile: ${e}`);
+      toastError(`Couldn't switch profile: ${e}`);
     }
   }
 
@@ -53,7 +54,7 @@ export function ProfileBar({ registry, onChange }: Props) {
       setName("");
       setOpen(false);
     } catch (e) {
-      toast.error(`Couldn't create profile: ${e}`);
+      toastError(`Couldn't create profile: ${e}`);
     }
   }
 
@@ -62,7 +63,7 @@ export function ProfileBar({ registry, onChange }: Props) {
     try {
       onChange(await deleteProfile(activeId));
     } catch (e) {
-      toast.error(`Couldn't delete profile: ${e}`);
+      toastError(`Couldn't delete profile: ${e}`);
     }
   }
 

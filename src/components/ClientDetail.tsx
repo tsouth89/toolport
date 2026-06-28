@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ArrowRight, Check, Download, Link2, Plug, PlugZap, Puzzle, Shuffle } from "lucide-react";
 import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import { addServer, installGateway, migrateClient, uninstallGateway } from "@/lib/api";
 import {
   importableServers,
@@ -71,7 +72,7 @@ export function ClientDetail({
       setMigrateOpen(false);
       onChanged();
     } catch (e) {
-      toast.error(`${e}`);
+      toastError(`${e}`);
     } finally {
       setBusy(false);
     }
@@ -117,7 +118,7 @@ export function ClientDetail({
         description: "Enable it to serve it to every client through the gateway.",
       });
     } catch (e) {
-      toast.error(`${e}`);
+      toastError(`${e}`);
     } finally {
       setBusy(false);
     }
@@ -141,7 +142,7 @@ export function ClientDetail({
     } else if (ok > 0) {
       toast.warning(`Imported ${ok}, couldn't import ${failed.join(", ")}`);
     } else {
-      toast.error(`Couldn't import ${failed.join(", ")}`);
+      toastError(`Couldn't import ${failed.join(", ")}`);
     }
   }
 
@@ -163,7 +164,7 @@ export function ClientDetail({
       }
       onChanged();
     } catch (e) {
-      toast.error(`${e}`);
+      toastError(`${e}`);
     } finally {
       setBusy(false);
     }

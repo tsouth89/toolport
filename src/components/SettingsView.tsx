@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Bot, Layers, ShieldAlert } from "lucide-react";
-import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import {
   setAllowAgentControl,
   setDenyDestructive,
@@ -28,7 +28,7 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
       try {
         onRegistryChange(await fn(v));
       } catch (e) {
-        toast.error(`Couldn't update the setting: ${e}`);
+        toastError(`Couldn't update the setting: ${e}`);
       } finally {
         setBusy(false);
       }

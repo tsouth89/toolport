@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, ExternalLink, Loader2, Plus, Search, ShieldCheck, X } from "lucide-react";
 import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   addServer,
@@ -60,7 +61,7 @@ export function CatalogView({ registry, onAdded }: Props) {
       reloadPopular();
       toast.success(`Removed ${entry.name} from your catalog`);
     } catch (e) {
-      toast.error(`Couldn't remove ${entry.name}: ${e}`);
+      toastError(`Couldn't remove ${entry.name}: ${e}`);
     }
   }
 
@@ -111,7 +112,7 @@ export function CatalogView({ registry, onAdded }: Props) {
         description: "Enable it, then authenticate if it needs credentials.",
       });
     } catch (e) {
-      toast.error(`Couldn't add ${entry.name}: ${e}`);
+      toastError(`Couldn't add ${entry.name}: ${e}`);
     } finally {
       setBusy(null);
     }

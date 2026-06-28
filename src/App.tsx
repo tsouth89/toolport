@@ -18,6 +18,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import {
   detectClients,
   getRegistry,
@@ -151,7 +152,7 @@ function App() {
         // After the first successful load, a refresh failure shouldn't blow away a
         // working list. Surface it as a toast and keep what's on screen.
         if (loadedOnce.current) {
-          toast.error(`Couldn't refresh: ${e}`);
+          toastError(`Couldn't refresh: ${e}`);
         } else {
           setError(String(e));
         }
@@ -290,7 +291,7 @@ function App() {
       // moves it to the disabled group, no probe needed.)
       if (enabled) void reprobe();
     } catch (e) {
-      toast.error(`Couldn't toggle: ${e}`);
+      toastError(`Couldn't toggle: ${e}`);
     } finally {
       setBusyId(null);
     }
@@ -302,7 +303,7 @@ function App() {
       setRegistry(await removeServer(serverId));
       toast.success(`Removed "${name}"`);
     } catch (e) {
-      toast.error(`Couldn't remove: ${e}`);
+      toastError(`Couldn't remove: ${e}`);
     } finally {
       setBusyId(null);
     }
@@ -317,7 +318,7 @@ function App() {
       if (enable) void reprobe();
       toast.success(enable ? "Enabled all servers" : "Disabled all servers");
     } catch (e) {
-      toast.error(`Couldn't update servers: ${e}`);
+      toastError(`Couldn't update servers: ${e}`);
     } finally {
       setTogglingAll(false);
     }
@@ -335,7 +336,7 @@ function App() {
           : "Nothing new to import",
       );
     } catch (e) {
-      toast.error(`Import failed: ${e}`);
+      toastError(`Import failed: ${e}`);
     }
   }
 

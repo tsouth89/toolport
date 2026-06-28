@@ -19,6 +19,7 @@ import {
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
+import { toastError } from "@/lib/toast";
 import type { Update } from "@tauri-apps/plugin-updater";
 import {
   importableServers,
@@ -91,7 +92,7 @@ function VersionFooter({
       } else if (r.kind === "current") {
         toast.success("You're on the latest version");
       } else {
-        toast.error("Couldn't check for updates", {
+        toastError("Couldn't check for updates", {
           description: "You may be offline. Try again in a moment.",
         });
       }
@@ -110,7 +111,7 @@ function VersionFooter({
       await installUpdate(update);
     } catch (e) {
       setInstalling(false);
-      toast.error(`Update failed: ${e}`, {
+      toastError(`Update failed: ${e}`, {
         description: "You can download it manually from the releases page.",
         action: {
           label: "Open",
@@ -194,7 +195,7 @@ function VersionFooter({
                 "Diagnostics copied, paste them into your bug report",
               );
             } catch {
-              toast.error("Could not copy diagnostics");
+              toastError("Could not copy diagnostics");
             }
           }}
           title="Copy diagnostics for a bug report"
