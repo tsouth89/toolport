@@ -1123,6 +1123,19 @@ fn take_pending_shared(state: State<PendingShare>) -> Option<String> {
         .take()
 }
 
+/// Deliver a shared-stack id from a deep link to the UI: stash it so a cold start
+/// can claim it on mount, focus the window, and emit the live event for a running
+/// app. Idempotent enough that delivering the same id twice just re-opens it.
+fn deliver_shared_import(handle: &tauri::AppHandle, id: String) {
+    if let Some(st) = handle.try_state::<PendingShare>() {
+        *st.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id.clone());
+    }
+    if let Some(w) = handle.get_webview_window("main") {
+        let _ = w.set_focus();
+    }
+    let _ = handle.emit("import-shared", id);
+}
+
 /// Import a shared setup. Adds servers not already present (by name); secret
 /// values are never included, so each new server is left for the user to vault.
 #[tauri::command]
@@ -1536,26 +1549,34 @@ pub fn run() {
 
             // conduit://import?s=<id> deep links open the shared-stack import.
             // The installer registers the scheme; we also register at runtime so
-            // it works unpackaged (dev). on_open_url fires on cold start and, via
-            // the single-instance plugin, for a second launch carrying the URL.
-            // Cold starts may arrive before the UI is listening, so the id is also
+            // it works unpackaged (dev). Three delivery paths are covered:
+            //   - cold start (app launched by the link): the URL is in this
+            //     process's launch args, read via get_current();
+            //   - already running (second launch): the single-instance plugin
+            //     forwards the URL to on_open_url;
+            //   - macOS: the OS delivers via on_open_url at launch and runtime.
+            // Cold starts can arrive before the UI is listening, so the id is also
             // stashed for the frontend to claim on mount (take_pending_shared).
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                 let _ = app.deep_link().register("conduit");
+
+                // Cold start: the URL(s) the app was launched with.
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    for url in urls {
+                        if let Some(id) = parse_share_url(url.as_str()) {
+                            deliver_shared_import(app.handle(), id);
+                        }
+                    }
+                }
+
+                // While running (and macOS launch): delivered as an event.
                 let handle = app.handle().clone();
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
                         if let Some(id) = parse_share_url(url.as_str()) {
-                            if let Some(st) = handle.try_state::<PendingShare>() {
-                                *st.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                    Some(id.clone());
-                            }
-                            if let Some(w) = handle.get_webview_window("main") {
-                                let _ = w.set_focus();
-                            }
-                            let _ = handle.emit("import-shared", id);
+                            deliver_shared_import(&handle, id);
                         }
                     }
                 });
