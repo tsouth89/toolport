@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useRef,
@@ -45,15 +47,33 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { AppSidebar } from "@/components/AppSidebar";
-import { Onboarding } from "@/components/Onboarding";
 import { RegistryServerRow } from "@/components/RegistryServerRow";
-import { ClientDetail } from "@/components/ClientDetail";
-import { ActivityView } from "@/components/ActivityView";
 import { ServerDialog } from "@/components/ServerDialog";
-import { CatalogView } from "@/components/CatalogView";
-import { PlaygroundView } from "@/components/PlaygroundView";
-import { TeamsView } from "@/components/TeamsView";
-import { SettingsView } from "@/components/SettingsView";
+
+// Secondary destinations are code-split so the initial bundle only carries the
+// default Servers view and the app chrome. Each mounts behind a Suspense
+// fallback the first time it's opened. (Named exports, hence the .then wrap.)
+const Onboarding = lazy(() =>
+  import("@/components/Onboarding").then((m) => ({ default: m.Onboarding })),
+);
+const ClientDetail = lazy(() =>
+  import("@/components/ClientDetail").then((m) => ({ default: m.ClientDetail })),
+);
+const ActivityView = lazy(() =>
+  import("@/components/ActivityView").then((m) => ({ default: m.ActivityView })),
+);
+const CatalogView = lazy(() =>
+  import("@/components/CatalogView").then((m) => ({ default: m.CatalogView })),
+);
+const PlaygroundView = lazy(() =>
+  import("@/components/PlaygroundView").then((m) => ({ default: m.PlaygroundView })),
+);
+const TeamsView = lazy(() =>
+  import("@/components/TeamsView").then((m) => ({ default: m.TeamsView })),
+);
+const SettingsView = lazy(() =>
+  import("@/components/SettingsView").then((m) => ({ default: m.SettingsView })),
+);
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -482,6 +502,15 @@ function App() {
 
           <ScrollArea className="min-h-0 flex-1">
             <div className="p-6">
+              <Suspense
+                fallback={
+                  <div className="flex flex-col gap-2">
+                    {Array.from({ length: 6 }).map((_, i) => (
+                      <Skeleton key={i} className="h-11 w-full rounded-lg" />
+                    ))}
+                  </div>
+                }
+              >
               {view === "activity" ? (
                 <ActivityView refreshKey={activityKey} />
               ) : view === "catalog" ? (
@@ -546,11 +575,13 @@ function App() {
                   </ServerGroup>
                 </div>
               )}
+              </Suspense>
             </div>
           </ScrollArea>
         </main>
       </div>
       {showOnboarding && registry && (
+        <Suspense fallback={null}>
         <Onboarding
           key={onboardingStep}
           initialStep={onboardingStep}
@@ -566,6 +597,7 @@ function App() {
           onProbe={reprobe}
           onFinish={finishOnboarding}
         />
+        </Suspense>
       )}
       <Toaster position="bottom-right" />
     </TooltipProvider>
