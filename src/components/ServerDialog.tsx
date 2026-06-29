@@ -1,8 +1,8 @@
 import { useState, type ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, Loader2, Plus, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, ClipboardPaste, Loader2, Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
-import { addServer, setSecret, testServer, updateServer } from "@/lib/api";
+import { addServer, parseServerSnippet, setSecret, testServer, updateServer } from "@/lib/api";
 import type { Registry, ServerEntry, Transport } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -56,6 +56,11 @@ export function ServerDialog({ trigger, onSaved, editId, initial, existingNames 
   const isStdio = form.transport === "stdio";
   const editing = editId !== undefined;
 
+  // Paste-from-config state.
+  const [showPaste, setShowPaste] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [parsing, setParsing] = useState(false);
+
   // A prior test result is stale the moment the connection details change.
   function clearTest() {
     setTest((t) => (t.status === "idle" ? t : { status: "idle", message: "" }));
@@ -75,6 +80,8 @@ export function ServerDialog({ trigger, onSaved, editId, initial, existingNames 
       });
       setEnvRows(initial?.env.map((e) => ({ key: e.key, value: "" })) ?? []);
       setTest({ status: "idle", message: "" });
+      setShowPaste(false);
+      setPasteText("");
     }
     setOpen(next);
   }
@@ -95,6 +102,46 @@ export function ServerDialog({ trigger, onSaved, editId, initial, existingNames 
   function removeEnvRow(i: number) {
     setEnvRows((rows) => rows.filter((_, j) => j !== i));
     clearTest();
+  }
+
+  async function handleParse() {
+    if (!pasteText.trim()) return;
+    setParsing(true);
+    try {
+      const servers = await parseServerSnippet(pasteText);
+      if (servers.length === 0) {
+        toast.error("No servers found in the pasted config");
+        return;
+      }
+      const s = servers[0];
+      setForm({
+        name: s.name || "",
+        transport: (s.transport === "unknown" ? "stdio" : s.transport) as Transport,
+        command: s.command ?? "",
+        args: s.args.join(" "),
+        url: s.url ?? "",
+      });
+      setEnvRows(
+        s.env.map((e) => ({
+          key: e.key,
+          value: e.value ?? "",
+        })),
+      );
+      setTest({ status: "idle", message: "" });
+      if (servers.length > 1) {
+        toast.info(
+          `Found ${servers.length} servers, filled "${s.name}". Add the rest separately.`,
+        );
+      } else {
+        toast.success(`Parsed "${s.name}" from config`);
+      }
+      setShowPaste(false);
+      setPasteText("");
+    } catch (e) {
+      toastError(`Could not parse: ${e}`);
+    } finally {
+      setParsing(false);
+    }
   }
 
   // Build the entry from the form. For a real save the secret values are vaulted
@@ -196,6 +243,46 @@ export function ServerDialog({ trigger, onSaved, editId, initial, existingNames 
         <DialogHeader>
           <DialogTitle>{editing ? "Edit server" : "Add MCP server"}</DialogTitle>
         </DialogHeader>
+
+        {/* Paste-from-config: collapsible textarea that auto-detects format.
+            Only shown when adding a new server, not when editing. */}
+        {!editing && (
+          <div className="rounded-md border">
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 px-3 py-2 text-sm font-medium text-muted-foreground transition hover:text-foreground"
+              onClick={() => setShowPaste((v) => !v)}
+            >
+              {showPaste ? (
+                <ChevronDown className="size-4" />
+              ) : (
+                <ChevronRight className="size-4" />
+              )}
+              <ClipboardPaste className="size-4" />
+              Paste from client config
+            </button>
+            {showPaste && (
+              <div className="flex flex-col gap-2 border-t px-3 pb-3 pt-2">
+                <textarea
+                  className="min-h-[100px] w-full resize-y rounded-md bg-muted/50 p-2 font-mono text-xs"
+                  placeholder={"Paste a config snippet from any client:\n\n• Claude Code: claude mcp add-json ...\n• Cursor/Windsurf/Antigravity: {\"mcpServers\": ...}\n• VS Code: {\"servers\": ...}\n• Codex: [mcp_servers.name]\n• Zed: {\"context_servers\": ...}"}
+                  value={pasteText}
+                  onChange={(e) => setPasteText(e.target.value)}
+                />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="self-end"
+                  disabled={!pasteText.trim() || parsing}
+                  onClick={handleParse}
+                >
+                  {parsing ? "Parsing…" : "Parse & fill"}
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-col gap-4 py-2">
           <div className="flex flex-col gap-2">
             <Label htmlFor="srv-name">Name</Label>

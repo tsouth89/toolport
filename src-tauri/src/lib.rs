@@ -217,6 +217,21 @@ async fn import_servers(state: State<'_, RegistryState>) -> Result<Registry, Str
     Ok(reg.clone())
 }
 
+/// Parse a pasted config snippet and return the detected server(s) with
+/// env-var values included. Used by the Add Server dialog's "paste config" feature.
+#[tauri::command]
+fn parse_server_snippet(text: String) -> Result<Vec<clients::ParsedSnippetServer>, String> {
+    const MAX_SNIPPET_BYTES: usize = 256 * 1024;
+    if text.len() > MAX_SNIPPET_BYTES {
+        return Err(format!(
+            "Snippet is {} KB; limit is {} KB. Paste a single server config, not an entire file.",
+            text.len() / 1024,
+            MAX_SNIPPET_BYTES / 1024,
+        ));
+    }
+    clients::parse_snippet(&text)
+}
+
 #[tauri::command]
 fn add_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Registry, String> {
     let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1516,6 +1531,7 @@ pub fn run() {
             detect_clients,
             get_registry,
             import_servers,
+            parse_server_snippet,
             add_server,
             update_server,
             remove_server,

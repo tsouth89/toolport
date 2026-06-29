@@ -10,6 +10,7 @@ import type {
   McpResource,
   McpTool,
   MigrateResult,
+  ParsedSnippetServer,
   ProbeResult,
   Registry,
   SavingsSummary,
@@ -376,6 +377,11 @@ export function getRegistry(): Promise<Registry> {
 /** Pull servers from every detected client into the registry. */
 export function importServers(): Promise<Registry> {
   return invoke<Registry>("import_servers");
+}
+
+/** Parse a pasted config snippet (JSON/TOML/YAML/CLI), auto-detecting format. */
+export function parseServerSnippet(text: string): Promise<ParsedSnippetServer[]> {
+  return invoke<ParsedSnippetServer[]>("parse_server_snippet", { text });
 }
 
 export function addServer(entry: ServerEntry): Promise<Registry> {
