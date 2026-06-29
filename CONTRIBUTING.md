@@ -53,6 +53,21 @@ editing.
 - Frontend polish: empty states, error messages, keyboard shortcuts.
 - Tests for any of the above.
 
+## Sign your commits (DCO)
+
+Conduit uses the [Developer Certificate of Origin](https://developercertificate.org/)
+(DCO): a lightweight way to state that you wrote the contribution and have the
+right to submit it. There is **no copyright assignment**, you keep ownership of
+your work.
+
+Just add a `Signed-off-by` line to each commit with `git commit -s`:
+
+```
+Signed-off-by: Your Name <your@email.com>
+```
+
+That line means you agree to the DCO. That's all there is to it.
+
 ## Reporting issues
 
 Bugs and ideas are welcome in [Issues](https://github.com/tsouth89/conduit/issues).
@@ -61,4 +76,6 @@ For security problems, see [SECURITY.md](SECURITY.md) (report privately, please)
 ## License
 
 By contributing you agree your contributions are licensed under the repository's
-[MIT license](LICENSE).
+[MIT license](LICENSE), which is and will remain the license for this repo (the
+app and gateway). Conduit is open-core: the separate commercial Conduit Teams
+server, under its own license, is what funds this free and open core.

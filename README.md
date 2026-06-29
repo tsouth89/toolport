@@ -325,7 +325,8 @@ latency/error stats, resources + prompts proxying, and a tool playground. See
 
 ## License
 
-[MIT](LICENSE). The gateway and local manager are free and open source under an
-open-core model; planned team/enterprise features (shared/hosted gateway,
-RBAC/SSO, policy, audit export, secret-vault integrations) are a separate paid
-layer.
+[MIT](LICENSE), and the local app and gateway always will be. Conduit follows an
+open-core model: the desktop app and `conduit-gateway` are free and open source,
+and a separate commercial product, Conduit Teams (shared/hosted gateway, RBAC/SSO,
+policy, audit export, secret-vault integrations), funds the free app. Anything you
+contribute here is MIT and benefits everyone, see [CONTRIBUTING.md](CONTRIBUTING.md).
