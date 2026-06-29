@@ -9,6 +9,7 @@
     "updater:default",
     "process:allow-restart",
     "dialog:allow-save",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "deep-link:default"
   ]
 }

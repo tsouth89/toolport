@@ -335,6 +335,16 @@ export function shareStack(setupJson: string): Promise<string> {
   return invoke<string>("share_stack", { setupJson });
 }
 
+/** Fetch a shared setup's JSON by id (resolving a conduit://import?s=<id> link). */
+export function fetchSharedSetup(id: string): Promise<string> {
+  return invoke<string>("fetch_shared_setup", { id });
+}
+
+/** Claim a share id captured from a deep link before the UI was listening. */
+export function takePendingShared(): Promise<string | null> {
+  return invoke<string | null>("take_pending_shared");
+}
+
 /** Import a shared setup, adding servers not already present. */
 export function importConfig(json: string): Promise<Registry> {
   return invoke<Registry>("import_config", { json });

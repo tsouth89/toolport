@@ -1068,6 +1068,61 @@ async fn share_stack(setup_json: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Holds a share id captured from a conduit:// deep link that arrived before the
+/// UI was ready (cold start). The frontend claims it on mount.
+type PendingShare = Mutex<Option<String>>;
+
+/// Parse a conduit://import?s=<id> deep link into its share id. Tolerates an
+/// optional trailing slash after the host; the id must look like a share id.
+fn parse_share_url(url: &str) -> Option<String> {
+    let after = url.strip_prefix("conduit://")?;
+    let after = after.strip_prefix("import")?;
+    let query = after.trim_start_matches('/').strip_prefix('?')?;
+    query.split('&').find_map(|pair| {
+        let v = pair.strip_prefix("s=")?;
+        let id: String = v.chars().take(64).collect();
+        if !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            Some(id)
+        } else {
+            None
+        }
+    })
+}
+
+/// Resolve a shared-stack id (from a deep link) by fetching its setup JSON from
+/// the share service; the frontend then previews it like any other import.
+#[tauri::command]
+async fn fetch_shared_setup(id: String) -> Result<String, String> {
+    if id.is_empty() || id.len() > 32 || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("invalid share id".to_string());
+    }
+    let url = format!("{SHARE_ENDPOINT}?id={id}");
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+        let resp = ureq::get(&url)
+            .timeout(std::time::Duration::from_secs(20))
+            .call()
+            .map_err(|e| format!("couldn't reach the share service: {e}"))?;
+        let mut buf = Vec::new();
+        resp.into_reader()
+            .take(128 * 1024)
+            .read_to_end(&mut buf)
+            .map_err(|e| e.to_string())?;
+        String::from_utf8(buf).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Claim a share id captured from a deep link before the UI was listening.
+#[tauri::command]
+fn take_pending_shared(state: State<PendingShare>) -> Option<String> {
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
 /// Import a shared setup. Adds servers not already present (by name); secret
 /// values are never included, so each new server is left for the user to vault.
 #[tauri::command]
@@ -1394,12 +1449,22 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        // Single-instance must be registered first. With its `deep-link` feature
+        // a second launch carrying a conduit:// URL is forwarded to the deep-link
+        // plugin's on_open_url (set up below); here we just focus the window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(registry))
         .manage(Mutex::new(HttpBridge::default()))
+        .manage(PendingShare::default())
         .invoke_handler(tauri::generate_handler![
             detect_clients,
             get_registry,
@@ -1454,6 +1519,8 @@ pub fn run() {
             export_config,
             export_config_to_path,
             share_stack,
+            fetch_shared_setup,
+            take_pending_shared,
             import_config,
             read_setup_file,
             preview_import,
@@ -1466,6 +1533,33 @@ pub fn run() {
             // the gateway) back into the app and the UI, in a background thread.
             let handle = app.handle().clone();
             std::thread::spawn(move || watch_registry_for_app(handle));
+
+            // conduit://import?s=<id> deep links open the shared-stack import.
+            // The installer registers the scheme; we also register at runtime so
+            // it works unpackaged (dev). on_open_url fires on cold start and, via
+            // the single-instance plugin, for a second launch carrying the URL.
+            // Cold starts may arrive before the UI is listening, so the id is also
+            // stashed for the frontend to claim on mount (take_pending_shared).
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                let _ = app.deep_link().register("conduit");
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        if let Some(id) = parse_share_url(url.as_str()) {
+                            if let Some(st) = handle.try_state::<PendingShare>() {
+                                *st.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                    Some(id.clone());
+                            }
+                            if let Some(w) = handle.get_webview_window("main") {
+                                let _ = w.set_focus();
+                            }
+                            let _ = handle.emit("import-shared", id);
+                        }
+                    }
+                });
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -1575,6 +1669,24 @@ mod tests {
     fn import_rejects_garbage() {
         let mut reg = Registry::default();
         assert!(apply_import(&mut reg, "{not json").is_err());
+    }
+
+    #[test]
+    fn parse_share_url_extracts_id() {
+        assert_eq!(
+            parse_share_url("conduit://import?s=071g6i3h5f5g6h2i"),
+            Some("071g6i3h5f5g6h2i".to_string())
+        );
+        // Tolerate a trailing slash after the host, and pick s out of many params.
+        assert_eq!(
+            parse_share_url("conduit://import/?ref=x&s=abc123"),
+            Some("abc123".to_string())
+        );
+        // Reject the wrong action, missing id, and non-alphanumeric ids.
+        assert_eq!(parse_share_url("conduit://other?s=abc"), None);
+        assert_eq!(parse_share_url("conduit://import?x=1"), None);
+        assert_eq!(parse_share_url("conduit://import?s=../etc"), None);
+        assert_eq!(parse_share_url("https://example.com?s=abc"), None);
     }
 
     #[test]

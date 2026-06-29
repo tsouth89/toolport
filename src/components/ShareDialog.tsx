@@ -16,12 +16,15 @@ import { open as openFile, save } from "@tauri-apps/plugin-dialog";
 import {
   exportConfig,
   exportConfigToPath,
+  fetchSharedSetup,
   getRegistry,
   importConfig,
   previewImport,
   readSetupFile,
   shareStack,
+  takePendingShared,
 } from "@/lib/api";
+import { listen } from "@tauri-apps/api/event";
 import { isGatewayServer, type ImportItem, type Registry } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -190,6 +193,41 @@ export function ShareDialog({ trigger, onImported }: Props) {
       setBusyAction(null);
     }
   }
+
+  // Open the import review when a conduit://import?s=<id> deep link arrives (the
+  // share page's "Open in Conduit" button), including one captured before mount.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    async function openShared(id: string) {
+      try {
+        const json = await fetchSharedSetup(id);
+        if (cancelled) return;
+        setOpen(true);
+        await startPreview(json, "preview-paste");
+      } catch (e) {
+        toastError(`Couldn't open that shared stack: ${e}`);
+      }
+    }
+    takePendingShared()
+      .then((id) => {
+        if (id && !cancelled) openShared(id);
+      })
+      .catch(() => {});
+    listen<string>("import-shared", (event) => {
+      if (event.payload) openShared(event.payload);
+    })
+      .then((un) => {
+        if (cancelled) un();
+        else unlisten = un;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const newCount = preview?.filter((i) => i.isNew).length ?? 0;
 
