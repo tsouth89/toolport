@@ -5,6 +5,32 @@ All notable changes to Conduit are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-29
+
+### Added
+- **Stacks: role-based server bundles.** Pick what you work on (full-stack web,
+  backend & data, infra & DevOps, AI & ML, product & design, founder, research)
+  and Conduit sets up a matching set of MCP servers in one click. Stacks appear at
+  the top of the Catalog, and the first-run wizard now leads with a "What do you
+  work on?" picker. Each server that needs a credential shows a direct "get key"
+  link to the right token page.
+- **Selective sharing.** Share a chosen subset of your servers as a stack instead
+  of your whole setup (secrets still stripped; the recipient previews before
+  importing).
+- **Roo Code plugin-hosted server detection.** Conduit now surfaces Roo Code's
+  plugin-provided MCP servers (read-only), matching the existing Cursor behavior.
+  Thanks @leemeo3 (#50).
+- **New catalog servers:** Linode (Akamai) cloud, and Qdrant (vector store for RAG).
+
+### Fixed
+- The scoped-client scope picker in Settings rendered an unthemed white dropdown
+  in dark mode; it now uses the app's themed select.
+
+### Internal
+- Groundwork for concurrent tool routing (per-server interior mutability in the
+  router; no behavior change yet), and a fix for an XDG env race that could flake
+  a path test on CI.
+
 ## [0.8.0] - 2026-06-28
 
 ### Added
