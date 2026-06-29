@@ -5,11 +5,14 @@ All notable changes to Conduit are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-29
+
 ### Added
-- **Share a stack as a link.** The Share dialog can now turn your selected
-  servers into a `conduitmcp.app/s/...` link. The page unfolds the stack with a
-  rich preview card and an "Open in Conduit" action; secrets are never included.
-  Copy and paste still work for offline sharing.
+- **Share a stack as a link.** The Share dialog turns your selected servers into
+  a `conduitmcp.app/s/...` link. The page unfolds the stack with a rich preview
+  card, and its "Open in Conduit" button deep-links straight into the import
+  review (with a copy-the-code fallback). Secrets are never included, and copy /
+  save-to-file still work for offline sharing.
 
 ## [0.9.0] - 2026-06-29
 
