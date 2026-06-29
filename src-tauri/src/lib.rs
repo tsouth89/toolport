@@ -1205,6 +1205,32 @@ fn preview_import(state: State<RegistryState>, json: String) -> Result<Vec<Impor
         .collect())
 }
 
+/// True when a command argument looks like it carries a secret: an inline
+/// credential param (password=, token=, ...) or a connection URI with embedded
+/// userinfo (scheme://user:pass@host). Used to redact args before sharing, since
+/// some servers (e.g. Postgres) take a connection string with a password in args.
+/// Biased toward over-redacting: for a share, a false positive is harmless.
+fn arg_looks_secret(arg: &str) -> bool {
+    let lower = arg.to_ascii_lowercase();
+    const NEEDLES: [&str; 8] = [
+        "password=", "pwd=", "token=", "apikey=", "api_key=", "secret=", "accountkey=",
+        "access_key",
+    ];
+    if NEEDLES.iter().any(|n| lower.contains(n)) {
+        return true;
+    }
+    // A connection URI with embedded userinfo: scheme://user:pass@host/...
+    if let Some((_, rest)) = arg.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        if let Some((userinfo, _host)) = authority.rsplit_once('@') {
+            if userinfo.contains(':') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Build a shareable setup document: server definitions only, with the gateway
 /// entry excluded and every secret value stripped. Pure, so the never-leak-a-key
 /// invariant is testable without Tauri state.
@@ -1233,6 +1259,14 @@ fn build_export(
             s.id = String::new();
             for e in &mut s.env {
                 e.value = None; // never share env values
+            }
+            // Some servers take credentials inline in args (e.g. a Postgres
+            // connection string with a password). Redact those too, so a shared
+            // setup never leaks a secret the env-stripping above wouldn't catch.
+            for a in &mut s.args {
+                if arg_looks_secret(a) {
+                    *a = "<redacted>".to_string();
+                }
             }
             s
         })
@@ -1660,6 +1694,46 @@ mod tests {
         assert_eq!(subset["servers"].as_array().unwrap().len(), 1);
         let empty = build_export(&reg, None, None, Some(&["does-not-exist".to_string()]));
         assert_eq!(empty["servers"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn export_redacts_inline_secret_args() {
+        // The connection-URI and inline-credential heuristics.
+        assert!(arg_looks_secret("postgresql://admin:hunter2@db.example.com:5432/app"));
+        assert!(arg_looks_secret("--dsn=postgres://u:p@h/db"));
+        assert!(arg_looks_secret("PASSWORD=hunter2"));
+        assert!(arg_looks_secret("Authorization: token=abc123"));
+        // Legitimate args must NOT be redacted.
+        assert!(!arg_looks_secret("-y"));
+        assert!(!arg_looks_secret("@modelcontextprotocol/server-postgres"));
+        assert!(!arg_looks_secret("--stdio"));
+        assert!(!arg_looks_secret("https://api.githubcopilot.com/mcp/")); // no userinfo
+
+        let mut reg = Registry::default();
+        reg.add_server(ServerEntry {
+            id: "pg".into(),
+            name: "PostgreSQL".into(),
+            transport: "stdio".into(),
+            command: Some("npx".into()),
+            args: vec![
+                "-y".into(),
+                "@modelcontextprotocol/server-postgres".into(),
+                "postgresql://admin:hunter2@db.example.com:5432/app".into(),
+            ],
+            env: vec![],
+            url: None,
+            source: None,
+            disabled_tools: vec![],
+        });
+        let doc = build_export(&reg, None, None, None);
+        let serialized = serde_json::to_string(&doc).unwrap();
+        // The password must never appear in a shared setup.
+        assert!(!serialized.contains("hunter2"));
+        let args = doc["servers"][0]["args"].as_array().unwrap();
+        // Benign args are kept; only the credential-bearing one is redacted.
+        assert_eq!(args[0], "-y");
+        assert_eq!(args[1], "@modelcontextprotocol/server-postgres");
+        assert_eq!(args[2], "<redacted>");
     }
 
     #[test]
