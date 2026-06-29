@@ -885,14 +885,13 @@ fn extract_claude_cli(input: &str) -> Option<(String, String)> {
     let name = before
         .split_whitespace()
         .map(|tok| tok.trim_matches(|c| c == '\'' || c == '"'))
-        .filter(|tok| {
+        .rfind(|tok| {
             !tok.eq_ignore_ascii_case("claude")
                 && !tok.eq_ignore_ascii_case("mcp")
                 && !tok.eq_ignore_ascii_case("add-json")
                 && !tok.starts_with("--")
                 && !tok.is_empty()
         })
-        .last()
         .map(String::from);
 
     Some((name.unwrap_or_default(), json_str.to_string()))
