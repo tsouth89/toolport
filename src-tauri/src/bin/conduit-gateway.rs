@@ -32,10 +32,10 @@ use conduit_lib::downstream::{DownstreamServer, StdioTransport, PROTOCOL_VERSION
 use conduit_lib::integrity;
 use conduit_lib::registry::{self, Registry, ServerEntry};
 use conduit_lib::remote;
-use conduit_lib::router::{sanitize_segment, Router, ToolPolicy};
+use conduit_lib::router::{is_destructive, sanitize_segment, Router, ToolPolicy};
 use conduit_lib::savings;
-use conduit_lib::semantic;
 use conduit_lib::secrets;
+use conduit_lib::semantic;
 use conduit_lib::shaping;
 
 fn success(id: Value, result: Value) -> Value {
@@ -128,6 +128,24 @@ fn call_tool_def() -> Value {
     })
 }
 
+fn confirm_tool_def() -> Value {
+    json!({
+        "name": "conduit_confirm",
+        "description": "Confirm and execute a destructive tool call that was intercepted for review. \
+            When Conduit blocks a destructive call, it returns a preview with a `token`. \
+            Call this with that token to proceed. The original arguments are replayed exactly \
+            — you cannot change them. The token expires after 60 seconds.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "token": { "type": "string", "description": "The confirmation token from the intercepted call's response." }
+            },
+            "required": ["token"],
+            "additionalProperties": false
+        }
+    })
+}
+
 fn fetch_result_tool_def() -> Value {
     json!({
         "name": "conduit_fetch_result",
@@ -195,13 +213,18 @@ fn set_server_enabled_via_agent(
     enable: bool,
 ) -> Result<String, String> {
     if !reg.allow_agent_control {
-        return Err("Conduit: agent control is off. The user must turn on \"Allow agent control\" \
+        return Err(
+            "Conduit: agent control is off. The user must turn on \"Allow agent control\" \
             in Conduit before an agent can enable or disable servers."
-            .to_string());
+                .to_string(),
+        );
     }
     let target = target.trim();
     if target.is_empty() {
-        return Err("Conduit: pass the `server` id or name to change (run conduit_status for the list).".to_string());
+        return Err(
+            "Conduit: pass the `server` id or name to change (run conduit_status for the list)."
+                .to_string(),
+        );
     }
     let server = reg
         .servers
@@ -209,7 +232,10 @@ fn set_server_enabled_via_agent(
         .find(|s| s.id.eq_ignore_ascii_case(target) || s.name.eq_ignore_ascii_case(target))
         .ok_or_else(|| {
             let known: Vec<&str> = reg.servers.iter().map(|s| s.name.as_str()).collect();
-            format!("Conduit: no server matches \"{target}\". Known servers: {}.", known.join(", "))
+            format!(
+                "Conduit: no server matches \"{target}\". Known servers: {}.",
+                known.join(", ")
+            )
         })?;
     let server_id = server.id.clone();
     let server_name = server.name.clone();
@@ -226,7 +252,10 @@ fn set_server_enabled_via_agent(
         return Err("Conduit: agent control is off.".to_string());
     }
     if fresh.is_enabled(&profile_id, &server_id) == enable {
-        return Ok(format!("{server_name} is already {}.", if enable { "on" } else { "off" }));
+        return Ok(format!(
+            "{server_name} is already {}.",
+            if enable { "on" } else { "off" }
+        ));
     }
     fresh.set_server_enabled(&profile_id, &server_id, enable)?;
     registry::save_to(path, &fresh)
@@ -344,17 +373,110 @@ fn search_tokens(text: &str) -> Vec<String> {
 /// etc.), only function words and description boilerplate. Checked pre-stem.
 const STOPWORDS: &[&str] = &[
     // function words
-    "an", "the", "and", "or", "but", "if", "of", "to", "for", "in", "on", "at", "by",
-    "with", "from", "into", "as", "is", "are", "be", "was", "were", "this", "that",
-    "these", "those", "it", "its", "you", "your", "their", "them", "they", "we", "our",
-    "us", "can", "will", "would", "should", "could", "may", "might", "do", "does", "did",
-    "has", "have", "had", "not", "no", "all", "any", "each", "more", "most", "some",
-    "such", "than", "then", "there", "here", "when", "where", "what", "which", "who",
-    "whom", "how", "why", "also", "just", "only", "via", "per", "out", "off", "over",
-    "under", "about", "between", "after", "before", "during", "while", "both", "either",
+    "an",
+    "the",
+    "and",
+    "or",
+    "but",
+    "if",
+    "of",
+    "to",
+    "for",
+    "in",
+    "on",
+    "at",
+    "by",
+    "with",
+    "from",
+    "into",
+    "as",
+    "is",
+    "are",
+    "be",
+    "was",
+    "were",
+    "this",
+    "that",
+    "these",
+    "those",
+    "it",
+    "its",
+    "you",
+    "your",
+    "their",
+    "them",
+    "they",
+    "we",
+    "our",
+    "us",
+    "can",
+    "will",
+    "would",
+    "should",
+    "could",
+    "may",
+    "might",
+    "do",
+    "does",
+    "did",
+    "has",
+    "have",
+    "had",
+    "not",
+    "no",
+    "all",
+    "any",
+    "each",
+    "more",
+    "most",
+    "some",
+    "such",
+    "than",
+    "then",
+    "there",
+    "here",
+    "when",
+    "where",
+    "what",
+    "which",
+    "who",
+    "whom",
+    "how",
+    "why",
+    "also",
+    "just",
+    "only",
+    "via",
+    "per",
+    "out",
+    "off",
+    "over",
+    "under",
+    "about",
+    "between",
+    "after",
+    "before",
+    "during",
+    "while",
+    "both",
+    "either",
     // MCP-description boilerplate
-    "purpose", "returns", "return", "use", "used", "uses", "using", "note", "notes",
-    "example", "examples", "optional", "required", "param", "params", "parameter",
+    "purpose",
+    "returns",
+    "return",
+    "use",
+    "used",
+    "uses",
+    "using",
+    "note",
+    "notes",
+    "example",
+    "examples",
+    "optional",
+    "required",
+    "param",
+    "params",
+    "parameter",
     "parameters",
 ];
 
@@ -377,7 +499,9 @@ fn index_tokens(text: &str) -> Vec<String> {
 /// "mail" finds an "email" tool and "get" finds a "list" tool. Empty if none.
 fn synonym_group(token: &str) -> &'static [&'static str] {
     const GROUPS: &[&[&str]] = &[
-        &["list", "get", "fetch", "show", "read", "find", "search", "view"],
+        &[
+            "list", "get", "fetch", "show", "read", "find", "search", "view",
+        ],
         &["create", "add", "new", "make", "insert"],
         &["delete", "remove", "destroy", "drop"],
         &["update", "edit", "modify", "change", "set"],
@@ -659,7 +783,9 @@ fn enabled_summary(
     let servers: Vec<_> = reg
         .servers
         .iter()
-        .filter(|s| !clients::is_gateway_server(s) && visible.contains(sanitize_segment(&s.id).as_str()))
+        .filter(|s| {
+            !clients::is_gateway_server(s) && visible.contains(sanitize_segment(&s.id).as_str())
+        })
         .collect();
     let header = match allowed {
         Some(_) => "Servers available to this client".to_string(),
@@ -676,13 +802,19 @@ fn enabled_summary(
             (None, Some(url)) => url.clone(),
             _ => "(none)".to_string(),
         };
-        out.push_str(&format!("- {} [{}] {}\n", s.name, s.transport, target.trim()));
+        out.push_str(&format!(
+            "- {} [{}] {}\n",
+            s.name,
+            s.transport,
+            target.trim()
+        ));
     }
 
     // Tool counts by server prefix, from the live catalog, gated by the same
     // visible set so a scoped client never sees another tenant's tool counts.
     if !cached.is_empty() {
-        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
         for t in cached {
             let prefix = tool_prefix(t);
             if !prefix.is_empty() && visible.contains(prefix.as_str()) {
@@ -731,7 +863,9 @@ fn savings_line() -> String {
         dollars
     );
     if peak > 3 {
-        line.push_str(&format!("; the biggest catalog collapsed {peak} tools to 3"));
+        line.push_str(&format!(
+            "; the biggest catalog collapsed {peak} tools to 3"
+        ));
     }
     line.push_str(".\n");
     line
@@ -753,6 +887,71 @@ struct SearchGuard {
     last_top: Option<String>,
     /// How many consecutive searches returned that same top result.
     repeats: u32,
+}
+
+/// Per-call confirmation state for destructive tools. When `confirm_destructive`
+/// is on, the first call to a destructive tool returns a preview with a token;
+/// `conduit_confirm { token }` replays the stored call. Entries expire after 60s.
+struct ConfirmGuard {
+    /// Pending confirmations: token → the exact call to replay.
+    pending: std::collections::HashMap<String, PendingCall>,
+}
+
+/// A stored destructive call awaiting confirmation.
+struct PendingCall {
+    /// The full tool name (e.g. `stripe__delete_customer`).
+    name: String,
+    /// The exact arguments from the preview call (serialized for replay).
+    arguments: Value,
+    /// When this entry was created (for expiry).
+    created: Instant,
+}
+
+const CONFIRM_TTL: Duration = Duration::from_secs(60);
+
+impl ConfirmGuard {
+    fn new() -> Self {
+        Self {
+            pending: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Generate a cryptographically random 32-char hex token (128 bits of
+    /// entropy via `getrandom`'s OS CSPRNG). Consistent with the codebase's
+    /// own bearer-token convention. No silent fallback: a CSPRNG failure is a
+    /// hard system error, not something to paper over on a security gate.
+    fn new_token() -> String {
+        let mut buf = [0u8; 16];
+        getrandom::getrandom(&mut buf).expect("CSPRNG unavailable");
+        buf.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Store a pending call and return its confirmation token.
+    fn store(&mut self, name: String, arguments: Value) -> String {
+        // Evict expired entries to prevent unbounded growth.
+        let cutoff = Instant::now() - CONFIRM_TTL;
+        self.pending.retain(|_, v| v.created > cutoff);
+        let token = Self::new_token();
+        self.pending.insert(
+            token.clone(),
+            PendingCall {
+                name,
+                arguments,
+                created: Instant::now(),
+            },
+        );
+        token
+    }
+
+    /// Consume a confirmation token, returning the stored call if valid.
+    /// Returns None if the token doesn't exist or has expired.
+    fn take(&mut self, token: &str) -> Option<(String, Value)> {
+        let entry = self.pending.remove(token)?;
+        if entry.created.elapsed() > CONFIRM_TTL {
+            return None; // expired
+        }
+        Some((entry.name, entry.arguments))
+    }
 }
 
 /// Escalate once the SAME top tool has come back this many times in a row: the
@@ -858,7 +1057,12 @@ fn resource_stem(param: &str) -> String {
 /// for a value it's missing. When `resource` is given (e.g. "team" for a missing
 /// teamId), tools whose name mentions it rank first. General across every
 /// server; only the gateway can do this because it holds the whole catalog.
-fn source_tool_hints(catalog: &[Value], server: &str, resource: Option<&str>, max: usize) -> Vec<String> {
+fn source_tool_hints(
+    catalog: &[Value],
+    server: &str,
+    resource: Option<&str>,
+    max: usize,
+) -> Vec<String> {
     let prefix = format!("{server}__");
     let mut hits: Vec<(bool, String)> = catalog
         .iter()
@@ -977,6 +1181,7 @@ fn handle_request(
     lazy: bool,
     profile: Option<&str>,
     guard: &mut SearchGuard,
+    confirm: &mut ConfirmGuard,
     allowed: Option<&std::collections::HashSet<String>>,
 ) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -1023,6 +1228,11 @@ fn handle_request(
                     tools.push(enable_server_tool_def());
                     tools.push(disable_server_tool_def());
                 }
+                // The confirm tool is advertised only while confirmation is on,
+                // so an agent can't see it (and attempt to call it) otherwise.
+                if reg.confirm_destructive {
+                    tools.push(confirm_tool_def());
+                }
                 // Record what lazy discovery kept out of the client's context: the
                 // full catalog we'd otherwise serve (status + every downstream tool)
                 // minus these 3 meta-tools. Estimating over the cached slice avoids
@@ -1049,6 +1259,10 @@ fn handle_request(
                 return Some(success(id, json!({ "tools": tools })));
             }
             let mut tools = vec![status_tool_def(), fetch_result_tool_def()];
+            // The confirm tool is advertised only while confirmation is on.
+            if reg.confirm_destructive {
+                tools.push(confirm_tool_def());
+            }
             // Prefer the cached catalog (instant); fall back to the live router.
             // Scope to the client's allowed servers (a no-op when unscoped), so a
             // registered HTTP client only ever sees its own servers' tools.
@@ -1067,14 +1281,22 @@ fn handle_request(
         }
         "tools/call" => {
             let params = req.get("params");
-            let name = params
+            // `name`/`arguments` are mutable so the conduit_confirm handler
+            // below can swap in the stored (confirmed) call and fall through to
+            // the normal routing code instead of returning early.
+            let mut name = params
                 .and_then(|p| p.get("name"))
                 .and_then(|n| n.as_str())
-                .unwrap_or("");
-            let arguments = params
+                .unwrap_or("")
+                .to_string();
+            let mut arguments = params
                 .and_then(|p| p.get("arguments"))
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            // True when this call arrived via conduit_confirm (the stored call
+            // was already reviewed). Skips the destructive-interception check
+            // below so the confirmed call isn't re-intercepted in a loop.
+            let mut confirmed = false;
 
             // Anything other than a search breaks the search-thrash streak.
             if name != "conduit_search_tools" {
@@ -1083,11 +1305,51 @@ fn handle_request(
             }
 
             if name == "conduit_fetch_result" {
-                let cursor = arguments.get("cursor").and_then(|v| v.as_str()).unwrap_or("");
-                let offset =
-                    arguments.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let cursor = arguments
+                    .get("cursor")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let offset = arguments
+                    .get("offset")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
                 let len = arguments.get("len").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 return Some(success(id, shaping::fetch_result(cursor, offset, len)));
+            }
+
+            // conduit_confirm: replay a previously-intercepted destructive call.
+            // On a valid token, overwrite `name`/`arguments` with the stored call
+            // and fall through to the normal routing below (no early return).
+            if name == "conduit_confirm" {
+                let token = arguments
+                    .get("token")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if token.is_empty() {
+                    return Some(success(
+                        id,
+                        json!({
+                            "content": [{ "type": "text", "text": "Conduit: pass the `token` from the intercepted call's preview." }],
+                            "isError": true
+                        }),
+                    ));
+                }
+                match confirm.take(token) {
+                    Some((confirmed_name, confirmed_args)) => {
+                        name = confirmed_name;
+                        arguments = confirmed_args;
+                        confirmed = true;
+                    }
+                    None => {
+                        return Some(success(
+                            id,
+                            json!({
+                                "content": [{ "type": "text", "text": "Conduit: token expired or invalid. Call the tool again to get a new preview." }],
+                                "isError": true
+                            }),
+                        ));
+                    }
+                }
             }
 
             if name == "conduit_status" {
@@ -1127,8 +1389,12 @@ fn handle_request(
                 // Semantic re-ranking if the user has configured it (off by default;
                 // falls back to lexical on any failure).
                 let s = &reg.semantic_search;
-                let sem_cfg =
-                    semantic::SemanticConfig::resolve(s.enabled, s.endpoint.clone(), s.model.clone(), s.blend);
+                let sem_cfg = semantic::SemanticConfig::resolve(
+                    s.enabled,
+                    s.endpoint.clone(),
+                    s.model.clone(),
+                    s.blend,
+                );
                 let (mut matches, total) =
                     search_catalog_with(source, query, server, limit, Some(&sem_cfg));
                 let scope = server
@@ -1169,7 +1435,9 @@ fn handle_request(
                     String::new()
                 };
                 let omitted = matches.iter().any(|m| {
-                    m.get("schemaOmitted").and_then(|v| v.as_bool()).unwrap_or(false)
+                    m.get("schemaOmitted")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
                 });
                 // Note only clarifies the OMITTED (non-top) results need a follow-up;
                 // the first result always carries its schema, so it never does.
@@ -1218,7 +1486,10 @@ fn handle_request(
 
             if name == "conduit_enable_server" || name == "conduit_disable_server" {
                 let enable = name == "conduit_enable_server";
-                let target = arguments.get("server").and_then(|v| v.as_str()).unwrap_or("");
+                let target = arguments
+                    .get("server")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let result = match registry::resolved_path() {
                     Some(p) => set_server_enabled_via_agent(reg, profile, &p, target, enable),
                     None => Err("Conduit: could not locate the registry file.".to_string()),
@@ -1238,7 +1509,7 @@ fn handle_request(
             let (name, arguments) = if name == "conduit_call_tool" {
                 unwrap_call_tool(&arguments)
             } else {
-                (name.to_string(), arguments)
+                (name, arguments)
             };
             let name = name.as_str();
 
@@ -1270,7 +1541,10 @@ fn handle_request(
                 let source = if hints.is_empty() {
                     format!("call a list or get tool on the '{srv}' server")
                 } else {
-                    format!("call one of these on the '{srv}' server first: {}", hints.join(", "))
+                    format!(
+                        "call one of these on the '{srv}' server first: {}",
+                        hints.join(", ")
+                    )
                 };
                 let msg = format!(
                     "Conduit: \"{value}\" for \"{param}\" looks like a placeholder, not a real \
@@ -1283,6 +1557,55 @@ fn handle_request(
                 ));
             }
 
+            // Per-call confirmation for destructive tools: intercept the first
+            // call with these arguments, store it, and return a preview. The
+            // agent calls conduit_confirm { token } to replay the stored call.
+            // This runs AFTER the placeholder guard (so a placeholder never
+            // gets a token) and BEFORE the actual route_call (so a destructive
+            // call never reaches the downstream server unconfirmed).
+            // Skip when `confirmed` is true: the call arrived via conduit_confirm
+            // and was already reviewed (prevents re-interception loop).
+            if reg.confirm_destructive && !confirmed {
+                // Look up the tool in the catalog to check destructiveHint.
+                // Fall back to the live router when the cache is cold/stale,
+                // matching the pattern used by tools/list and conduit_search.
+                let agg;
+                let catalog: &[Value] = if cached.is_empty() {
+                    agg = router.aggregated_tools();
+                    &agg
+                } else {
+                    cached
+                };
+                let dest = catalog.iter().any(|t| {
+                    t.get("name").and_then(|n| n.as_str()) == Some(name) && is_destructive(t)
+                });
+                if dest {
+                    let token = confirm.store(name.to_string(), arguments.clone());
+                    let args_pretty = serde_json::to_string_pretty(&arguments).unwrap_or_default();
+                    let msg = format!(
+                        "⚠️ Destructive action intercepted.\n\nTool: {name}\nArguments:\n{args_pretty}\n\n\
+                         Review the arguments above carefully. If correct, call conduit_confirm \
+                         with token: {token}\n\
+                         The token expires in 60 seconds. The original arguments will be replayed \
+                         exactly."
+                    );
+                    audit::record_timed(
+                        srv,
+                        tool,
+                        false,
+                        None,
+                        Some("destructive call intercepted — awaiting confirmation"),
+                    );
+                    return Some(success(
+                        id,
+                        json!({
+                            "content": [{ "type": "text", "text": msg }],
+                            "isError": true
+                        }),
+                    ));
+                }
+            }
+
             let started = Instant::now();
             match router.route_call(name, arguments) {
                 Ok(mut result) => {
@@ -1293,7 +1616,11 @@ fn handle_request(
                     let ms = started.elapsed().as_millis() as u64;
                     // Capture the failure message (the result's text) before shaping
                     // rewrites the content, so Activity can show why the call failed.
-                    let err = if ok { None } else { Some(content_text(&result)) };
+                    let err = if ok {
+                        None
+                    } else {
+                        Some(content_text(&result))
+                    };
                     audit::record_timed(srv, tool, ok, Some(ms), err.as_deref());
                     // Content defense: scan this untrusted tool output for injection
                     // and label any flagged text as data before it reaches the agent.
@@ -1494,7 +1821,9 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 }
 
 fn notify_tools_changed(stdout: &Arc<Mutex<std::io::Stdout>>) {
-    let mut out = stdout.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut out = stdout
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _ = writeln!(
         out,
         "{}",
@@ -1538,7 +1867,9 @@ fn persist_and_emit(
     profile: Option<&str>,
 ) {
     if !tools.is_empty() {
-        *cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = tools.to_vec();
+        *cached_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = tools.to_vec();
         save_tool_cache(tools, profile);
     }
     notify_tools_changed(stdout);
@@ -1580,7 +1911,9 @@ fn gtrace(msg: &str) {
 /// Best-effort: a read/rewrite race between concurrent gateways at worst drops a
 /// few diagnostic lines, which is fine for a log.
 fn trim_log_if_large(path: &Path) {
-    let over = std::fs::metadata(path).map(|m| m.len() > GATEWAY_LOG_CAP).unwrap_or(false);
+    let over = std::fs::metadata(path)
+        .map(|m| m.len() > GATEWAY_LOG_CAP)
+        .unwrap_or(false);
     if !over {
         return;
     }
@@ -1605,7 +1938,13 @@ fn tool_cache_path(profile: Option<&str>) -> Option<PathBuf> {
         Some(p) if !p.is_empty() => {
             let slug: String = p
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
                 .collect();
             format!("tool-cache-{slug}.json")
         }
@@ -1676,10 +2015,15 @@ fn watch_registry(
             };
             last = current;
             // Build the new router (spawns processes) before taking locks.
-            let new_router = build_router(&new_reg, profile.as_deref(), http_mode, &downstream_dirty);
+            let new_router =
+                build_router(&new_reg, profile.as_deref(), http_mode, &downstream_dirty);
             let tools = new_router.aggregated_tools();
-            *registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_reg;
-            *router.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_router;
+            *registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = new_reg;
+            *router
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = new_router;
             maybe_check_integrity(&registry, &tools, profile.as_deref());
             persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
             eprintln!("conduit: registry changed, sent tools/list_changed");
@@ -1689,7 +2033,9 @@ fn watch_registry(
             // session-scoped change (the usual reason a server sends this) would
             // be lost by a fresh process that never saw it.
             let tools = {
-                let mut r = router.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut r = router
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 r.refresh_tools();
                 r.aggregated_tools()
             };
@@ -1733,6 +2079,7 @@ fn process_request(
     state: &GatewayState,
     req: &Value,
     guard: &mut SearchGuard,
+    confirm: &mut ConfirmGuard,
     allowed: Option<&std::collections::HashSet<String>>,
 ) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -1769,7 +2116,12 @@ fn process_request(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let built = build_router(&reg, state.profile.as_deref(), state.http, &state.downstream_dirty);
+        let built = build_router(
+            &reg,
+            state.profile.as_deref(),
+            state.http,
+            &state.downstream_dirty,
+        );
         if built.server_count() > 0 {
             let tools = built.aggregated_tools();
             *state
@@ -1817,6 +2169,7 @@ fn process_request(
         state.lazy,
         state.profile.as_deref(),
         guard,
+        confirm,
         allowed,
     )
 }
@@ -1929,7 +2282,13 @@ fn openapi_spec(
             .get("inputSchema")
             .cloned()
             .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
-        let summary: String = desc.lines().next().unwrap_or(name).chars().take(80).collect();
+        let summary: String = desc
+            .lines()
+            .next()
+            .unwrap_or(name)
+            .chars()
+            .take(80)
+            .collect();
         paths.insert(
             format!("/{name}"),
             json!({
@@ -2036,6 +2395,7 @@ fn result_text(resp: &Value) -> String {
 fn handle_http(
     state: &GatewayState,
     guard: &mut SearchGuard,
+    confirm: &mut ConfirmGuard,
     method: &str,
     path: &str,
     body: &str,
@@ -2083,7 +2443,7 @@ fn handle_http(
                 "method": "tools/call",
                 "params": { "name": name, "arguments": args }
             });
-            match process_request(state, &req, guard, allowed) {
+            match process_request(state, &req, guard, confirm, allowed) {
                 Some(resp) => {
                     if let Some(err) = resp.get("error") {
                         let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("error");
@@ -2184,7 +2544,9 @@ fn serve_http(state: GatewayState, port: u16) {
             let state6 = state.clone();
             let token6 = token.clone();
             std::thread::spawn(move || serve_http_loop(server6, state6, token6));
-            glog(&format!("HTTP/OpenAPI also listening on http://[::1]:{port}"));
+            glog(&format!(
+                "HTTP/OpenAPI also listening on http://[::1]:{port}"
+            ));
         }
     }
 
@@ -2199,7 +2561,9 @@ fn serve_http(state: GatewayState, port: u16) {
         "HTTP/OpenAPI mode on http://{host}:{port} (auth={})",
         token.is_some()
     ));
-    eprintln!("conduit-gateway: HTTP/OpenAPI on http://localhost:{port}  (OpenAPI spec at /openapi.json)");
+    eprintln!(
+        "conduit-gateway: HTTP/OpenAPI on http://localhost:{port}  (OpenAPI spec at /openapi.json)"
+    );
     serve_http_loop(server, state, token);
 }
 
@@ -2208,6 +2572,7 @@ fn serve_http(state: GatewayState, port: u16) {
 /// sockets serve identically.
 fn serve_http_loop(server: tiny_http::Server, state: GatewayState, token: Option<String>) {
     let mut guard = SearchGuard::default();
+    let mut confirm = ConfirmGuard::new();
     for mut request in server.incoming_requests() {
         let method = request.method().to_string().to_uppercase();
         let url = request.url().to_string();
@@ -2280,7 +2645,15 @@ fn serve_http_loop(server: tiny_http::Server, state: GatewayState, token: Option
                     }
                     // A panic in a handler must return 500, not kill the listener.
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        handle_http(&state, &mut guard, &method, &path, &body, allowed.as_ref())
+                        handle_http(
+                            &state,
+                            &mut guard,
+                            &mut confirm,
+                            &method,
+                            &path,
+                            &body,
+                            allowed.as_ref(),
+                        )
                     }))
                     .unwrap_or((
                         500,
@@ -2432,7 +2805,10 @@ fn main() {
     let downstream_dirty = Arc::new(AtomicBool::new(false));
     glog(&format!(
         "loaded tool cache: {} tools",
-        cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+        cached_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     ));
 
     {
@@ -2444,7 +2820,10 @@ fn main() {
         let downstream_dirty = Arc::clone(&downstream_dirty);
         let profile = profile.clone();
         std::thread::spawn(move || {
-            let reg = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            let reg = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let built = build_router(&reg, profile.as_deref(), http_mode, &downstream_dirty);
             let tools = built.aggregated_tools();
             glog(&format!(
@@ -2452,12 +2831,16 @@ fn main() {
                 tools.len(),
                 built.server_count()
             ));
-            *router.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = built;
+            *router
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = built;
             // Don't let a transient empty build (registry caught mid-write, or
             // every downstream momentarily unreachable) clobber a good catalog -
             // that's what leaves a client showing only conduit_status.
             if !tools.is_empty() {
-                *cached_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = tools.clone();
+                *cached_tools
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = tools.clone();
                 save_tool_cache(&tools, profile.as_deref());
             } else {
                 glog("background build was empty; keeping previous tool cache");
@@ -2511,6 +2894,7 @@ fn main() {
 
     let stdin = std::io::stdin();
     let mut search_guard = SearchGuard::default();
+    let mut confirm_guard = ConfirmGuard::new();
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
@@ -2528,7 +2912,7 @@ fn main() {
             "request: {}",
             req.get("method").and_then(|m| m.as_str()).unwrap_or("")
         ));
-        let response = process_request(&state, &req, &mut search_guard, None);
+        let response = process_request(&state, &req, &mut search_guard, &mut confirm_guard, None);
         if let Some(resp) = response {
             let mut out = state
                 .stdout
@@ -2604,12 +2988,15 @@ mod tests {
         assert_eq!(spec.pointer("/servers/0/url").unwrap(), "/");
         // The bearer scheme is advertised and required globally.
         assert_eq!(
-            spec.pointer("/components/securitySchemes/bearerAuth/scheme").unwrap(),
+            spec.pointer("/components/securitySchemes/bearerAuth/scheme")
+                .unwrap(),
             "bearer"
         );
         assert!(spec.pointer("/security/0/bearerAuth").is_some());
         // The shared Error schema the non-2xx responses reference exists.
-        assert!(spec.pointer("/components/schemas/Error/properties/error").is_some());
+        assert!(spec
+            .pointer("/components/schemas/Error/properties/error")
+            .is_some());
     }
 
     #[test]
@@ -2622,7 +3009,10 @@ mod tests {
             ("apiKey", "REPLACE_ME"),
             ("teamId", "team_id_here"),
         ] {
-            assert!(looks_like_placeholder(param, val), "should flag {param}={val:?}");
+            assert!(
+                looks_like_placeholder(param, val),
+                "should flag {param}={val:?}"
+            );
         }
         // Field-name / schema-type echoes are placeholders ONLY for an
         // identifier-typed parameter.
@@ -2645,7 +3035,10 @@ mod tests {
         }
         // Real values are never flagged, identifier or not.
         for real in ["team_aBc123XYZ", "acme-prod", "my real project", "", "  "] {
-            assert!(!looks_like_placeholder("teamId", real), "should NOT flag {real:?}");
+            assert!(
+                !looks_like_placeholder("teamId", real),
+                "should NOT flag {real:?}"
+            );
         }
     }
 
@@ -2705,7 +3098,10 @@ mod tests {
         // No auth configured at all -> open, unscoped.
         assert_eq!(resolve_http_scope(&reg, None, None), Some(None));
         // Legacy env token: exact match -> unscoped; mismatch -> rejected.
-        assert_eq!(resolve_http_scope(&reg, Some("envtok"), Some("envtok")), Some(None));
+        assert_eq!(
+            resolve_http_scope(&reg, Some("envtok"), Some("envtok")),
+            Some(None)
+        );
         assert!(resolve_http_scope(&reg, Some("envtok"), Some("nope")).is_none());
         // A registered client with an empty profile is authorized but unscoped.
         reg.http_clients.push(registry::HttpClient {
@@ -2727,7 +3123,10 @@ mod tests {
             token_sha256: registry::sha256_hex("scopedtok"),
             profile: "Default".into(),
         });
-        assert!(matches!(resolve_http_scope(&reg, None, Some("scopedtok")), Some(Some(_))));
+        assert!(matches!(
+            resolve_http_scope(&reg, None, Some("scopedtok")),
+            Some(Some(_))
+        ));
     }
 
     #[test]
@@ -2756,8 +3155,8 @@ mod tests {
         let full = enabled_summary(&reg, &cached, None, None);
         assert!(full.contains("alpha"));
         assert!(!full.contains("bravo")); // not in the active profile
-        // Scoped to bravo: shows bravo (its real scope) even though bravo isn't in
-        // the active profile, and never leaks alpha's name/command/tool count.
+                                          // Scoped to bravo: shows bravo (its real scope) even though bravo isn't in
+                                          // the active profile, and never leaks alpha's name/command/tool count.
         let allowed: HashSet<String> = ["bravo".to_string()].into_iter().collect();
         let scoped = enabled_summary(&reg, &cached, None, Some(&allowed));
         assert!(scoped.contains("bravo"));
@@ -2768,15 +3167,23 @@ mod tests {
     #[test]
     fn scoped_call_to_out_of_scope_server_is_refused() {
         let reg = Registry::default();
-        let allowed: std::collections::HashSet<String> = ["vercel".to_string()].into_iter().collect();
+        let allowed: std::collections::HashSet<String> =
+            ["vercel".to_string()].into_iter().collect();
         // A call to an out-of-scope server is refused with a clear isError result.
         let req = json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": { "name": "resend__send", "arguments": {} }
         });
         let resp = handle_request(
-            &req, &reg, &mut router(), &catalog(), true, None,
-            &mut SearchGuard::default(), Some(&allowed),
+            &req,
+            &reg,
+            &mut router(),
+            &catalog(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            Some(&allowed),
         )
         .unwrap();
         let result = resp.get("result").unwrap();
@@ -2796,8 +3203,15 @@ mod tests {
             "params": { "name": "vercel__deploy", "arguments": {} }
         });
         let resp_ok = handle_request(
-            &req_ok, &reg, &mut router(), &catalog(), true, None,
-            &mut SearchGuard::default(), Some(&allowed),
+            &req_ok,
+            &reg,
+            &mut router(),
+            &catalog(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            Some(&allowed),
         )
         .unwrap();
         let text_ok = resp_ok
@@ -2841,7 +3255,10 @@ mod tests {
 
     #[test]
     fn sanitize_header_value_strips_control_chars() {
-        assert_eq!(sanitize_header_value("http://localhost:8080"), "http://localhost:8080");
+        assert_eq!(
+            sanitize_header_value("http://localhost:8080"),
+            "http://localhost:8080"
+        );
         // CR/LF injection attempt is stripped to a flat value.
         assert_eq!(
             sanitize_header_value("evil\r\nSet-Cookie: x=1"),
@@ -2855,8 +3272,15 @@ mod tests {
         // Browsers preflight a cross-origin POST; we must answer OPTIONS so the
         // real request goes through (CORS headers themselves are added per-response).
         let state = http_state(true);
-        let (status, _, body) =
-            handle_http(&state, &mut SearchGuard::default(), "OPTIONS", "/conduit_search_tools", "", None);
+        let (status, _, body) = handle_http(
+            &state,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            "OPTIONS",
+            "/conduit_search_tools",
+            "",
+            None,
+        );
         assert_eq!(status, 204);
         assert!(body.is_empty());
     }
@@ -2864,7 +3288,8 @@ mod tests {
     #[test]
     fn agent_control_gates_then_persists() {
         // Two servers, only Alpha enabled, agent control OFF.
-        let path = std::env::temp_dir().join(format!("conduit-ac-test-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("conduit-ac-test-{}.json", std::process::id()));
         let json = r#"{"version":1,
             "servers":[
                 {"id":"a","name":"Alpha","transport":"stdio","command":"x","args":[],"env":[]},
@@ -2904,7 +3329,18 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": { "protocolVersion": "2025-06-18" }
         });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default(), None).unwrap();
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &[],
+            false,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
         assert_eq!(resp["id"], 1);
         assert_eq!(resp["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(resp["result"]["capabilities"]["tools"]["listChanged"], true);
@@ -2914,14 +3350,36 @@ mod tests {
     fn notifications_get_no_reply() {
         let reg = Registry::default();
         let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        assert!(handle_request(&note, &reg, &mut router(), &[], false, None, &mut SearchGuard::default(), None).is_none());
+        assert!(handle_request(
+            &note,
+            &reg,
+            &mut router(),
+            &[],
+            false,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None
+        )
+        .is_none());
     }
 
     #[test]
     fn tools_list_always_includes_status() {
         let reg = Registry::default();
         let req = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default(), None).unwrap();
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &[],
+            false,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
         let names: Vec<&str> = resp["result"]["tools"]
             .as_array()
             .unwrap()
@@ -2939,7 +3397,10 @@ mod tests {
             name: "github".to_string(),
             transport: "stdio".to_string(),
             command: Some("npx".to_string()),
-            args: vec!["-y".to_string(), "@modelcontextprotocol/server-github".to_string()],
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-github".to_string(),
+            ],
             env: vec![],
             url: None,
             source: None,
@@ -2951,7 +3412,18 @@ mod tests {
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": { "name": "conduit_status", "arguments": {} }
         });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default(), None).unwrap();
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &[],
+            false,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("github"));
         assert_eq!(resp["result"]["isError"], false);
@@ -2961,7 +3433,18 @@ mod tests {
     fn unknown_method_is_jsonrpc_error() {
         let reg = Registry::default();
         let req = json!({ "jsonrpc": "2.0", "id": 9, "method": "frobnicate" });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default(), None).unwrap();
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &[],
+            false,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
         assert_eq!(resp["error"]["code"], -32601);
     }
 
@@ -2978,7 +3461,18 @@ mod tests {
         let reg = Registry::default();
         let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
         // Even with a full cached catalog, lazy mode advertises just the meta-tools.
-        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default(), None).unwrap();
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &catalog(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
         let names: Vec<&str> = resp["result"]["tools"]
             .as_array()
             .unwrap()
@@ -3065,7 +3559,10 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert!(hits[0].get("inputSchema").is_some());
         assert!(hits[1].get("inputSchema").is_none());
-        assert_eq!(hits[1].get("schemaOmitted").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            hits[1].get("schemaOmitted").and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -3086,7 +3583,18 @@ mod tests {
             "jsonrpc": "2.0", "id": 5, "method": "tools/call",
             "params": { "name": "conduit_search_tools", "arguments": { "query": "charges" } }
         });
-        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default(), None).unwrap();
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &catalog(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("stripe__list_charges"));
         assert_eq!(resp["result"]["isError"], false);
@@ -3111,7 +3619,18 @@ mod tests {
             "jsonrpc": "2.0", "id": 7, "method": "tools/call",
             "params": { "name": "conduit_search_tools", "arguments": { "query": "zzznotarealtoolzzz" } }
         });
-        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default(), None).unwrap();
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &catalog(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("No tools matched"));
         // No phantom "Top match" when there's nothing to call.
@@ -3128,10 +3647,22 @@ mod tests {
     }
 
     fn search_text(reg: &Registry, guard: &mut SearchGuard, query: &str) -> String {
-        let resp =
-            handle_request(&search_req(query), reg, &mut router(), &catalog(), true, None, guard, None)
-                .unwrap();
-        resp["result"]["content"][0]["text"].as_str().unwrap().to_string()
+        let resp = handle_request(
+            &search_req(query),
+            reg,
+            &mut router(),
+            &catalog(),
+            true,
+            None,
+            guard,
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     #[test]
@@ -3147,7 +3678,10 @@ mod tests {
         }
         // Third repeat of the same top tool trips the loop-breaker.
         let text = search_text(&reg, &mut guard, "charges");
-        assert!(text.contains(ESCALATION_MARK), "3rd same-result search must escalate");
+        assert!(
+            text.contains(ESCALATION_MARK),
+            "3rd same-result search must escalate"
+        );
         assert!(text.contains("stripe__list_charges"));
 
         // Any non-search action resets the streak; the next search is polite again.
@@ -3155,9 +3689,22 @@ mod tests {
             "jsonrpc": "2.0", "id": 10, "method": "tools/call",
             "params": { "name": "conduit_status", "arguments": {} }
         });
-        handle_request(&status, &reg, &mut router(), &catalog(), true, None, &mut guard, None);
+        handle_request(
+            &status,
+            &reg,
+            &mut router(),
+            &catalog(),
+            true,
+            None,
+            &mut guard,
+            &mut ConfirmGuard::new(),
+            None,
+        );
         let text = search_text(&reg, &mut guard, "charges");
-        assert!(!text.contains(ESCALATION_MARK), "non-search action should reset the streak");
+        assert!(
+            !text.contains(ESCALATION_MARK),
+            "non-search action should reset the streak"
+        );
         assert!(text.contains("Top match:"));
     }
 
@@ -3168,10 +3715,20 @@ mod tests {
         // searches. This is what keeps Claude/Cursor's exploration unaffected.
         let reg = Registry::default();
         let mut guard = SearchGuard::default();
-        for q in ["charges", "offerings", "send", "charges", "offerings", "send"] {
+        for q in [
+            "charges",
+            "offerings",
+            "send",
+            "charges",
+            "offerings",
+            "send",
+        ] {
             let text = search_text(&reg, &mut guard, q);
             assert!(text.contains("Top match:"), "query {q} should stay polite");
-            assert!(!text.contains(ESCALATION_MARK), "query {q} must not escalate");
+            assert!(
+                !text.contains(ESCALATION_MARK),
+                "query {q} must not escalate"
+            );
         }
     }
 
@@ -3192,7 +3749,10 @@ mod tests {
             "teamId": "team_x"
         }));
         assert_eq!(n, "vercel__list_projects");
-        assert_eq!(a["teamId"], "team_x", "flattened args must still reach the tool");
+        assert_eq!(
+            a["teamId"], "team_x",
+            "flattened args must still reach the tool"
+        );
 
         // No params (e.g. a list tool with no required args).
         let (n, a) = unwrap_call_tool(&json!({ "name": "x__list" }));
@@ -3260,7 +3820,9 @@ mod tests {
         // capability words survive (stemmed); boilerplate + function words are gone.
         assert!(toks.contains(&"product".to_string()));
         assert!(toks.contains(&"list".to_string()));
-        assert!(!toks.iter().any(|t| t == "purpose" || t == "return" || t == "the" || t == "of"));
+        assert!(!toks
+            .iter()
+            .any(|t| t == "purpose" || t == "return" || t == "the" || t == "of"));
     }
 
     #[test]
@@ -3288,8 +3850,354 @@ mod tests {
         let after = std::fs::read_to_string(&path).unwrap();
         assert!((after.len() as u64) <= GATEWAY_LOG_CAP, "still over cap");
         assert!(after.ends_with("NEWEST\n"), "lost the newest line");
-        assert!(!after.contains("OLDEST"), "kept the oldest line past the cap");
+        assert!(
+            !after.contains("OLDEST"),
+            "kept the oldest line past the cap"
+        );
         assert!(!after.starts_with('x'), "did not cut on a line boundary");
         std::fs::remove_file(&path).ok();
+    }
+
+    // --- confirm_destructive tests ---
+
+    /// A catalog with one safe tool and one destructive tool.
+    fn catalog_with_destructive() -> Vec<Value> {
+        vec![
+            json!({ "name": "stripe__list_charges", "description": "List charges", "inputSchema": {} }),
+            json!({
+                "name": "stripe__delete_customer",
+                "description": "Delete a customer permanently",
+                "inputSchema": {},
+                "annotations": { "destructiveHint": true }
+            }),
+        ]
+    }
+
+    /// Build a registry with confirm_destructive enabled.
+    fn registry_with_confirm() -> Registry {
+        let mut reg = Registry::default();
+        reg.set_confirm_destructive(true);
+        reg
+    }
+
+    #[test]
+    fn confirm_destructive_intercepts_destructive_call() {
+        let reg = registry_with_confirm();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "stripe__delete_customer", "arguments": { "id": "cus_123" } }
+        });
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &catalog_with_destructive(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Destructive action intercepted"),
+            "should intercept: {text}"
+        );
+        assert!(text.contains("stripe__delete_customer"));
+        assert!(text.contains("cus_123"));
+        assert!(text.contains("conduit_confirm"));
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[test]
+    fn confirm_destructive_does_not_intercept_safe_call() {
+        let reg = registry_with_confirm();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": "stripe__list_charges", "arguments": {} }
+        });
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &catalog_with_destructive(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        // list_charges is not a real server in the test router, so it'll error —
+        // but it should NOT be intercepted by the confirm guard.
+        assert!(
+            !text.contains("Destructive action intercepted"),
+            "safe call should not be intercepted"
+        );
+    }
+
+    #[test]
+    fn confirm_destructive_off_does_not_intercept() {
+        let reg = Registry::default(); // confirm_destructive = false
+        let req = json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": { "name": "stripe__delete_customer", "arguments": { "id": "cus_123" } }
+        });
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &catalog_with_destructive(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("Destructive action intercepted"),
+            "should not intercept when feature is off"
+        );
+    }
+
+    #[test]
+    fn confirm_destructive_cannot_be_bypassed_via_conduit_call_tool() {
+        let reg = registry_with_confirm();
+        // Agent tries to call the destructive tool via conduit_call_tool instead
+        // of directly — the interceptor should still catch it because
+        // conduit_call_tool unwraps before the interception check.
+        let req = json!({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {
+                "name": "conduit_call_tool",
+                "arguments": {
+                    "name": "stripe__delete_customer",
+                    "arguments": { "id": "cus_456" }
+                }
+            }
+        });
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &catalog_with_destructive(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Destructive action intercepted"),
+            "should intercept even via conduit_call_tool"
+        );
+        assert!(text.contains("cus_456"));
+    }
+
+    #[test]
+    fn confirm_destructive_invalid_token_fails() {
+        let reg = registry_with_confirm();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": { "name": "conduit_confirm", "arguments": { "token": "deadbeef" } }
+        });
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &catalog_with_destructive(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("expired or invalid"),
+            "invalid token should error"
+        );
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[test]
+    fn confirm_destructive_empty_token_fails() {
+        let reg = registry_with_confirm();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+            "params": { "name": "conduit_confirm", "arguments": { "token": "" } }
+        });
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &catalog_with_destructive(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("pass the"),
+            "empty token should give guidance"
+        );
+    }
+
+    #[test]
+    fn confirm_destructive_tools_list_includes_conduit_confirm() {
+        let reg = registry_with_confirm();
+        let req = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" });
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &catalog_with_destructive(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"conduit_confirm"),
+            "tools/list should include conduit_confirm when feature is on"
+        );
+    }
+
+    #[test]
+    fn confirm_destructive_tools_list_excludes_conduit_confirm_when_off() {
+        let reg = Registry::default(); // confirm_destructive = false
+        let req = json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/list" });
+        let resp = handle_request(
+            &req,
+            &reg,
+            &mut router(),
+            &catalog_with_destructive(),
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut ConfirmGuard::new(),
+            None,
+        )
+        .unwrap();
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(
+            !names.contains(&"conduit_confirm"),
+            "should not include conduit_confirm when feature is off"
+        );
+    }
+
+    #[test]
+    fn confirm_and_deny_destructive_are_mutually_exclusive() {
+        let mut reg = Registry::default();
+
+        // Enabling confirm turns off deny.
+        reg.set_deny_destructive(true);
+        reg.set_confirm_destructive(true);
+        assert!(reg.confirm_destructive);
+        assert!(!reg.deny_destructive, "enabling confirm must turn off deny");
+
+        // Enabling deny turns off confirm.
+        reg.set_deny_destructive(true);
+        assert!(reg.deny_destructive);
+        assert!(
+            !reg.confirm_destructive,
+            "enabling deny must turn off confirm"
+        );
+    }
+
+    #[test]
+    fn confirm_guard_token_is_consumed_on_use() {
+        let mut guard = ConfirmGuard::new();
+        let token = guard.store("srv__delete".into(), json!({"id": "x"}));
+        // First take succeeds.
+        let (name, args) = guard.take(&token).unwrap();
+        assert_eq!(name, "srv__delete");
+        assert_eq!(args["id"], "x");
+        // Second take fails (token consumed).
+        assert!(guard.take(&token).is_none(), "token should be single-use");
+    }
+
+    #[test]
+    fn confirm_destructive_full_flow_does_not_loop() {
+        // The critical test: a destructive call is intercepted, then confirmed
+        // via conduit_confirm. The confirmed call must NOT be re-intercepted
+        // (which would create an infinite loop).
+        let reg = registry_with_confirm();
+        let mut confirm = ConfirmGuard::new();
+        let cat = catalog_with_destructive();
+
+        // Step 1: destructive call is intercepted.
+        let req1 = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "stripe__delete_customer", "arguments": { "id": "cus_999" } }
+        });
+        let resp1 = handle_request(
+            &req1,
+            &reg,
+            &mut router(),
+            &cat,
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut confirm,
+            None,
+        )
+        .unwrap();
+        let text1 = resp1["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text1.contains("Destructive action intercepted"));
+
+        // Extract the token from the preview message.
+        let token_start = text1.find("token: ").unwrap() + 7;
+        let token = &text1[token_start..token_start + 32];
+
+        // Step 2: confirm with the token. This must fall through to normal
+        // routing — NOT re-intercepted.
+        let req2 = json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": "conduit_confirm", "arguments": { "token": token } }
+        });
+        let resp2 = handle_request(
+            &req2,
+            &reg,
+            &mut router(),
+            &cat,
+            true,
+            None,
+            &mut SearchGuard::default(),
+            &mut confirm,
+            None,
+        )
+        .unwrap();
+        let text2 = resp2["result"]["content"][0]["text"].as_str().unwrap();
+        // The confirmed call reached the router (which doesn't have a real
+        // stripe server, so it errors), but the important thing is it was NOT
+        // re-intercepted.
+        assert!(
+            !text2.contains("Destructive action intercepted"),
+            "confirmed call must not be re-intercepted (would loop). Got: {text2}"
+        );
     }
 }

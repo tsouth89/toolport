@@ -158,6 +158,11 @@ export function setDenyDestructive(deny: boolean): Promise<Registry> {
   return invoke<Registry>("set_deny_destructive", { deny });
 }
 
+/** Toggle per-call confirmation for destructive tools (intercept + preview + token). */
+export function setConfirmDestructive(confirm: boolean): Promise<Registry> {
+  return invoke<Registry>("set_confirm_destructive", { confirm });
+}
+
 /** Toggle global lazy discovery (meta-tools vs full catalog) for all clients. */
 export function setLazyDiscovery(lazy: boolean): Promise<Registry> {
   return invoke<Registry>("set_lazy_discovery", { lazy });

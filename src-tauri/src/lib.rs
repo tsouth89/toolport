@@ -807,6 +807,18 @@ fn set_deny_destructive(state: State<RegistryState>, deny: bool) -> Result<Regis
     Ok(reg.clone())
 }
 
+/// Toggle per-call confirmation for destructive tools. When enabled, the gateway
+/// intercepts each destructive tool call, returns a preview with a token, and
+/// requires `conduit_confirm { token }` to proceed. Mutually exclusive with
+/// `deny_destructive` (confirm turns deny off).
+#[tauri::command]
+fn set_confirm_destructive(state: State<RegistryState>, confirm: bool) -> Result<Registry, String> {
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.set_confirm_destructive(confirm);
+    registry::save(&reg)?;
+    Ok(reg.clone())
+}
+
 /// Set lazy discovery globally. The gateway reads this from the registry, so it
 /// takes effect for every client (including ones that don't forward env vars).
 /// Clients pick it up the next time they (re)spawn the gateway.
@@ -1563,6 +1575,7 @@ pub fn run() {
             call_tool,
             set_tool_enabled,
             set_deny_destructive,
+            set_confirm_destructive,
             set_lazy_discovery,
             set_allow_agent_control,
             team_connect,

@@ -130,6 +130,15 @@ pub struct Registry {
     /// One toggle to keep agents read-only across every connected server.
     #[serde(default)]
     pub deny_destructive: bool,
+    /// Per-call confirmation for destructive tools: when true, the gateway
+    /// intercepts each call to a destructive-hinted tool, returns a preview
+    /// with a confirmation token, and requires `conduit_confirm { token }` to
+    /// proceed. The original arguments are replayed exactly — the agent cannot
+    /// change them. Unlike `deny_destructive` (which hides tools entirely),
+    /// this lets agents use destructive tools — but forces a conscious review
+    /// of every call first.
+    #[serde(default)]
+    pub confirm_destructive: bool,
     /// Lazy discovery: the gateway exposes 3 meta-tools (status/search/call)
     /// instead of every downstream tool, so clients with tool-count limits don't
     /// drop tools. The gateway reads this from the registry file it already
@@ -247,6 +256,7 @@ impl Default for Registry {
             }],
             active_profile_id: Some(DEFAULT_PROFILE_ID.to_string()),
             deny_destructive: false,
+            confirm_destructive: false,
             lazy_discovery: true,
             allow_agent_control: false,
             integrity_check: true,
@@ -411,9 +421,23 @@ impl Registry {
             .unwrap_or(true)
     }
 
-    /// Set the global destructive-tool deny switch.
+    /// Set the global destructive-tool deny switch. Mutually exclusive with
+    /// `confirm_destructive`: enabling deny clears confirm.
     pub fn set_deny_destructive(&mut self, deny: bool) {
         self.deny_destructive = deny;
+        if deny {
+            self.confirm_destructive = false;
+        }
+    }
+
+    /// Set per-call confirmation mode for destructive tools. When enabled,
+    /// `deny_destructive` is forced off (they're mutually exclusive: deny hides
+    /// tools entirely, confirm intercepts them with a preview).
+    pub fn set_confirm_destructive(&mut self, confirm: bool) {
+        self.confirm_destructive = confirm;
+        if confirm {
+            self.deny_destructive = false;
+        }
     }
 
     /// Set lazy discovery mode (gateway exposes meta-tools vs the full catalog).
