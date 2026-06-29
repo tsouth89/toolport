@@ -51,6 +51,10 @@ export interface AuditEntry {
   server: string;
   tool: string;
   ok: boolean;
+  /** How long the call took, ms. Absent for records logged before timing. */
+  durationMs?: number;
+  /** Short failure message for a failed call (never args or result data). */
+  error?: string;
 }
 
 export interface ProbeResult {
@@ -75,6 +79,23 @@ export interface McpTool {
    * some servers also emit it at the top level, so both are tolerated. */
   annotations?: { destructiveHint?: boolean; [k: string]: unknown };
   destructiveHint?: boolean;
+}
+
+/** A resource as advertised by a downstream server (raw `resources/list` entry). */
+export interface McpResource {
+  uri: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+/** A prompt as advertised by a downstream server (raw `prompts/list` entry). */
+export interface McpPrompt {
+  name: string;
+  title?: string;
+  description?: string;
+  arguments?: Array<{ name: string; description?: string; required?: boolean }>;
 }
 
 /** The subset of JSON Schema the playground form renders per argument. */
@@ -250,6 +271,23 @@ export interface Registry {
   /** Per-server result-shaping budgets in bytes, keyed by server id. Absent =
    * global default; 0 = never shape (full fidelity); n = cap that server at n bytes. */
   resultBudgets?: Record<string, number>;
+  /** Which profile each client was connected with, keyed by client id (e.g.
+   * "cursor" -> "Billing"). Absent = that client follows the active profile. */
+  clientScopes?: Record<string, string>;
+  /** Consumers registered to reach the gateway over the HTTP/OpenAPI bridge,
+   * each with its own hashed token and scope (multi-tenant bridge). */
+  httpClients?: HttpClient[];
+}
+
+/** A consumer registered to reach the HTTP/OpenAPI bridge with its own token and
+ * scope. The plaintext token is shown once at creation, never stored. */
+export interface HttpClient {
+  id: string;
+  label: string;
+  /** SHA-256 of the bearer token (the plaintext is never returned again). */
+  tokenSha256: string;
+  /** Profile this client is scoped to; empty = the full connected set. */
+  profile: string;
 }
 
 /** A joined Conduit Teams server (the shared config-sync layer). */

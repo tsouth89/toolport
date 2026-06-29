@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2,
+  FileText,
   FlaskConical,
   Loader2,
+  MessageSquare,
   Play,
   ShieldAlert,
   XCircle,
@@ -10,11 +12,17 @@ import {
 import { toastError } from "@/lib/toast";
 import {
   callTool,
+  getPrompt,
+  listServerPrompts,
+  listServerResources,
   listServerTools,
+  readResource,
   setToolEnabled,
 } from "@/lib/api";
 import type {
   JsonSchemaProp,
+  McpPrompt,
+  McpResource,
   McpTool,
   Registry,
   ToolCallResult,
@@ -149,6 +157,272 @@ function ArgField({ name, schema, required, value, onChange }: FieldProps) {
   );
 }
 
+/** Inline "connecting…" line shared by the resource/prompt panels. */
+function Connecting({ label = "Connecting to server…" }: { label?: string }) {
+  return (
+    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+      <Loader2 className="size-4 animate-spin" /> {label}
+    </div>
+  );
+}
+
+/** A raw MCP result rendered as pretty JSON (or text). */
+function ResultBlock({ title, value }: { title: string; value: unknown }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-sm font-medium">{title}</div>
+      <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-xs whitespace-pre-wrap">
+        {typeof value === "string" ? value : JSON.stringify(value, null, 2)}
+      </pre>
+    </div>
+  );
+}
+
+/** Resources tab: list what the server advertises and read one on click. */
+function ResourcesPanel({ serverId }: { serverId: string }) {
+  const [resources, setResources] = useState<McpResource[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [reading, setReading] = useState(false);
+  const [result, setResult] = useState<unknown>(null);
+  const [readError, setReadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    setResources(null);
+    setSelected(null);
+    setResult(null);
+    setReadError(null);
+    listServerResources(serverId)
+      .then((r) => alive && setResources(r))
+      .catch((e) => alive && setError(String(e)))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [serverId]);
+
+  async function read(uri: string) {
+    setSelected(uri);
+    setReading(true);
+    setResult(null);
+    setReadError(null);
+    try {
+      setResult(await readResource(serverId, uri));
+    } catch (e) {
+      setReadError(String(e));
+    } finally {
+      setReading(false);
+    }
+  }
+
+  if (loading) return <Connecting />;
+  if (error) return <Callout variant="danger">{error}</Callout>;
+  if (!resources || resources.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        This server advertises no resources.
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1.5">
+        <Label className="text-xs text-muted-foreground">
+          Resources ({resources.length})
+        </Label>
+        <div className="flex flex-col divide-y rounded-lg border">
+          {resources.map((r) => (
+            <button
+              key={r.uri}
+              onClick={() => read(r.uri)}
+              aria-pressed={selected === r.uri}
+              className={`flex flex-col items-start gap-0.5 px-3 py-2 text-left ${
+                selected === r.uri ? "bg-accent" : "hover:bg-muted/40"
+              }`}
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="truncate font-mono text-sm">
+                  {r.name ?? r.title ?? r.uri}
+                </span>
+                {r.mimeType && (
+                  <Badge variant="outline" className="text-muted-foreground">
+                    {r.mimeType}
+                  </Badge>
+                )}
+              </span>
+              <span className="truncate font-mono text-[11px] text-muted-foreground">
+                {r.uri}
+              </span>
+              {r.description && (
+                <span className="line-clamp-1 text-xs text-muted-foreground">
+                  {r.description}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+      {reading && <Connecting label="Reading resource…" />}
+      {readError && <Callout variant="danger">{readError}</Callout>}
+      {result != null && <ResultBlock title="Resource contents" value={result} />}
+    </div>
+  );
+}
+
+/** Prompts tab: list prompts, fill any arguments, and render one. */
+function PromptsPanel({ serverId }: { serverId: string }) {
+  const [prompts, setPrompts] = useState<McpPrompt[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [args, setArgs] = useState<Record<string, string>>({});
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<unknown>(null);
+  const [runError, setRunError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    setPrompts(null);
+    setSelected(null);
+    setResult(null);
+    setRunError(null);
+    listServerPrompts(serverId)
+      .then((p) => alive && setPrompts(p))
+      .catch((e) => alive && setError(String(e)))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [serverId]);
+
+  const prompt = prompts?.find((p) => p.name === selected) ?? null;
+
+  useEffect(() => {
+    setArgs({});
+    setResult(null);
+    setRunError(null);
+  }, [selected]);
+
+  async function run() {
+    if (!prompt) return;
+    const missing = (prompt.arguments ?? [])
+      .filter((a) => a.required && !args[a.name]?.trim())
+      .map((a) => a.name);
+    if (missing.length > 0) {
+      setRunError(
+        `Fill in required argument${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}`,
+      );
+      return;
+    }
+    setRunning(true);
+    setResult(null);
+    setRunError(null);
+    try {
+      setResult(await getPrompt(serverId, prompt.name, args));
+    } catch (e) {
+      setRunError(String(e));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  if (loading) return <Connecting />;
+  if (error) return <Callout variant="danger">{error}</Callout>;
+  if (!prompts || prompts.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        This server advertises no prompts.
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1.5">
+        <Label className="text-xs text-muted-foreground">
+          Prompts ({prompts.length})
+        </Label>
+        <div className="flex flex-col divide-y rounded-lg border">
+          {prompts.map((p) => (
+            <button
+              key={p.name}
+              onClick={() => setSelected(p.name)}
+              aria-pressed={p.name === selected}
+              className={`flex flex-col items-start gap-0.5 px-3 py-2 text-left ${
+                p.name === selected ? "bg-accent" : "hover:bg-muted/40"
+              }`}
+            >
+              <span className="truncate font-mono text-sm">
+                {p.title ?? p.name}
+              </span>
+              {p.description && (
+                <span className="line-clamp-1 text-xs text-muted-foreground">
+                  {p.description}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {prompt && (
+        <div className="flex flex-col gap-4 rounded-lg border bg-card p-4">
+          {prompt.description && (
+            <p className="text-sm text-muted-foreground">{prompt.description}</p>
+          )}
+          {(prompt.arguments ?? []).length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              This prompt takes no arguments.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-4">
+              {(prompt.arguments ?? []).map((a) => (
+                <div key={a.name} className="flex flex-col gap-1.5">
+                  <Label htmlFor={`prompt-arg-${a.name}`} className="flex items-center gap-1.5">
+                    <span className="font-mono text-xs">{a.name}</span>
+                    {a.required && <span className="text-destructive">*</span>}
+                  </Label>
+                  {a.description && (
+                    <p className="text-xs text-muted-foreground">{a.description}</p>
+                  )}
+                  <Input
+                    id={`prompt-arg-${a.name}`}
+                    value={args[a.name] ?? ""}
+                    onChange={(e) =>
+                      setArgs((prev) => ({ ...prev, [a.name]: e.target.value }))
+                    }
+                    className="h-9"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+          <div>
+            <Button onClick={run} disabled={running} size="sm">
+              {running ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Play className="size-4" />
+              )}
+              {running ? "Getting…" : "Get prompt"}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {runError && <Callout variant="danger">{runError}</Callout>}
+      {result != null && <ResultBlock title="Prompt messages" value={result} />}
+    </div>
+  );
+}
+
 interface PlaygroundProps {
   registry: Registry | null;
   onRegistryChange: (registry: Registry) => void;
@@ -159,6 +433,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
   const denyDestructive = registry?.denyDestructive ?? false;
 
   const [serverId, setServerId] = useState<string | null>(null);
+  const [tab, setTab] = useState<"tools" | "resources" | "prompts">("tools");
   const [policyBusy, setPolicyBusy] = useState(false);
   const [tools, setTools] = useState<McpTool[] | null>(null);
   const [loadingTools, setLoadingTools] = useState(false);
@@ -327,7 +602,37 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
         </p>
       </div>
 
-      {loadingTools && (
+      {serverId && (
+        <div className="flex w-fit gap-1 rounded-lg border bg-muted/30 p-1 text-sm">
+          {(["tools", "resources", "prompts"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              aria-pressed={tab === t}
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1 capitalize transition-colors ${
+                tab === t
+                  ? "bg-background font-medium shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {t === "resources" && <FileText className="size-3.5" />}
+              {t === "prompts" && <MessageSquare className="size-3.5" />}
+              {t}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {serverId && tab === "resources" && (
+        <ResourcesPanel key={serverId} serverId={serverId} />
+      )}
+      {serverId && tab === "prompts" && (
+        <PromptsPanel key={serverId} serverId={serverId} />
+      )}
+
+      {tab === "tools" && (
+        <>
+          {loadingTools && (
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" /> Connecting to server…
         </div>
@@ -477,6 +782,8 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
             {renderResult(result)}
           </pre>
         </div>
+      )}
+        </>
       )}
     </div>
   );

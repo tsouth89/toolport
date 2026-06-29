@@ -5,8 +5,50 @@ All notable changes to Conduit are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-28
+
 ### Added
+- **Multi-tenant HTTP bridge (per-client scoping).** Register HTTP clients in
+  Settings → Integrations, each with its own bearer token and profile. One bridge
+  process serves them all and resolves every request's token to its own set of
+  servers, so (for example) two Open WebUI instances can see entirely different
+  tools. The bridge connects the union of every registered client's profile, then
+  filters each request (tools/list, search, call, status, and the OpenAPI spec)
+  down to exactly what that token is allowed to see.
+- **Resources & Prompts in the Playground.** New Tools / Resources / Prompts tabs:
+  list a server's resources and read one, or fill a prompt's arguments and render
+  it, exercising the full MCP surface Conduit proxies, not just tools.
+- **Per-client scope, persisted and editable.** A connected client now shows its
+  effective scope ("sees the 'Billing' profile, 3 servers"), and you can re-scope
+  it in place without disconnecting.
+- **Test connection in the add/edit server dialog.** Verify a server (and its
+  secrets) actually connects before saving, alongside per-transport validation
+  and a duplicate-name warning.
+- **Activity error detail.** Failed tool calls now record and show the failure
+  message and per-call latency; click a failed row to see why it failed.
 - **Continue** client support (`~/.continue/config.yaml`). Thanks @BharadwajKanneveti (#49).
+- The OpenAPI spec is now complete: a `servers` block, a `bearerAuth` security
+  scheme, and real error responses, so OpenAPI clients can model auth and failures.
+
+### Changed
+- **HTTP bridge auth tightened.** Once any scoped client is registered, the bridge
+  rejects unauthenticated requests even when no global token is set. CORS no longer
+  reflects the caller's Origin or sends credentials, and cross-site browser
+  requests are refused outright.
+- **Downstream HTTP calls now retry** safely on a connection failure or a 429
+  (honoring `Retry-After`) with capped backoff, never on a 5xx, since an MCP tool
+  call may already have executed.
+
+### Security
+- Constant-time comparison for the bridge bearer token.
+- The SSRF connect-guard now also blocks IPv6 link-local and cloud-metadata
+  addresses (including the AWS IPv6 metadata address), not just IPv4 169.254.x.
+- Client-config reads and backups reject non-regular files (devices, FIFOs) and
+  cap size, so a crafted or symlinked config can't exhaust memory or disk.
+- A scoped HTTP client's `conduit_status` no longer reveals other tenants'
+  server names, commands, URLs, or tool counts.
+- The placeholder-ID guard no longer blocks legitimate values like "todo" or
+  "string" on content fields (only identifier-typed params).
 
 ### Removed
 - **"Add to catalog" (promote-to-catalog).** It only pinned a server you already had into

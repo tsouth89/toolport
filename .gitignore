@@ -85,6 +85,9 @@ dist-ssr
 *.pem
 *.cer
 *.mobileprovision
+# `*.key` doesn't match these: a local Open WebUI test secret and a stray 0-byte file.
+.webui_secret_key
+license-signing.keycd
 
 # Internal planning/strategy docs (kept local, like MONETIZATION/STATUS/COMPETITIVE/PLAN)
 /docs/SITE-MESSAGING.md

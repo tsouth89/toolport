@@ -376,6 +376,59 @@ function ServerRow({ s }: { s: ServerStat }) {
   );
 }
 
+/** One recent-call row. A failed call with a captured error message expands to
+ * show why it failed; latency is shown inline. Args/results aren't recorded in
+ * the audit log (it's an append-only governance record), so they're not shown. */
+function CallRow({ e }: { e: AuditEntry }) {
+  const [open, setOpen] = useState(false);
+  const hasDetail = !e.ok && !!e.error;
+  return (
+    <div className="rounded-md border border-border/50 text-sm">
+      <div
+        className={`flex items-center gap-3 px-3 py-2 ${
+          hasDetail ? "cursor-pointer hover:bg-muted/30" : ""
+        }`}
+        onClick={() => hasDetail && setOpen((o) => !o)}
+        {...(hasDetail
+          ? { role: "button", "aria-expanded": open, tabIndex: 0 }
+          : {})}
+      >
+        {hasDetail ? (
+          <ChevronRight
+            className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${
+              open ? "rotate-90" : ""
+            }`}
+          />
+        ) : (
+          <span className="inline-block size-3.5 shrink-0" />
+        )}
+        {e.ok ? (
+          <CheckCircle2 className="size-4 shrink-0 text-success" />
+        ) : (
+          <XCircle className="size-4 shrink-0 text-destructive" />
+        )}
+        <span className="min-w-0 truncate font-medium">{e.server}</span>
+        <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+          {e.tool}
+        </span>
+        <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
+          {fmtMs(e.durationMs ?? null)}
+        </span>
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {new Date(e.ts).toLocaleString()}
+        </span>
+      </div>
+      {open && e.error && (
+        <div className="border-t border-border/50 bg-destructive/5 px-3 py-2 pl-9">
+          <p className="font-mono text-xs whitespace-pre-wrap break-words text-destructive">
+            {e.error}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StatsPanel({ stats }: { stats: AuditStats }) {
   if (stats.total === 0) return null;
   const errPct = (stats.errorRate * 100).toFixed(stats.errorRate < 0.1 ? 1 : 0);
@@ -584,25 +637,7 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
               </p>
             ) : (
               visible.map((e, i) => (
-                <div
-                  key={`${e.ts}-${e.server}-${e.tool}-${i}`}
-                  className="flex items-center gap-3 rounded-md border border-border/50 px-3 py-2 text-sm"
-                >
-                  {e.ok ? (
-                    <CheckCircle2 className="size-4 shrink-0 text-success" />
-                  ) : (
-                    <XCircle className="size-4 shrink-0 text-destructive" />
-                  )}
-                  <span className="min-w-0 truncate font-medium">
-                    {e.server}
-                  </span>
-                  <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-                    {e.tool}
-                  </span>
-                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                    {new Date(e.ts).toLocaleString()}
-                  </span>
-                </div>
+                <CallRow key={`${e.ts}-${e.server}-${e.tool}-${i}`} e={e} />
               ))
             )}
           </div>

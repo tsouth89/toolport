@@ -117,21 +117,20 @@ fn is_untrusted_source(source: Option<&str>) -> bool {
     matches!(source, Some("shared") | Some("registry"))
 }
 
-/// True if `host` is a `169.254.x` literal or a name resolving to one. Link-local
-/// covers the cloud-metadata IP `169.254.169.254`, the classic SSRF target for
-/// stealing cloud credentials.
+/// True if `host` is a link-local / cloud-metadata literal or a name resolving
+/// to one. Covers IPv4 `169.254.x`, IPv6 `fe80::/10`, IPv4-mapped forms, and the
+/// AWS IPv6 metadata address `fd00:ec2::254` (see `oauth::ip_is_link_local`).
+/// `169.254.169.254` and its IPv6 peers are the classic SSRF target for stealing
+/// cloud credentials.
 fn host_is_link_local(host: &str) -> bool {
     use std::net::{IpAddr, ToSocketAddrs};
-    fn link_local(ip: &IpAddr) -> bool {
-        matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 169 && v4.octets()[1] == 254)
-    }
     let h = host.trim();
     if let Ok(ip) = h.parse::<IpAddr>() {
-        return link_local(&ip);
+        return oauth::ip_is_link_local(&ip);
     }
     (h, 0u16)
         .to_socket_addrs()
-        .map(|addrs| addrs.map(|a| a.ip()).any(|ip| link_local(&ip)))
+        .map(|addrs| addrs.map(|a| a.ip()).any(|ip| oauth::ip_is_link_local(&ip)))
         .unwrap_or(false)
 }
 
@@ -227,11 +226,16 @@ mod tests {
 
     #[test]
     fn link_local_detection() {
-        assert!(host_is_link_local("169.254.169.254")); // cloud metadata
+        assert!(host_is_link_local("169.254.169.254")); // v4 cloud metadata
         assert!(host_is_link_local("169.254.0.1"));
+        assert!(host_is_link_local("fe80::1")); // v6 link-local
+        assert!(host_is_link_local("fd00:ec2::254")); // AWS v6 metadata (ULA)
+        assert!(host_is_link_local("::ffff:169.254.169.254")); // IPv4-mapped metadata
         assert!(!host_is_link_local("127.0.0.1"));
+        assert!(!host_is_link_local("::1")); // v6 loopback is not metadata
         assert!(!host_is_link_local("10.0.0.1"));
         assert!(!host_is_link_local("8.8.8.8"));
+        assert!(!host_is_link_local("2606:4700:4700::1111")); // public v6
     }
 
     #[test]

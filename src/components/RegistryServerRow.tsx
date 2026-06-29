@@ -221,6 +221,7 @@ export function RegistryServerRow({
             <ServerDialog
               onSaved={onRegistryChange}
               initial={{ ...server, name: duplicateName }}
+              existingNames={registry?.servers.map((s) => s.name) ?? []}
               trigger={
                 <button className={ACTION} title="Add another account">
                   <Copy className="size-3.5" />
@@ -233,6 +234,7 @@ export function RegistryServerRow({
               onSaved={onRegistryChange}
               editId={server.id}
               initial={server}
+              existingNames={registry?.servers.map((s) => s.name) ?? []}
               trigger={
                 <button className={ACTION}>
                   <Pencil className="size-3.5" />

@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
-import { Bot, Check, Copy, Globe, Layers, ShieldAlert } from "lucide-react";
+import { Bot, Check, Copy, Globe, Layers, ShieldAlert, Trash2, X } from "lucide-react";
 import { toastError } from "@/lib/toast";
 import {
+  addHttpClient,
   httpBridgeStatus,
+  removeHttpClient,
   setAllowAgentControl,
   setDenyDestructive,
   setLazyDiscovery,
@@ -28,6 +30,36 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const [bridge, setBridge] = useState<HttpBridgeStatus | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [newLabel, setNewLabel] = useState("");
+  const [newProfile, setNewProfile] = useState("");
+  const [newToken, setNewToken] = useState<string | null>(null);
+  const [clientBusy, setClientBusy] = useState(false);
+
+  const httpClients = registry?.httpClients ?? [];
+  const profiles = registry?.profiles ?? [];
+
+  async function addClient() {
+    if (!newLabel.trim()) return;
+    setClientBusy(true);
+    try {
+      const res = await addHttpClient(newLabel.trim(), newProfile || undefined);
+      onRegistryChange(res.registry);
+      setNewToken(res.token);
+      setNewLabel("");
+    } catch (e) {
+      toastError(`Couldn't add client: ${e}`);
+    } finally {
+      setClientBusy(false);
+    }
+  }
+
+  async function removeClient(id: string) {
+    try {
+      onRegistryChange(await removeHttpClient(id));
+    } catch (e) {
+      toastError(`Couldn't remove client: ${e}`);
+    }
+  }
 
   useEffect(() => {
     httpBridgeStatus()
@@ -186,6 +218,104 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
                 the token as its API key (Bearer auth), then set Function Calling to Native (per chat).
                 The token stops other local apps from calling your tools.
               </p>
+
+              <div className="mt-1 flex flex-col gap-2 rounded border bg-muted/20 p-2.5">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-[11px] font-medium text-muted-foreground">
+                    Scoped clients
+                  </span>
+                  <span className="text-[11px] text-muted-foreground/70">
+                    each gets its own token and server set
+                  </span>
+                </div>
+
+                {httpClients.length > 0 && (
+                  <ul className="flex flex-col gap-1">
+                    {httpClients.map((c) => (
+                      <li key={c.id} className="flex items-center gap-2 text-xs">
+                        <span className="truncate font-medium">{c.label || "(unnamed)"}</span>
+                        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                          {c.profile || "all servers"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeClient(c.id)}
+                          aria-label={`Revoke ${c.label}`}
+                          className="ml-auto shrink-0 rounded p-1 text-muted-foreground/60 hover:bg-destructive/10 hover:text-destructive"
+                        >
+                          <Trash2 className="size-3.5" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {newToken && (
+                  <>
+                    <div className="flex items-center gap-2 rounded border border-success/30 bg-success/5 px-2 py-1.5">
+                      <span className="shrink-0 text-[11px] font-medium text-success">
+                        New token
+                      </span>
+                      <code className="min-w-0 flex-1 truncate text-xs">{newToken}</code>
+                      <button
+                        type="button"
+                        onClick={() => copy(newToken, "newtoken")}
+                        title="Copy token"
+                        className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                      >
+                        {copied === "newtoken" ? (
+                          <Check className="size-3.5 text-success" />
+                        ) : (
+                          <Copy className="size-3.5" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setNewToken(null)}
+                        aria-label="Dismiss"
+                        className="shrink-0 rounded p-1 text-muted-foreground/60 hover:text-foreground"
+                      >
+                        <X className="size-3.5" />
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-warning">
+                      Copy this token now, it won't be shown again.
+                    </p>
+                  </>
+                )}
+
+                <div className="flex items-center gap-2">
+                  <input
+                    value={newLabel}
+                    onChange={(e) => setNewLabel(e.target.value)}
+                    placeholder="Client name (e.g. Open WebUI)"
+                    className="h-8 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2 text-xs focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+                  />
+                  {profiles.length > 0 && (
+                    <select
+                      value={newProfile}
+                      onChange={(e) => setNewProfile(e.target.value)}
+                      aria-label="Scope"
+                      className="h-8 shrink-0 rounded-md border border-input bg-transparent px-2 text-xs"
+                    >
+                      <option value="">All servers</option>
+                      {profiles.map((p) => (
+                        <option key={p.id} value={p.name}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <button
+                    type="button"
+                    onClick={addClient}
+                    disabled={clientBusy || !newLabel.trim()}
+                    className="h-8 shrink-0 rounded-md border bg-background px-2.5 text-xs font-medium hover:bg-accent disabled:opacity-50"
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
             </>
           )}
         </div>

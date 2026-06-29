@@ -428,6 +428,7 @@ function App() {
                   </div>
                   <ServerDialog
                     onSaved={setRegistry}
+                    existingNames={servers.map((s) => s.name)}
                     trigger={
                       <Button variant="outline" size="sm">
                         <Plus className="size-4" />

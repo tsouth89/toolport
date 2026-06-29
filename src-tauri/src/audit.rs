@@ -11,6 +11,9 @@ use serde_json::{json, Value};
 
 /// Trim the log once it passes this size, so it can't grow without bound.
 const MAX_AUDIT_BYTES: u64 = 4 * 1024 * 1024;
+/// Cap on a stored error message. Enough to show why a call failed, bounded so a
+/// pathological error string can't bloat the log line.
+const MAX_AUDIT_ERR_CHARS: usize = 600;
 /// How many of the most recent lines to keep when trimming. Comfortably more than
 /// any dashboard window, so the trim is invisible to the stats/log views.
 const KEEP_LINES: usize = 5000;
@@ -29,8 +32,17 @@ fn epoch_millis() -> u128 {
 }
 
 /// Append a tool-call record including how long the call took. Powers the
-/// in-app latency/error-rate dashboard.
-pub fn record_timed(server: &str, tool: &str, ok: bool, duration_ms: Option<u64>) {
+/// in-app latency/error-rate dashboard. `error` is a short message for a failed
+/// call so the Activity view can show *why* it failed; it is an error string
+/// only, never tool arguments or result data, which stay out of this
+/// append-only governance log.
+pub fn record_timed(
+    server: &str,
+    tool: &str,
+    ok: bool,
+    duration_ms: Option<u64>,
+    error: Option<&str>,
+) {
     let mut entry = json!({
         "ts": epoch_millis() as u64,
         "server": server,
@@ -39,6 +51,14 @@ pub fn record_timed(server: &str, tool: &str, ok: bool, duration_ms: Option<u64>
     });
     if let Some(ms) = duration_ms {
         entry["durationMs"] = json!(ms);
+    }
+    if !ok {
+        if let Some(err) = error {
+            let trimmed: String = err.trim().chars().take(MAX_AUDIT_ERR_CHARS).collect();
+            if !trimmed.is_empty() {
+                entry["error"] = json!(trimmed);
+            }
+        }
     }
     if let Some(path) = audit_path() {
         if let Some(parent) = path.parent() {

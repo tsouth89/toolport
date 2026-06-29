@@ -139,6 +139,18 @@ fn probe_one(server: &ServerEntry) -> ProbeResult {
     }
 }
 
+/// Connect to a possibly-unsaved server entry and report whether it came up and
+/// how many tools it exposes. Backs the "Test connection" button in the add/edit
+/// dialog, so the user learns a server is broken before saving it. Never
+/// persists anything; secret values the user typed ride in on `entry.env`, and
+/// for an edit the entry keeps its id so already-vaulted secrets resolve.
+#[tauri::command]
+async fn test_server(entry: ServerEntry) -> Result<ProbeResult, String> {
+    tauri::async_runtime::spawn_blocking(move || probe_one(&entry))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Probe every supported MCP client and return its current server configuration.
 #[tauri::command]
 async fn detect_clients() -> Result<Vec<clients::DetectedClient>, String> {
@@ -291,16 +303,80 @@ fn write_to_client(
 /// `profile` scopes that client to one profile (None = all enabled servers).
 #[tauri::command]
 fn install_gateway(
+    state: State<RegistryState>,
     client_id: String,
     profile: Option<String>,
 ) -> Result<clients::WriteOutcome, String> {
-    clients::install_gateway(&client_id, profile.as_deref())
+    let outcome = clients::install_gateway(&client_id, profile.as_deref())?;
+    // Record the scope we just wrote into the client's config, so the UI can show
+    // and re-apply this client's effective scope without re-reading the config.
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.set_client_scope(&client_id, profile.as_deref());
+    registry::save(&reg)?;
+    Ok(outcome)
 }
 
 /// Remove the Conduit gateway from a client.
 #[tauri::command]
-fn uninstall_gateway(client_id: String) -> Result<clients::WriteOutcome, String> {
-    clients::uninstall_gateway(&client_id)
+fn uninstall_gateway(
+    state: State<RegistryState>,
+    client_id: String,
+) -> Result<clients::WriteOutcome, String> {
+    let outcome = clients::uninstall_gateway(&client_id)?;
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.set_client_scope(&client_id, None);
+    registry::save(&reg)?;
+    Ok(outcome)
+}
+
+/// 24 random bytes (192 bits) as hex, for a bearer token or a unique id.
+fn random_hex() -> Result<String, String> {
+    let mut buf = [0u8; 24];
+    getrandom::getrandom(&mut buf).map_err(|e| format!("could not generate randomness: {e}"))?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AddedHttpClient {
+    registry: Registry,
+    /// The plaintext bearer token. Shown once; only its SHA-256 is stored.
+    token: String,
+}
+
+/// Register an HTTP-bridge client: generate a bearer token, store its hash plus
+/// the chosen scope, and return the plaintext token once. The client pastes the
+/// token as its API key; the multi-tenant bridge resolves it to this profile per
+/// request, so several HTTP clients on one bridge get different server sets.
+#[tauri::command]
+fn add_http_client(
+    state: State<RegistryState>,
+    label: String,
+    profile: Option<String>,
+) -> Result<AddedHttpClient, String> {
+    let token = random_hex()?;
+    let id = random_hex()?;
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.http_clients.push(registry::HttpClient {
+        id,
+        label: label.trim().to_string(),
+        token_sha256: registry::sha256_hex(&token),
+        profile: profile.unwrap_or_default().trim().to_string(),
+    });
+    registry::save(&reg)?;
+    Ok(AddedHttpClient {
+        registry: reg.clone(),
+        token,
+    })
+}
+
+/// Remove a registered HTTP-bridge client (revokes its token).
+#[tauri::command]
+fn remove_http_client(state: State<RegistryState>, id: String) -> Result<Registry, String> {
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.http_clients.retain(|c| c.id != id);
+    registry::save(&reg)?;
+    Ok(reg.clone())
 }
 
 #[derive(serde::Serialize)]
@@ -333,7 +409,7 @@ async fn migrate_client(
         .find(|c| c.id == client_id)
         .ok_or_else(|| format!("Unknown client '{client_id}'"))?;
 
-    let (registry, imported, moved) = {
+    let (imported, moved) = {
         let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut imported = 0;
         let mut moved = Vec::new();
@@ -352,11 +428,19 @@ async fn migrate_client(
             }
         }
         registry::save(&reg)?;
-        (reg.clone(), imported, moved)
+        (imported, moved)
     };
 
     // Rewrite the client to only the gateway (backs up first).
     clients::migrate_to_gateway(&client_id, profile.as_deref())?;
+
+    // Record the scope now that the client config was rewritten to the gateway.
+    let registry = {
+        let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        reg.set_client_scope(&client_id, profile.as_deref());
+        registry::save(&reg)?;
+        reg.clone()
+    };
 
     Ok(MigrateResult {
         registry,
@@ -598,8 +682,84 @@ async fn call_tool(
             .as_ref()
             .map(|r| !r.get("isError").and_then(|v| v.as_bool()).unwrap_or(false))
             .unwrap_or(false);
-        audit::record_timed(&server.id, &tool, ok, Some(ms));
+        // A transport error carries its own message; capture it so Activity can
+        // show why a playground call failed, not just that it did.
+        let err = result.as_ref().err().cloned();
+        audit::record_timed(&server.id, &tool, ok, Some(ms), err.as_deref());
         result
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// List the resources a server advertises (uri, name, mimeType). Connects on
+/// demand; empty if the server declares no resources capability. Powers the
+/// playground's Resources tab.
+#[tauri::command]
+async fn list_server_resources(
+    state: State<'_, RegistryState>,
+    server_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let server = server_by_id(state.inner(), &server_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        connect_server(&server).map(|mut ds| {
+            ds.load_resources_prompts();
+            ds.resources
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// List the prompts a server advertises (name, description, arguments). Connects
+/// on demand; empty if the server declares no prompts capability. Powers the
+/// playground's Prompts tab.
+#[tauri::command]
+async fn list_server_prompts(
+    state: State<'_, RegistryState>,
+    server_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let server = server_by_id(state.inner(), &server_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        connect_server(&server).map(|mut ds| {
+            ds.load_resources_prompts();
+            ds.prompts
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Read one resource by its uri and return the raw MCP result (`{ contents }`).
+/// Connects on demand. Playground.
+#[tauri::command]
+async fn read_resource(
+    state: State<'_, RegistryState>,
+    server_id: String,
+    uri: String,
+) -> Result<serde_json::Value, String> {
+    let server = server_by_id(state.inner(), &server_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut ds = connect_server(&server)?;
+        ds.read_resource(&uri)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Get one prompt by name with arguments, returning the raw MCP result
+/// (`{ messages }`). Connects on demand. Playground.
+#[tauri::command]
+async fn get_prompt(
+    state: State<'_, RegistryState>,
+    server_id: String,
+    name: String,
+    arguments: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let server = server_by_id(state.inner(), &server_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut ds = connect_server(&server)?;
+        ds.get_prompt(&name, arguments)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1203,7 +1363,14 @@ pub fn run() {
             savings_summary,
             gather_diagnostics,
             probe_servers,
+            test_server,
             list_server_tools,
+            list_server_resources,
+            list_server_prompts,
+            read_resource,
+            get_prompt,
+            add_http_client,
+            remove_http_client,
             call_tool,
             set_tool_enabled,
             set_deny_destructive,

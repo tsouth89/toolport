@@ -491,7 +491,7 @@ fn scan_cursor_plugins() -> Vec<McpServer> {
     let mut servers: Vec<McpServer> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for path in files {
-        let content = match std::fs::read_to_string(&path) {
+        let content = match read_config_file(&path) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -988,7 +988,7 @@ fn read_client(def: &ClientDef) -> DetectedClient {
         return build(config_path, false, Vec::new(), None);
     }
 
-    let content = match std::fs::read_to_string(&path) {
+    let content = match read_config_file(&path) {
         Ok(c) => c,
         Err(e) => {
             return build(
@@ -1069,10 +1069,46 @@ fn epoch_millis() -> u128 {
         .unwrap_or(0)
 }
 
-/// Copy a client's config to a timestamped backup. No-op (Ok(None)) if it doesn't exist yet.
+/// Largest client config we'll read into memory or back up. Real MCP client
+/// configs are a few KB; this cap stops a maliciously large file, or a config
+/// symlinked to a huge or special file (a device, a FIFO), from exhausting
+/// memory or filling the disk via the backup dir.
+const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Read a client config to a string, refusing anything that isn't a regular file
+/// (after following symlinks, so a benign symlinked dotfile still works but a
+/// link to a device/FIFO/directory does not) and capping the size. Returns the
+/// same `Result<String, String>` shape as a plain read, so callers are otherwise
+/// unchanged. A missing file is an error here; callers that tolerate that already
+/// guard with `path.exists()` or treat the `Err` arm as "no config".
+fn read_config_file(path: &Path) -> Result<String, String> {
+    // `metadata` follows symlinks, so this reflects the real target's type/size.
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err(format!(
+            "{} is not a regular file (refusing to read a device, FIFO, or directory)",
+            path.display()
+        ));
+    }
+    if meta.len() > MAX_CONFIG_BYTES {
+        return Err(format!(
+            "{} is {} bytes, larger than the {}-byte config limit",
+            path.display(),
+            meta.len(),
+            MAX_CONFIG_BYTES
+        ));
+    }
+    std::fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+/// Copy a client's config to a timestamped backup. No-op (Ok(None)) if it doesn't
+/// exist yet, or if it isn't a regular file / is over the size cap (we won't copy
+/// a device or a huge file into the backup dir).
 fn backup_file(client_id: &str, path: &Path) -> Result<Option<PathBuf>, String> {
-    if !path.exists() {
-        return Ok(None);
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() <= MAX_CONFIG_BYTES => {}
+        // Missing, special file, or oversized: nothing safe to back up.
+        _ => return Ok(None),
     }
     let dir = backup_dir(client_id).ok_or("Could not resolve backup dir")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -1170,7 +1206,7 @@ fn write_json(
     lenient: bool,
 ) -> Result<(), String> {
     let mut root = if path.exists() {
-        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let content = read_config_file(path)?;
         read_existing_json(&content, lenient)?
     } else {
         serde_json::Value::Object(serde_json::Map::new())
@@ -1191,7 +1227,7 @@ fn write_json(
 
 fn write_toml(path: &Path, servers: &[ServerEntry]) -> Result<(), String> {
     let mut root = if path.exists() {
-        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let content = read_config_file(path)?;
         toml::from_str::<toml::Value>(&content)
             .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
     } else {
@@ -1315,7 +1351,7 @@ fn read_existing_yaml(path: &Path) -> Result<serde_yaml::Value, String> {
     if !path.exists() {
         return Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
     }
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let content = read_config_file(path)?;
     if content.trim().is_empty() {
         return Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
     }
@@ -1848,7 +1884,7 @@ fn edit_json_gateway(
     lenient: bool,
 ) -> Result<(), String> {
     let mut root = if path.exists() {
-        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let content = read_config_file(path)?;
         read_existing_json(&content, lenient)?
     } else {
         serde_json::Value::Object(serde_json::Map::new())
@@ -1879,7 +1915,7 @@ fn edit_json_gateway(
 
 fn edit_toml_gateway(path: &Path, install: bool, profile: Option<&str>) -> Result<(), String> {
     let mut root = if path.exists() {
-        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let content = read_config_file(path)?;
         toml::from_str::<toml::Value>(&content)
             .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
     } else {
@@ -2006,6 +2042,21 @@ mod tests {
 
     fn temp_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("conduit-w-{}-{}.cfg", std::process::id(), label))
+    }
+
+    #[test]
+    fn read_config_file_reads_regular_rejects_others() {
+        let path = temp_path("read-cfg");
+        std::fs::remove_file(&path).ok();
+        // A normal small config reads back verbatim.
+        std::fs::write(&path, "{\"ok\":true}").unwrap();
+        assert_eq!(read_config_file(&path).unwrap(), "{\"ok\":true}");
+        // A directory is not a regular file -> refused (portable stand-in for a
+        // device/FIFO, which we can't create on every platform).
+        assert!(read_config_file(&std::env::temp_dir()).is_err());
+        // A missing file is an error.
+        std::fs::remove_file(&path).ok();
+        assert!(read_config_file(&path).is_err());
     }
 
     #[test]

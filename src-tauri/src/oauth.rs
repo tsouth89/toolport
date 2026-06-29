@@ -193,6 +193,28 @@ pub fn host_of_url(url: &str) -> Option<String> {
     authority.split(':').next().map(|s| s.to_string())
 }
 
+/// True if `ip` is a link-local or well-known cloud-metadata address: IPv4
+/// 169.254.0.0/16, IPv6 fe80::/10, the IPv4-mapped forms of those, and the AWS
+/// IPv6 metadata address fd00:ec2::254 (which lives in unique-local space, so a
+/// pure link-local test would miss it). These are never a valid remote MCP
+/// target and are the classic SSRF route to a cloud metadata service, so they
+/// are refused for every server regardless of provenance.
+pub fn ip_is_link_local(ip: &std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv6Addr};
+    const AWS_V6_METADATA: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254);
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            *v6 == AWS_V6_METADATA
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10
+                || v6
+                    .to_ipv4_mapped()
+                    .map(|m| m.is_link_local())
+                    .unwrap_or(false)
+        }
+    }
+}
+
 fn ip_is_private(ip: &std::net::IpAddr) -> bool {
     use std::net::IpAddr;
     match ip {

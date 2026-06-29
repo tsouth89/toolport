@@ -32,7 +32,7 @@ use conduit_lib::downstream::{DownstreamServer, StdioTransport, PROTOCOL_VERSION
 use conduit_lib::integrity;
 use conduit_lib::registry::{self, Registry, ServerEntry};
 use conduit_lib::remote;
-use conduit_lib::router::{Router, ToolPolicy};
+use conduit_lib::router::{sanitize_segment, Router, ToolPolicy};
 use conduit_lib::savings;
 use conduit_lib::semantic;
 use conduit_lib::secrets;
@@ -624,7 +624,12 @@ fn project_budgeted(tools: &[&Value]) -> Vec<Value> {
         .collect()
 }
 
-fn enabled_summary(reg: &Registry, cached: &[Value], profile: Option<&str>) -> String {
+fn enabled_summary(
+    reg: &Registry,
+    cached: &[Value],
+    profile: Option<&str>,
+    allowed: Option<&std::collections::HashSet<String>>,
+) -> String {
     let active = match profile {
         Some(p) => reg.resolve_profile_id(p),
         None => reg.active_profile_id(),
@@ -636,21 +641,35 @@ fn enabled_summary(reg: &Registry, cached: &[Value], profile: Option<&str>) -> S
         .map(|p| p.name.clone())
         .unwrap_or(active.clone());
 
-    // Exclude Conduit's own gateway entry - it's infrastructure, not a proxied
-    // server, so listing it here is just confusing.
+    // The set of server prefixes this caller may see. A scoped HTTP client sees
+    // exactly its allowed set (its real scope, drawn from its own profile via the
+    // bridge's union - never another tenant's name, command, URL, or tool count).
+    // Stdio and the legacy full-access bridge token see the active profile, as
+    // before. Both the server list and the tool counts are gated by this set, so
+    // they always agree. Exclude Conduit's own gateway entry (infrastructure).
+    let visible: std::collections::HashSet<String> = match allowed {
+        Some(a) => a.clone(),
+        None => reg
+            .servers
+            .iter()
+            .filter(|s| reg.is_enabled(&active, &s.id) && !clients::is_gateway_server(s))
+            .map(|s| sanitize_segment(&s.id))
+            .collect(),
+    };
     let servers: Vec<_> = reg
         .servers
         .iter()
-        .filter(|s| reg.is_enabled(&active, &s.id) && !clients::is_gateway_server(s))
+        .filter(|s| !clients::is_gateway_server(s) && visible.contains(sanitize_segment(&s.id).as_str()))
         .collect();
+    let header = match allowed {
+        Some(_) => "Servers available to this client".to_string(),
+        None => format!("Profile '{profile_name}'"),
+    };
     if servers.is_empty() {
-        return format!("Profile '{profile_name}': no servers enabled.");
+        return format!("{header}: no servers enabled.");
     }
 
-    let mut out = format!(
-        "Profile '{profile_name}' has {} enabled server(s):\n",
-        servers.len()
-    );
+    let mut out = format!("{header} has {} enabled server(s):\n", servers.len());
     for s in servers {
         let target = match (&s.command, &s.url) {
             (Some(cmd), _) => format!("{} {}", cmd, s.args.join(" ")),
@@ -660,14 +679,13 @@ fn enabled_summary(reg: &Registry, cached: &[Value], profile: Option<&str>) -> S
         out.push_str(&format!("- {} [{}] {}\n", s.name, s.transport, target.trim()));
     }
 
-    // Tool counts by server prefix, from the live catalog. These prefixes are
-    // exactly what precedes "__" in tool names, so the agent can enumerate a
-    // server's full tool set with conduit_search_tools(server: "<prefix>").
+    // Tool counts by server prefix, from the live catalog, gated by the same
+    // visible set so a scoped client never sees another tenant's tool counts.
     if !cached.is_empty() {
         let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
         for t in cached {
             let prefix = tool_prefix(t);
-            if !prefix.is_empty() {
+            if !prefix.is_empty() && visible.contains(prefix.as_str()) {
                 *counts.entry(prefix).or_insert(0) += 1;
             }
         }
@@ -741,43 +759,76 @@ struct SearchGuard {
 /// model is stuck on one need, so return only that tool and command the call.
 const SEARCH_REPEAT_LIMIT: u32 = 3;
 
-/// True if a string argument value looks like an LLM-invented placeholder
-/// rather than a real value (e.g. "your_team_id", "<team_id>", "REPLACE_ME").
-/// Deliberately conservative so it never blocks a legitimate value.
-fn looks_like_placeholder(v: &str) -> bool {
+/// True if the parameter name denotes an identifier or secret (teamId, team_id,
+/// apiKey, token, ...), where a value equal to the field name or a schema type
+/// word ("team_id", "string") is almost certainly an LLM placeholder rather than
+/// real content. A content/query parameter is NOT an identifier, so those same
+/// words are left alone there (a search for "string" is legitimate).
+fn param_is_identifier(param: &str) -> bool {
+    let low = param.to_ascii_lowercase();
+    low == "id"
+        || low.ends_with("_id")
+        || param.ends_with("Id") // camelCase teamId / projectId
+        || low.contains("key")
+        || low.contains("token")
+        || low.contains("secret")
+}
+
+/// True if a string argument value looks like an LLM-invented placeholder rather
+/// than a real value (e.g. "your_team_id", "<team_id>", "REPLACE_ME"). `param` is
+/// the argument's name: the collision-prone bare words ("string", "todo",
+/// "team_id") only count as placeholders for an identifier-typed parameter, so a
+/// legitimate search query or title of "todo" is never blocked. Deliberately
+/// conservative: it must never block a real value.
+fn looks_like_placeholder(param: &str, v: &str) -> bool {
     let s = v.trim();
     if s.is_empty() {
         return false;
     }
+    // Unambiguous template forms: an LLM filled in a literal template. Never a
+    // real value, whatever the parameter is.
     if (s.starts_with('<') && s.ends_with('>')) || (s.starts_with("{{") && s.ends_with("}}")) {
         return true;
     }
     let low = s.to_ascii_lowercase();
-    low.starts_with("your_")
+    if low.starts_with("your_")
         || low.starts_with("your-")
         || low.starts_with("your ")
         || low.ends_with("_here")
         || low.ends_with("-here")
         || matches!(
             low.as_str(),
+            "placeholder" | "replace_me" | "replaceme" | "changeme" | "change_me" | "your_api_key"
+        )
+    {
+        return true;
+    }
+    // Field-name / schema-type echoes (the model returned the parameter's own
+    // name or a JSON-schema type word instead of a real value). Only a giveaway
+    // for an identifier-typed parameter; for content fields these are real values.
+    if param_is_identifier(param) {
+        return matches!(
+            low.as_str(),
             "string"
-                | "placeholder"
-                | "replace_me"
-                | "replaceme"
-                | "changeme"
-                | "change_me"
                 | "example"
                 | "todo"
                 | "tbd"
                 | "xxx"
                 | "xxxx"
+                | "id"
+                | "key"
+                | "token"
                 | "team_id"
                 | "teamid"
                 | "account_id"
+                | "accountid"
                 | "project_id"
+                | "projectid"
                 | "api_key"
-                | "your_api_key"
-        )
+                | "apikey"
+        );
+    }
+    false
 }
 
 /// Find the first argument whose string value looks like a placeholder.
@@ -785,7 +836,7 @@ fn find_placeholder_arg(arguments: &Value) -> Option<(String, String)> {
     arguments.as_object().and_then(|obj| {
         obj.iter().find_map(|(k, v)| {
             v.as_str()
-                .filter(|s| looks_like_placeholder(s))
+                .filter(|s| looks_like_placeholder(k, s))
                 .map(|s| (k.clone(), s.to_string()))
         })
     })
@@ -848,6 +899,76 @@ fn recovery_hint(catalog: &[Value], server: &str) -> String {
     }
 }
 
+/// The server prefix of a namespaced tool name (`server__tool`). Matches the
+/// router's `sanitize_segment(server_id)` prefix, so it tests against the
+/// allowed-server set the same way the router names tools.
+fn server_of_tool(name: &str) -> &str {
+    name.split_once("__").map(|(s, _)| s).unwrap_or(name)
+}
+
+/// Keep only tools whose server prefix is in `allowed`. `None` = no scoping
+/// (every tool passes). A meta-tool (no `server__` namespace, e.g.
+/// `conduit_search_tools`) is always kept, since it isn't owned by any
+/// downstream server. Scopes a registered HTTP client's view to its servers.
+fn scope_tools(tools: &[Value], allowed: Option<&std::collections::HashSet<String>>) -> Vec<Value> {
+    match allowed {
+        None => tools.to_vec(),
+        Some(set) => tools
+            .iter()
+            .filter(|t| {
+                t.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| {
+                        let srv = server_of_tool(n);
+                        // A meta-tool has no namespace (server_of_tool returns the
+                        // whole name); always keep it. Otherwise gate on the server.
+                        srv == n || set.contains(srv)
+                    })
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect(),
+    }
+}
+
+/// Resolve an HTTP bearer to (authorized, scope). `Some(allowed)` = authorized,
+/// where `allowed` is the set of server prefixes the client may see (`None` =
+/// the full connected set). The outer `None` = unauthorized. Pure given the
+/// registry + tokens, so the auth/scope policy is unit-testable.
+fn resolve_http_scope(
+    reg: &Registry,
+    env_token: Option<&str>,
+    provided: Option<&str>,
+) -> Option<Option<std::collections::HashSet<String>>> {
+    use std::collections::HashSet;
+    // Legacy single token: sees the full connected set (back-compat).
+    if let (Some(t), Some(p)) = (env_token, provided) {
+        if ct_eq(p.as_bytes(), t.as_bytes()) {
+            return Some(None);
+        }
+    }
+    // A registered client is scoped to its profile (empty profile = full set).
+    if let Some(p) = provided {
+        if let Some(client) = reg.http_client_for_token(p) {
+            if client.profile.trim().is_empty() {
+                return Some(None);
+            }
+            let set: HashSet<String> = reg
+                .enabled_servers_for(&client.profile)
+                .iter()
+                .map(|s| sanitize_segment(&s.id))
+                .collect();
+            return Some(Some(set));
+        }
+    }
+    // No auth configured at all: open, preserving the loopback default.
+    if env_token.is_none() && reg.http_clients.is_empty() {
+        return Some(None);
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_request(
     req: &Value,
     reg: &Registry,
@@ -856,6 +977,7 @@ fn handle_request(
     lazy: bool,
     profile: Option<&str>,
     guard: &mut SearchGuard,
+    allowed: Option<&std::collections::HashSet<String>>,
 ) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -928,11 +1050,14 @@ fn handle_request(
             }
             let mut tools = vec![status_tool_def(), fetch_result_tool_def()];
             // Prefer the cached catalog (instant); fall back to the live router.
-            if cached.is_empty() {
-                tools.extend(router.aggregated_tools());
+            // Scope to the client's allowed servers (a no-op when unscoped), so a
+            // registered HTTP client only ever sees its own servers' tools.
+            let catalog = if cached.is_empty() {
+                router.aggregated_tools()
             } else {
-                tools.extend(cached.iter().cloned());
-            }
+                cached.to_vec()
+            };
+            tools.extend(scope_tools(&catalog, allowed));
             gtrace(&format!(
                 "tools/list -> {} tools (cache={})",
                 tools.len(),
@@ -969,7 +1094,7 @@ fn handle_request(
                 return Some(success(
                     id,
                     json!({
-                        "content": [{ "type": "text", "text": enabled_summary(reg, cached, profile) }],
+                        "content": [{ "type": "text", "text": enabled_summary(reg, cached, profile, allowed) }],
                         "isError": false
                     }),
                 ));
@@ -989,12 +1114,16 @@ fn handle_request(
                 // Prefer the cached catalog (instant); on a cold cache fall back to
                 // the live router so a first-time search doesn't return 0 results.
                 let live;
-                let source: &[Value] = if cached.is_empty() {
+                let base: &[Value] = if cached.is_empty() {
                     live = router.aggregated_tools();
                     &live
                 } else {
                     cached
                 };
+                // Scope the searchable catalog to the client's allowed servers
+                // (a no-op when unscoped), so search can't surface out-of-scope tools.
+                let scoped = scope_tools(base, allowed);
+                let source: &[Value] = &scoped;
                 // Semantic re-ranking if the user has configured it (off by default;
                 // falls back to lexical on any failure).
                 let s = &reg.semantic_search;
@@ -1115,6 +1244,22 @@ fn handle_request(
 
             let (srv, tool) = name.split_once("__").unwrap_or(("?", name));
 
+            // Scope guard: a registered HTTP client may only call tools on the
+            // servers its token is allowed to see (a no-op when unscoped). Search
+            // and list are already filtered, but a client could name any tool, so
+            // enforce it on the call path too.
+            if let Some(set) = allowed {
+                if !set.contains(srv) {
+                    return Some(success(
+                        id,
+                        json!({
+                            "content": [{ "type": "text", "text": format!("Conduit: '{srv}' is not available to this client.") }],
+                            "isError": true
+                        }),
+                    ));
+                }
+            }
+
             // Pre-call guard: a model that invents an identifier (e.g.
             // teamId = "your_team_id") would otherwise waste a downstream call
             // and get a confusing failure. Catch obvious placeholders and point
@@ -1146,7 +1291,10 @@ fn handle_request(
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let ms = started.elapsed().as_millis() as u64;
-                    audit::record_timed(srv, tool, ok, Some(ms));
+                    // Capture the failure message (the result's text) before shaping
+                    // rewrites the content, so Activity can show why the call failed.
+                    let err = if ok { None } else { Some(content_text(&result)) };
+                    audit::record_timed(srv, tool, ok, Some(ms), err.as_deref());
                     // Content defense: scan this untrusted tool output for injection
                     // and label any flagged text as data before it reaches the agent.
                     if reg.content_defense {
@@ -1179,7 +1327,7 @@ fn handle_request(
                 }
                 Err(e) => {
                     let ms = started.elapsed().as_millis() as u64;
-                    audit::record_timed(srv, tool, false, Some(ms));
+                    audit::record_timed(srv, tool, false, Some(ms), Some(&e));
                     let recovery = recovery_hint(cached, srv);
                     Some(success(
                         id,
@@ -1235,10 +1383,23 @@ fn handle_request(
 /// Spawn and connect every enabled server into a router. With `profile` set, only
 /// that profile's servers are connected (per-client scoping); otherwise the
 /// active profile is used.
-fn build_router(reg: &Registry, profile: Option<&str>, dirty: &Arc<AtomicBool>) -> Router {
-    let enabled = match profile {
-        Some(p) => reg.enabled_servers_for(p),
-        None => reg.enabled_servers(),
+fn build_router(
+    reg: &Registry,
+    profile: Option<&str>,
+    http_mode: bool,
+    dirty: &Arc<AtomicBool>,
+) -> Router {
+    // In HTTP mode one process serves every registered client, so connect the
+    // union of all their profiles (per-request filtering scopes each one down).
+    // In stdio mode the process serves a single client, so connect only its
+    // profile - that's what keeps stdio per-client scoping intact.
+    let enabled = if http_mode {
+        reg.bridge_enabled_servers(profile)
+    } else {
+        match profile {
+            Some(p) => reg.enabled_servers_for(p),
+            None => reg.enabled_servers(),
+        }
     };
     let servers: Vec<ServerEntry> = enabled
         .into_iter()
@@ -1474,6 +1635,7 @@ fn save_tool_cache(tools: &[Value], profile: Option<&str>) {
 
 /// Poll the registry file; on change, reload, rebuild the router, and tell the
 /// client its tool list changed. This is what makes a toggle apply live.
+#[allow(clippy::too_many_arguments)]
 fn watch_registry(
     path: PathBuf,
     registry: Arc<Mutex<Registry>>,
@@ -1481,6 +1643,7 @@ fn watch_registry(
     stdout: Arc<Mutex<std::io::Stdout>>,
     cached_tools: Arc<Mutex<Vec<Value>>>,
     profile: Option<String>,
+    http_mode: bool,
     downstream_dirty: Arc<AtomicBool>,
 ) {
     eprintln!("conduit: watching registry at {}", path.display());
@@ -1513,7 +1676,7 @@ fn watch_registry(
             };
             last = current;
             // Build the new router (spawns processes) before taking locks.
-            let new_router = build_router(&new_reg, profile.as_deref(), &downstream_dirty);
+            let new_router = build_router(&new_reg, profile.as_deref(), http_mode, &downstream_dirty);
             let tools = new_router.aggregated_tools();
             *registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_reg;
             *router.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = new_router;
@@ -1558,12 +1721,20 @@ struct GatewayState {
     downstream_dirty: Arc<AtomicBool>,
     lazy: bool,
     profile: Option<String>,
+    /// True when this process is the HTTP/OpenAPI bridge (vs a stdio client's
+    /// gateway). The bridge connects the union of all registered clients' servers.
+    http: bool,
 }
 
 /// One request in, one response out: wait for a cold cache / live router when
 /// the method needs it, self-heal an empty router on a call, then dispatch.
 /// Shared by the stdio loop and the HTTP server so they can't diverge.
-fn process_request(state: &GatewayState, req: &Value, guard: &mut SearchGuard) -> Option<Value> {
+fn process_request(
+    state: &GatewayState,
+    req: &Value,
+    guard: &mut SearchGuard,
+    allowed: Option<&std::collections::HashSet<String>>,
+) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
     let wait = match method {
@@ -1598,7 +1769,7 @@ fn process_request(state: &GatewayState, req: &Value, guard: &mut SearchGuard) -
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let built = build_router(&reg, state.profile.as_deref(), &state.downstream_dirty);
+        let built = build_router(&reg, state.profile.as_deref(), state.http, &state.downstream_dirty);
         if built.server_count() > 0 {
             let tools = built.aggregated_tools();
             *state
@@ -1646,6 +1817,7 @@ fn process_request(state: &GatewayState, req: &Value, guard: &mut SearchGuard) -
         state.lazy,
         state.profile.as_deref(),
         guard,
+        allowed,
     )
 }
 
@@ -1729,8 +1901,23 @@ fn http_tool_defs(state: &GatewayState) -> Vec<Value> {
 /// Build an OpenAPI 3.1 document describing the exposed tools as POST
 /// operations, each carrying the tool's input schema as its request body. This
 /// is what an OpenAPI tool client (Open WebUI) reads to learn the tools.
-fn openapi_spec(state: &GatewayState) -> Value {
-    let defs = http_tool_defs(state);
+fn openapi_spec(
+    state: &GatewayState,
+    allowed: Option<&std::collections::HashSet<String>>,
+) -> Value {
+    // Scope the advertised tools to the client's allowed servers (no-op when
+    // unscoped), so a registered client's spec never lists out-of-scope tools.
+    let defs = scope_tools(&http_tool_defs(state), allowed);
+    // The gateway's error envelope is always `{ "error": "<message>" }`; point
+    // every non-2xx response at the shared Error schema so a client can model it.
+    let err_resp = |desc: &str| {
+        json!({
+            "description": desc,
+            "content": {
+                "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+            }
+        })
+    };
     let mut paths = serde_json::Map::new();
     for t in &defs {
         let name = match t.get("name").and_then(|v| v.as_str()) {
@@ -1756,9 +1943,16 @@ fn openapi_spec(state: &GatewayState) -> Value {
                     },
                     "responses": {
                         "200": {
-                            "description": "Tool result",
-                            "content": { "application/json": { "schema": { "type": "string" } } }
-                        }
+                            "description": "Tool output: the joined text content of the MCP tool result, as a JSON string.",
+                            "content": { "application/json": { "schema": {
+                                "type": "string",
+                                "description": "The tool's text output."
+                            } } }
+                        },
+                        "400": err_resp("Invalid JSON body, or the tool itself returned an error."),
+                        "401": err_resp("Missing or invalid bearer token."),
+                        "404": err_resp("Unknown tool name."),
+                        "500": err_resp("Internal gateway error.")
                     }
                 }
             }),
@@ -1771,8 +1965,47 @@ fn openapi_spec(state: &GatewayState) -> Value {
             "description": "Conduit MCP gateway as OpenAPI for HTTP tool clients (Open WebUI and any OpenAPI consumer). Search with conduit_search_tools, then call by name with conduit_call_tool.",
             "version": env!("CARGO_PKG_VERSION")
         },
-        "paths": Value::Object(paths)
+        // Relative base URL: resolves against the origin the spec was fetched
+        // from, so the gateway needn't know its own externally-visible host/port.
+        "servers": [
+            { "url": "/", "description": "This gateway (same origin the spec was served from)." }
+        ],
+        "paths": Value::Object(paths),
+        "components": {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "description": "The bearer token shown in Conduit's Settings -> Integrations toggle. Paste it as the API key in your client. Required whenever the gateway was started with a token (the desktop app always sets one)."
+                }
+            },
+            "schemas": {
+                "Error": {
+                    "type": "object",
+                    "properties": { "error": { "type": "string", "description": "Human-readable error message." } },
+                    "required": ["error"]
+                }
+            }
+        },
+        "security": [ { "bearerAuth": [] } ]
     })
+}
+
+/// Join the text blocks of a tool result's `content` array (the inner result
+/// object, not the JSON-RPC envelope). Used to capture a failed call's error
+/// message for the audit log, before shaping/integrity mutate the result.
+fn content_text(result: &Value) -> String {
+    result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
 }
 
 /// Pull the human-facing text out of a tools/call result, joining text blocks.
@@ -1806,6 +2039,7 @@ fn handle_http(
     method: &str,
     path: &str,
     body: &str,
+    allowed: Option<&std::collections::HashSet<String>>,
 ) -> (u16, &'static str, String) {
     match (method, path) {
         // CORS preflight: browsers (Open WebUI fetches tool specs client-side)
@@ -1813,7 +2047,7 @@ fn handle_http(
         // is allowed through. The CORS headers themselves are added to every
         // response in serve_http_loop.
         ("OPTIONS", _) => (204, "text/plain", String::new()),
-        ("GET", "/openapi.json") => (200, "application/json", openapi_spec(state).to_string()),
+        ("GET", "/openapi.json") => (200, "application/json", openapi_spec(state, allowed).to_string()),
         ("GET", "/") | ("GET", "/docs") => (
             200,
             "text/plain; charset=utf-8",
@@ -1849,7 +2083,7 @@ fn handle_http(
                 "method": "tools/call",
                 "params": { "name": name, "arguments": args }
             });
-            match process_request(state, &req, guard) {
+            match process_request(state, &req, guard, allowed) {
                 Some(resp) => {
                     if let Some(err) = resp.get("error") {
                         let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("error");
@@ -1885,9 +2119,7 @@ const MAX_HTTP_BODY: u64 = 4 * 1024 * 1024;
 
 /// Parse a `Bearer <token>` Authorization value. Pure, so it's unit-testable.
 fn parse_bearer(auth_value: &str) -> Option<&str> {
-    let mut parts = auth_value.splitn(2, ' ');
-    let scheme = parts.next()?;
-    let tok = parts.next()?;
+    let (scheme, tok) = auth_value.split_once(' ')?;
     scheme.eq_ignore_ascii_case("bearer").then(|| tok.trim())
 }
 
@@ -1896,6 +2128,21 @@ fn parse_bearer(auth_value: &str) -> Option<&str> {
 /// can't inject a header or make `Header::from_bytes` reject and panic.
 fn sanitize_header_value(v: &str) -> String {
     v.chars().filter(|c| !c.is_control()).take(512).collect()
+}
+
+/// Constant-time byte-slice equality for comparing the bearer token. Fails fast
+/// on a length mismatch (the token length is not secret), but otherwise folds
+/// over every byte without short-circuiting so a timing measurement can't
+/// recover the token one byte at a time.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn serve_http(state: GatewayState, port: u16) {
@@ -1965,16 +2212,10 @@ fn serve_http_loop(server: tiny_http::Server, state: GatewayState, token: Option
         let method = request.method().to_string().to_uppercase();
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or("/").to_string();
-        // Reflect the caller's (sanitized) Origin and requested headers so the
-        // CORS preflight passes for browser clients. The bearer token, not CORS,
-        // is what actually authorizes a call.
-        let origin = request
-            .headers()
-            .iter()
-            .find(|h| h.field.equiv("Origin"))
-            .map(|h| sanitize_header_value(h.value.as_str()))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "*".to_string());
+        // Reflect only the caller's requested headers (sanitized) so the CORS
+        // preflight passes; the Allow-Origin we return is always a wildcard, never
+        // the caller's Origin (see the CORS block below). The bearer token, not
+        // CORS, is what actually authorizes a call.
         let allow_headers = request
             .headers()
             .iter()
@@ -1983,52 +2224,81 @@ fn serve_http_loop(server: tiny_http::Server, state: GatewayState, token: Option
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "Content-Type, Authorization".to_string());
 
-        // Auth gate: when a token is configured it's required on every request
-        // except the CORS preflight (browsers send OPTIONS without auth). A bad
-        // or missing token is rejected before we read the body or route anything.
+        // A browser attaches Sec-Fetch-Site to every request; a server-side caller
+        // (Open WebUI's backend, curl) does not. Refuse a cross-site browser
+        // request outright so a malicious web page the user has open can't reach
+        // the bridge or read tool output even when no token is set. The data-less
+        // CORS preflight (OPTIONS) is left to the normal preflight path.
+        let cross_site = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Sec-Fetch-Site"))
+            .map(|h| h.value.as_str().eq_ignore_ascii_case("cross-site"))
+            .unwrap_or(false);
+
+        // Auth + scope gate: resolve the bearer to (authorized, allowed-servers).
+        // OPTIONS is the data-less preflight, always allowed and unscoped. Else the
+        // registry decides: the legacy env token (full connected set), a registered
+        // HTTP client (its profile's servers), or open when no auth is configured.
+        // A bad/missing token is rejected before we read the body or route.
         let provided = request
             .headers()
             .iter()
             .find(|h| h.field.equiv("Authorization"))
             .map(|h| h.value.as_str().to_string());
-        let authorized = match &token {
-            None => true,
-            Some(t) => {
-                method == "OPTIONS"
-                    || provided.as_deref().and_then(parse_bearer) == Some(t.as_str())
-            }
+        let provided_tok = provided.as_deref().and_then(parse_bearer);
+        let scope: Option<Option<std::collections::HashSet<String>>> = if method == "OPTIONS" {
+            Some(None)
+        } else {
+            let reg = state
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            resolve_http_scope(&reg, token.as_deref(), provided_tok)
         };
 
-        let (status, ctype, payload): (u16, &str, String) = if !authorized {
+        let (status, ctype, payload): (u16, &str, String) = if cross_site && method != "OPTIONS" {
             (
-                401,
+                403,
                 "application/json",
-                json!({ "error": "missing or invalid bearer token" }).to_string(),
+                json!({ "error": "cross-site browser requests are not allowed" }).to_string(),
             )
         } else {
-            let mut body = String::new();
-            if method == "POST" {
-                let _ = request
-                    .as_reader()
-                    .take(MAX_HTTP_BODY)
-                    .read_to_string(&mut body);
+            match scope {
+                None => (
+                    401,
+                    "application/json",
+                    json!({ "error": "missing or invalid bearer token" }).to_string(),
+                ),
+                Some(allowed) => {
+                    let mut body = String::new();
+                    if method == "POST" {
+                        let _ = request
+                            .as_reader()
+                            .take(MAX_HTTP_BODY)
+                            .read_to_string(&mut body);
+                    }
+                    // A panic in a handler must return 500, not kill the listener.
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        handle_http(&state, &mut guard, &method, &path, &body, allowed.as_ref())
+                    }))
+                    .unwrap_or((
+                        500,
+                        "application/json",
+                        "{\"error\":\"internal error\"}".to_string(),
+                    ))
+                }
             }
-            // A panic in a handler must return 500, not kill the listener thread.
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                handle_http(&state, &mut guard, &method, &path, &body)
-            }))
-            .unwrap_or((
-                500,
-                "application/json",
-                "{\"error\":\"internal error\"}".to_string(),
-            ))
         };
 
         let mut response = tiny_http::Response::from_string(payload).with_status_code(status);
-        let cors: [(&[u8], &[u8]); 5] = [
+        let cors: [(&[u8], &[u8]); 4] = [
             (b"Content-Type", ctype.as_bytes()),
-            (b"Access-Control-Allow-Origin", origin.as_bytes()),
-            (b"Access-Control-Allow-Credentials", b"true"),
+            // Auth is a bearer header, never a cookie, so credentialed CORS is
+            // unnecessary. Return a wildcard Origin (never the reflected caller
+            // Origin) and omit Allow-Credentials, so a malicious page can't pair a
+            // reflected origin with Allow-Credentials to read a response.
+            (b"Access-Control-Allow-Origin", b"*"),
             (b"Access-Control-Allow-Methods", b"GET, POST, OPTIONS"),
             (b"Access-Control-Allow-Headers", allow_headers.as_bytes()),
         ];
@@ -2109,6 +2379,10 @@ fn main() {
     let profile = std::env::var("CONDUIT_PROFILE")
         .ok()
         .filter(|s| !s.trim().is_empty());
+    // HTTP/OpenAPI bridge mode: one process serves every registered client, so the
+    // router connects the union of their profiles. Resolve the port once up front.
+    let http_port_opt = http_port();
+    let http_mode = http_port_opt.is_some();
     glog("=== gateway start ===");
     glog(&format!(
         "cwd={:?} CONDUIT_REGISTRY={:?} registry_path={:?} lazy={lazy} profile={profile:?}",
@@ -2171,7 +2445,7 @@ fn main() {
         let profile = profile.clone();
         std::thread::spawn(move || {
             let reg = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-            let built = build_router(&reg, profile.as_deref(), &downstream_dirty);
+            let built = build_router(&reg, profile.as_deref(), http_mode, &downstream_dirty);
             let tools = built.aggregated_tools();
             glog(&format!(
                 "background build: {} tools from {} servers",
@@ -2208,6 +2482,7 @@ fn main() {
                 stdout,
                 cached_tools,
                 profile,
+                http_mode,
                 downstream_dirty,
             )
         });
@@ -2222,13 +2497,14 @@ fn main() {
         downstream_dirty: Arc::clone(&downstream_dirty),
         lazy,
         profile: profile.clone(),
+        http: http_mode,
     };
 
     // Native HTTP/OpenAPI transport: a first-class path for HTTP tool clients
     // (Open WebUI and any OpenAPI consumer) with no external bridge. Standalone,
     // so it replaces the stdio loop; the background build + registry watcher
     // started above still keep the router and cache live underneath it.
-    if let Some(port) = http_port() {
+    if let Some(port) = http_port_opt {
         serve_http(state, port);
         return;
     }
@@ -2252,7 +2528,7 @@ fn main() {
             "request: {}",
             req.get("method").and_then(|m| m.as_str()).unwrap_or("")
         ));
-        let response = process_request(&state, &req, &mut search_guard);
+        let response = process_request(&state, &req, &mut search_guard, None);
         if let Some(resp) = response {
             let mut out = state
                 .stdout
@@ -2284,6 +2560,7 @@ mod tests {
             downstream_dirty: Arc::new(AtomicBool::new(false)),
             lazy,
             profile: None,
+            http: true,
         }
     }
 
@@ -2303,7 +2580,7 @@ mod tests {
 
     #[test]
     fn openapi_exposes_meta_tools_as_post_paths() {
-        let spec = openapi_spec(&http_state(true));
+        let spec = openapi_spec(&http_state(true), None);
         let paths = spec.get("paths").unwrap().as_object().unwrap();
         // The lazy meta-tools are each a POST path.
         assert!(paths.contains_key("/conduit_search_tools"));
@@ -2315,26 +2592,60 @@ mod tests {
             .unwrap();
         assert_eq!(op.get("operationId").unwrap(), "conduit_search_tools");
         assert!(op.get("requestBody").is_some());
+        // Error responses are declared so a client can model failures.
+        let responses = op.get("responses").unwrap().as_object().unwrap();
+        for code in ["200", "400", "401", "404", "500"] {
+            assert!(responses.contains_key(code), "missing response {code}");
+        }
         // Agent-control tools stay hidden unless the registry opts in.
         assert!(!paths.contains_key("/conduit_enable_server"));
         assert_eq!(spec.get("openapi").unwrap(), "3.1.0");
+        // A relative servers entry so clients can resolve the base URL.
+        assert_eq!(spec.pointer("/servers/0/url").unwrap(), "/");
+        // The bearer scheme is advertised and required globally.
+        assert_eq!(
+            spec.pointer("/components/securitySchemes/bearerAuth/scheme").unwrap(),
+            "bearer"
+        );
+        assert!(spec.pointer("/security/0/bearerAuth").is_some());
+        // The shared Error schema the non-2xx responses reference exists.
+        assert!(spec.pointer("/components/schemas/Error/properties/error").is_some());
     }
 
     #[test]
     fn detects_invented_placeholders_but_not_real_values() {
-        for p in [
-            "your_team_id",
-            "<team_id>",
-            "{{teamId}}",
-            "REPLACE_ME",
-            "team_id_here",
-            "string",
-            "TODO",
+        // Template forms are placeholders regardless of the parameter.
+        for (param, val) in [
+            ("teamId", "your_team_id"),
+            ("teamId", "<team_id>"),
+            ("teamId", "{{teamId}}"),
+            ("apiKey", "REPLACE_ME"),
+            ("teamId", "team_id_here"),
         ] {
-            assert!(looks_like_placeholder(p), "should flag {p:?}");
+            assert!(looks_like_placeholder(param, val), "should flag {param}={val:?}");
         }
+        // Field-name / schema-type echoes are placeholders ONLY for an
+        // identifier-typed parameter.
+        assert!(looks_like_placeholder("teamId", "string"));
+        assert!(looks_like_placeholder("teamId", "team_id"));
+        assert!(looks_like_placeholder("apiKey", "TODO"));
+        // The SAME bare words are legitimate content for a non-identifier param
+        // (this is the false-positive the guard used to trip on).
+        for (param, val) in [
+            ("query", "string"),
+            ("title", "todo"),
+            ("name", "example"),
+            ("message", "xxx"),
+            ("branch", "tbd"),
+        ] {
+            assert!(
+                !looks_like_placeholder(param, val),
+                "should NOT flag content {param}={val:?}"
+            );
+        }
+        // Real values are never flagged, identifier or not.
         for real in ["team_aBc123XYZ", "acme-prod", "my real project", "", "  "] {
-            assert!(!looks_like_placeholder(real), "should NOT flag {real:?}");
+            assert!(!looks_like_placeholder("teamId", real), "should NOT flag {real:?}");
         }
     }
 
@@ -2345,6 +2656,159 @@ mod tests {
         assert_eq!(k, "teamId");
         assert_eq!(v, "your_team_id");
         assert!(find_placeholder_arg(&json!({ "teamId": "team_real123" })).is_none());
+        // A content field whose value collides with a schema word is no longer a
+        // false positive.
+        assert!(find_placeholder_arg(&json!({ "query": "string" })).is_none());
+        assert!(find_placeholder_arg(&json!({ "title": "todo" })).is_none());
+    }
+
+    #[test]
+    fn ct_eq_matches_only_equal_slices() {
+        assert!(ct_eq(b"", b""));
+        assert!(ct_eq(b"token123", b"token123"));
+        assert!(!ct_eq(b"token123", b"token124"));
+        assert!(!ct_eq(b"token123", b"token1234")); // length mismatch
+        assert!(!ct_eq(b"abc", b""));
+    }
+
+    #[test]
+    fn server_of_tool_extracts_prefix() {
+        assert_eq!(server_of_tool("vercel__deploy"), "vercel");
+        assert_eq!(server_of_tool("resend__send_email"), "resend");
+        // A meta-tool has no namespace; the whole name is returned.
+        assert_eq!(server_of_tool("conduit_status"), "conduit_status");
+    }
+
+    #[test]
+    fn scope_tools_filters_by_server_keeps_meta() {
+        let tools = vec![
+            json!({ "name": "vercel__deploy" }),
+            json!({ "name": "resend__send" }),
+            json!({ "name": "conduit_search_tools" }),
+        ];
+        // Unscoped: everything passes.
+        assert_eq!(scope_tools(&tools, None).len(), 3);
+        // Scoped to vercel: its tool plus the meta-tool, never resend.
+        let set: std::collections::HashSet<String> = ["vercel".to_string()].into_iter().collect();
+        let names: Vec<String> = scope_tools(&tools, Some(&set))
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert!(names.contains(&"vercel__deploy".to_string()));
+        assert!(names.contains(&"conduit_search_tools".to_string()));
+        assert!(!names.contains(&"resend__send".to_string()));
+    }
+
+    #[test]
+    fn resolve_http_scope_auth_and_scope_policy() {
+        let mut reg = Registry::default();
+        // No auth configured at all -> open, unscoped.
+        assert_eq!(resolve_http_scope(&reg, None, None), Some(None));
+        // Legacy env token: exact match -> unscoped; mismatch -> rejected.
+        assert_eq!(resolve_http_scope(&reg, Some("envtok"), Some("envtok")), Some(None));
+        assert!(resolve_http_scope(&reg, Some("envtok"), Some("nope")).is_none());
+        // A registered client with an empty profile is authorized but unscoped.
+        reg.http_clients.push(registry::HttpClient {
+            id: "c1".into(),
+            label: "full".into(),
+            token_sha256: registry::sha256_hex("fulltok"),
+            profile: String::new(),
+        });
+        assert_eq!(resolve_http_scope(&reg, None, Some("fulltok")), Some(None));
+        // Once any client is registered, an unknown/absent bearer is rejected
+        // (the open default no longer applies).
+        assert!(resolve_http_scope(&reg, None, Some("unknown")).is_none());
+        assert!(resolve_http_scope(&reg, None, None).is_none());
+        // A client scoped to a non-empty profile resolves to a (possibly empty)
+        // allow-set; exact membership is covered by enabled_servers_for tests.
+        reg.http_clients.push(registry::HttpClient {
+            id: "c2".into(),
+            label: "scoped".into(),
+            token_sha256: registry::sha256_hex("scopedtok"),
+            profile: "Default".into(),
+        });
+        assert!(matches!(resolve_http_scope(&reg, None, Some("scopedtok")), Some(Some(_))));
+    }
+
+    #[test]
+    fn status_summary_scopes_to_allowed_servers() {
+        use std::collections::HashSet;
+        let mut reg = Registry::default();
+        for id in ["alpha", "bravo"] {
+            reg.servers.push(ServerEntry {
+                id: id.into(),
+                name: id.into(),
+                transport: "stdio".into(),
+                command: Some(format!("{id}-cmd")),
+                args: vec![],
+                env: vec![],
+                url: None,
+                source: None,
+                disabled_tools: vec![],
+            });
+        }
+        // alpha is in the active (default) profile; bravo only in a separate one.
+        reg.set_server_enabled("default", "alpha", true).unwrap();
+        let billing = reg.add_profile("Billing");
+        reg.set_server_enabled(&billing, "bravo", true).unwrap();
+        let cached = vec![json!({ "name": "alpha__x" }), json!({ "name": "bravo__y" })];
+        // Unscoped (legacy/stdio): the active profile -> alpha only.
+        let full = enabled_summary(&reg, &cached, None, None);
+        assert!(full.contains("alpha"));
+        assert!(!full.contains("bravo")); // not in the active profile
+        // Scoped to bravo: shows bravo (its real scope) even though bravo isn't in
+        // the active profile, and never leaks alpha's name/command/tool count.
+        let allowed: HashSet<String> = ["bravo".to_string()].into_iter().collect();
+        let scoped = enabled_summary(&reg, &cached, None, Some(&allowed));
+        assert!(scoped.contains("bravo"));
+        assert!(!scoped.contains("alpha"));
+        assert!(!scoped.contains("alpha-cmd"));
+    }
+
+    #[test]
+    fn scoped_call_to_out_of_scope_server_is_refused() {
+        let reg = Registry::default();
+        let allowed: std::collections::HashSet<String> = ["vercel".to_string()].into_iter().collect();
+        // A call to an out-of-scope server is refused with a clear isError result.
+        let req = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "resend__send", "arguments": {} }
+        });
+        let resp = handle_request(
+            &req, &reg, &mut router(), &catalog(), true, None,
+            &mut SearchGuard::default(), Some(&allowed),
+        )
+        .unwrap();
+        let result = resp.get("result").unwrap();
+        assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+        let text = result
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|b| b.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        assert!(text.contains("not available to this client"));
+        // An in-scope call passes the scope guard (it then fails at routing since
+        // no server is connected, but NOT with the scope-refusal message).
+        let req_ok = json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": "vercel__deploy", "arguments": {} }
+        });
+        let resp_ok = handle_request(
+            &req_ok, &reg, &mut router(), &catalog(), true, None,
+            &mut SearchGuard::default(), Some(&allowed),
+        )
+        .unwrap();
+        let text_ok = resp_ok
+            .get("result")
+            .and_then(|r| r.get("content"))
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|b| b.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        assert!(!text_ok.contains("not available to this client"));
     }
 
     #[test]
@@ -2392,7 +2856,7 @@ mod tests {
         // real request goes through (CORS headers themselves are added per-response).
         let state = http_state(true);
         let (status, _, body) =
-            handle_http(&state, &mut SearchGuard::default(), "OPTIONS", "/conduit_search_tools", "");
+            handle_http(&state, &mut SearchGuard::default(), "OPTIONS", "/conduit_search_tools", "", None);
         assert_eq!(status, 204);
         assert!(body.is_empty());
     }
@@ -2440,7 +2904,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": { "protocolVersion": "2025-06-18" }
         });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default()).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default(), None).unwrap();
         assert_eq!(resp["id"], 1);
         assert_eq!(resp["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(resp["result"]["capabilities"]["tools"]["listChanged"], true);
@@ -2450,14 +2914,14 @@ mod tests {
     fn notifications_get_no_reply() {
         let reg = Registry::default();
         let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        assert!(handle_request(&note, &reg, &mut router(), &[], false, None, &mut SearchGuard::default()).is_none());
+        assert!(handle_request(&note, &reg, &mut router(), &[], false, None, &mut SearchGuard::default(), None).is_none());
     }
 
     #[test]
     fn tools_list_always_includes_status() {
         let reg = Registry::default();
         let req = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default()).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default(), None).unwrap();
         let names: Vec<&str> = resp["result"]["tools"]
             .as_array()
             .unwrap()
@@ -2487,7 +2951,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": { "name": "conduit_status", "arguments": {} }
         });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default()).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default(), None).unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("github"));
         assert_eq!(resp["result"]["isError"], false);
@@ -2497,7 +2961,7 @@ mod tests {
     fn unknown_method_is_jsonrpc_error() {
         let reg = Registry::default();
         let req = json!({ "jsonrpc": "2.0", "id": 9, "method": "frobnicate" });
-        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default()).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &[], false, None, &mut SearchGuard::default(), None).unwrap();
         assert_eq!(resp["error"]["code"], -32601);
     }
 
@@ -2514,7 +2978,7 @@ mod tests {
         let reg = Registry::default();
         let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
         // Even with a full cached catalog, lazy mode advertises just the meta-tools.
-        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default()).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default(), None).unwrap();
         let names: Vec<&str> = resp["result"]["tools"]
             .as_array()
             .unwrap()
@@ -2622,7 +3086,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 5, "method": "tools/call",
             "params": { "name": "conduit_search_tools", "arguments": { "query": "charges" } }
         });
-        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default()).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default(), None).unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("stripe__list_charges"));
         assert_eq!(resp["result"]["isError"], false);
@@ -2647,7 +3111,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 7, "method": "tools/call",
             "params": { "name": "conduit_search_tools", "arguments": { "query": "zzznotarealtoolzzz" } }
         });
-        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default()).unwrap();
+        let resp = handle_request(&req, &reg, &mut router(), &catalog(), true, None, &mut SearchGuard::default(), None).unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("No tools matched"));
         // No phantom "Top match" when there's nothing to call.
@@ -2665,7 +3129,7 @@ mod tests {
 
     fn search_text(reg: &Registry, guard: &mut SearchGuard, query: &str) -> String {
         let resp =
-            handle_request(&search_req(query), reg, &mut router(), &catalog(), true, None, guard)
+            handle_request(&search_req(query), reg, &mut router(), &catalog(), true, None, guard, None)
                 .unwrap();
         resp["result"]["content"][0]["text"].as_str().unwrap().to_string()
     }
@@ -2691,7 +3155,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 10, "method": "tools/call",
             "params": { "name": "conduit_status", "arguments": {} }
         });
-        handle_request(&status, &reg, &mut router(), &catalog(), true, None, &mut guard);
+        handle_request(&status, &reg, &mut router(), &catalog(), true, None, &mut guard, None);
         let text = search_text(&reg, &mut guard, "charges");
         assert!(!text.contains(ESCALATION_MARK), "non-search action should reset the streak");
         assert!(text.contains("Top match:"));

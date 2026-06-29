@@ -35,6 +35,16 @@ const STDERR_TAIL_CAP: usize = 4096;
 /// MCP responses are tiny.
 const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Retry budget for transient HTTP failures that are SAFE to repeat: a connection
+/// that never reached the server, or an explicit 429 rate-limit. We deliberately
+/// do NOT retry 5xx or post-send I/O errors, because an MCP `tools/call` is not
+/// guaranteed idempotent and may already have executed server-side, so a blind
+/// retry could double-execute it (send the email twice, charge the card twice).
+const HTTP_MAX_RETRIES: u32 = 2;
+/// Base backoff between retries; doubles each attempt, capped at HTTP_RETRY_CAP.
+const HTTP_RETRY_BASE: Duration = Duration::from_millis(250);
+const HTTP_RETRY_CAP: Duration = Duration::from_secs(10);
+
 /// Read up to `max` bytes of a ureq response body, lossily as text, never more than
 /// the cap even if the server keeps streaming.
 fn read_capped(resp: ureq::Response, max: u64) -> String {
@@ -42,6 +52,33 @@ fn read_capped(resp: ureq::Response, max: u64) -> String {
     let mut buf = Vec::new();
     let _ = resp.into_reader().take(max).read_to_end(&mut buf);
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Exponential backoff for retry `attempt` (0-based): base * 2^attempt, capped.
+fn backoff_delay(attempt: u32) -> Duration {
+    let mult = 1u32 << attempt.min(6);
+    HTTP_RETRY_BASE.saturating_mul(mult).min(HTTP_RETRY_CAP)
+}
+
+/// Parse a `Retry-After` value in delta-seconds form (the common 429 form),
+/// capped so a hostile or misconfigured server can't park a call for minutes.
+fn retry_after_delay(value: &str) -> Option<Duration> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|s| Duration::from_secs(s).min(HTTP_RETRY_CAP))
+}
+
+/// True for transport errors where the request never reached the server (DNS or
+/// connection failure), so even a non-idempotent `tools/call` is safe to retry.
+/// Post-send I/O errors (e.g. a read timeout after the server got the request)
+/// are deliberately excluded, since the call may already have run.
+fn is_retryable_transport(t: &ureq::Transport) -> bool {
+    matches!(
+        t.kind(),
+        ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed
+    )
 }
 
 /// Build an `Authorization` header value from a raw token, adding the `Bearer`
@@ -464,31 +501,58 @@ impl HttpTransport {
     }
 
     fn post(&mut self, body: &Value, expect_response: bool) -> Result<Option<Value>, String> {
-        let mut req = self
-            .agent
-            .post(&self.url)
-            .set("Content-Type", "application/json")
-            .set("Accept", "application/json, text/event-stream")
-            .set("MCP-Protocol-Version", PROTOCOL_VERSION);
-        if let Some(sid) = &self.session_id {
-            req = req.set("Mcp-Session-Id", sid);
-        }
-        if let Some(token) = &self.auth {
-            req = req.set("Authorization", &bearer_header(token));
-        }
-
-        let resp = match req.send_string(&body.to_string()) {
-            Ok(r) => r,
-            Err(ureq::Error::Status(code, r)) => {
-                let detail: String = read_capped(r, 64 * 1024).chars().take(200).collect();
-                let hint = if code == 401 || code == 403 {
-                    " (needs authentication)"
-                } else {
-                    ""
-                };
-                return Err(format!("HTTP {code}{hint}: {detail}"));
+        let payload = body.to_string();
+        let mut attempt = 0u32;
+        // Retry only the genuinely-safe transient failures (429 and
+        // connection-never-reached). Each attempt rebuilds the request (ureq
+        // consumes it on send).
+        let resp = loop {
+            let mut req = self
+                .agent
+                .post(&self.url)
+                .set("Content-Type", "application/json")
+                .set("Accept", "application/json, text/event-stream")
+                .set("MCP-Protocol-Version", PROTOCOL_VERSION);
+            if let Some(sid) = &self.session_id {
+                req = req.set("Mcp-Session-Id", sid);
             }
-            Err(e) => return Err(e.to_string()),
+            if let Some(token) = &self.auth {
+                req = req.set("Authorization", &bearer_header(token));
+            }
+
+            match req.send_string(&payload) {
+                Ok(r) => break r,
+                // Rate limited: the server rejected the request before processing
+                // it, so retrying after the advertised delay is safe for any method.
+                Err(ureq::Error::Status(429, r)) if attempt < HTTP_MAX_RETRIES => {
+                    let wait = r
+                        .header("retry-after")
+                        .and_then(retry_after_delay)
+                        .unwrap_or_else(|| backoff_delay(attempt));
+                    // Drain the body so the connection can be reused.
+                    let _ = read_capped(r, 8 * 1024);
+                    std::thread::sleep(wait);
+                    attempt += 1;
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    let detail: String = read_capped(r, 64 * 1024).chars().take(200).collect();
+                    let hint = if code == 401 || code == 403 {
+                        " (needs authentication)"
+                    } else {
+                        ""
+                    };
+                    return Err(format!("HTTP {code}{hint}: {detail}"));
+                }
+                // The connection never reached the server, so the request did not
+                // execute: safe to retry even a non-idempotent tools/call.
+                Err(ureq::Error::Transport(t))
+                    if attempt < HTTP_MAX_RETRIES && is_retryable_transport(&t) =>
+                {
+                    std::thread::sleep(backoff_delay(attempt));
+                    attempt += 1;
+                }
+                Err(e) => return Err(e.to_string()),
+            }
         };
 
         if let Some(sid) = resp.header("Mcp-Session-Id") {
@@ -677,6 +741,29 @@ mod tests {
             resolved.to_lowercase().ends_with("cmd.exe"),
             "expected cmd.exe, got {resolved}"
         );
+    }
+
+    #[test]
+    fn backoff_doubles_and_caps() {
+        use super::{backoff_delay, HTTP_RETRY_BASE, HTTP_RETRY_CAP};
+        assert_eq!(backoff_delay(0), HTTP_RETRY_BASE);
+        assert_eq!(backoff_delay(1), HTTP_RETRY_BASE * 2);
+        assert_eq!(backoff_delay(2), HTTP_RETRY_BASE * 4);
+        // Large attempts saturate at the cap, never overflow.
+        assert_eq!(backoff_delay(30), HTTP_RETRY_CAP);
+    }
+
+    #[test]
+    fn retry_after_parses_delta_seconds_and_caps() {
+        use super::{retry_after_delay, HTTP_RETRY_CAP};
+        use std::time::Duration;
+        assert_eq!(retry_after_delay("2"), Some(Duration::from_secs(2)));
+        assert_eq!(retry_after_delay("  5 "), Some(Duration::from_secs(5)));
+        // Over the cap is clamped to the cap.
+        assert_eq!(retry_after_delay("9999"), Some(HTTP_RETRY_CAP));
+        // HTTP-date form and junk are not delta-seconds: no delay parsed.
+        assert_eq!(retry_after_delay("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        assert_eq!(retry_after_delay(""), None);
     }
 
     #[test]

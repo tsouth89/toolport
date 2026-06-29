@@ -6,6 +6,8 @@ import type {
   CatalogEntry,
   DetectedClient,
   ImportItem,
+  McpPrompt,
+  McpResource,
   McpTool,
   MigrateResult,
   ProbeResult,
@@ -70,6 +72,33 @@ export function probeServers(): Promise<ProbeResult[]> {
   return invoke<ProbeResult[]>("probe_servers");
 }
 
+/** Connect to a (possibly unsaved) server entry to verify it works before
+ * saving. Typed secret values ride in on `entry.env`; nothing is persisted. */
+export function testServer(entry: ServerEntry): Promise<ProbeResult> {
+  return invoke<ProbeResult>("test_server", { entry });
+}
+
+/** Result of registering an HTTP-bridge client: the updated registry plus the
+ * plaintext bearer token, shown once and never returned again. */
+export interface AddedHttpClient {
+  registry: Registry;
+  token: string;
+}
+
+/** Register an HTTP-bridge client scoped to a profile (empty = all servers).
+ * Returns the one-time plaintext token to paste into the client. */
+export function addHttpClient(
+  label: string,
+  profile?: string,
+): Promise<AddedHttpClient> {
+  return invoke<AddedHttpClient>("add_http_client", { label, profile });
+}
+
+/** Revoke a registered HTTP-bridge client by id. */
+export function removeHttpClient(id: string): Promise<Registry> {
+  return invoke<Registry>("remove_http_client", { id });
+}
+
 /** List the tools one server exposes (connects on demand). Playground picker. */
 export function listServerTools(serverId: string): Promise<McpTool[]> {
   return invoke<McpTool[]>("list_server_tools", { serverId });
@@ -82,6 +111,30 @@ export function callTool(
   args: Record<string, unknown>,
 ): Promise<ToolCallResult> {
   return invoke<ToolCallResult>("call_tool", { serverId, tool, arguments: args });
+}
+
+/** List the resources one server advertises (connects on demand). Playground. */
+export function listServerResources(serverId: string): Promise<McpResource[]> {
+  return invoke<McpResource[]>("list_server_resources", { serverId });
+}
+
+/** List the prompts one server advertises (connects on demand). Playground. */
+export function listServerPrompts(serverId: string): Promise<McpPrompt[]> {
+  return invoke<McpPrompt[]>("list_server_prompts", { serverId });
+}
+
+/** Read one resource by uri; returns the raw MCP result (`{ contents }`). */
+export function readResource(serverId: string, uri: string): Promise<unknown> {
+  return invoke("read_resource", { serverId, uri });
+}
+
+/** Get one prompt by name with arguments; returns the raw MCP result. */
+export function getPrompt(
+  serverId: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  return invoke("get_prompt", { serverId, name, arguments: args });
 }
 
 /** Enable/disable one tool on a server (gateway hides+blocks disabled tools). */

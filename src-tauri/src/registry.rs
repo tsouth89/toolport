@@ -91,6 +91,32 @@ pub struct Profile {
     pub enabled_server_ids: Vec<String>,
 }
 
+/// A consumer registered to reach the gateway over the HTTP/OpenAPI bridge with
+/// its own bearer token and scope. Lets one bridge process serve several clients
+/// (e.g. Open WebUI) with different server sets, resolved per request from the
+/// token. The plaintext token is shown once at creation and never stored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpClient {
+    pub id: String,
+    pub label: String,
+    /// SHA-256 (hex) of the bearer token. We store only the hash, like any token.
+    pub token_sha256: String,
+    /// Profile name this client is scoped to. Empty = the full connected set
+    /// (no extra filtering), so it behaves like the legacy single-token bridge.
+    #[serde(default)]
+    pub profile: String,
+}
+
+/// SHA-256 (hex) of a string. Used to hash bearer tokens so plaintext never hits
+/// disk; the same hash is recomputed on an incoming token to look up its client.
+pub fn sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Registry {
@@ -147,6 +173,18 @@ pub struct Registry {
     /// financial/compliance APIs); `n` caps that server's results at n bytes.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub result_budgets: HashMap<String, u64>,
+    /// Which profile each client was connected with, keyed by client id (e.g.
+    /// "cursor" -> "Billing"). This is the binding Conduit wrote into that client's
+    /// config as `CONDUIT_PROFILE`; recording it here lets the UI show a connected
+    /// client's effective scope and re-scope it in place. Absent / empty value =
+    /// the client follows the active profile (all its enabled servers).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub client_scopes: HashMap<String, String>,
+    /// Consumers registered to reach the gateway over the HTTP/OpenAPI bridge,
+    /// each with its own hashed bearer token and scope. Empty = the bridge uses
+    /// only the legacy single `CONDUIT_HTTP_TOKEN` (back-compat).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub http_clients: Vec<HttpClient>,
 }
 
 /// A joined Conduit Teams server. Holds only non-secret connection metadata; the
@@ -216,6 +254,8 @@ impl Default for Registry {
             semantic_search: SemanticSettings::default(),
             team: None,
             result_budgets: HashMap::new(),
+            client_scopes: HashMap::new(),
+            http_clients: Vec::new(),
         }
     }
 }
@@ -443,6 +483,64 @@ impl Registry {
             .filter(|s| self.is_enabled(&id, &s.id))
             .collect()
     }
+
+    /// Servers the multi-tenant HTTP bridge must connect: the union of the base
+    /// profile's enabled servers and every registered HTTP client's profile, so a
+    /// scoped client's servers are always actually connected (per-request
+    /// filtering then narrows each client's view). An empty-profile client is
+    /// unscoped and contributes nothing beyond the base. Deduplicated by id;
+    /// registry order is preserved.
+    pub fn bridge_enabled_servers(&self, base: Option<&str>) -> Vec<&ServerEntry> {
+        use std::collections::HashSet;
+        let base_id = match base {
+            Some(p) => self.resolve_profile_id(p),
+            None => self.active_profile_id(),
+        };
+        let mut profile_ids: Vec<String> = vec![base_id];
+        for c in &self.http_clients {
+            if c.profile.trim().is_empty() {
+                continue; // unscoped client: sees the union, adds nothing to it
+            }
+            let pid = self.resolve_profile_id(&c.profile);
+            if !profile_ids.contains(&pid) {
+                profile_ids.push(pid);
+            }
+        }
+        let mut ids: HashSet<&str> = HashSet::new();
+        for pid in &profile_ids {
+            for s in &self.servers {
+                if self.is_enabled(pid, &s.id) {
+                    ids.insert(s.id.as_str());
+                }
+            }
+        }
+        self.servers
+            .iter()
+            .filter(|s| ids.contains(s.id.as_str()))
+            .collect()
+    }
+
+    /// Record (or clear) which profile a client was connected with, mirroring the
+    /// `CONDUIT_PROFILE` env Conduit wrote into that client's config. `None` or an
+    /// empty/whitespace profile clears the binding (the client follows the active
+    /// profile). Lets the UI show and re-apply a connected client's scope.
+    pub fn set_client_scope(&mut self, client_id: &str, profile: Option<&str>) {
+        match profile.map(str::trim).filter(|p| !p.is_empty()) {
+            Some(p) => {
+                self.client_scopes.insert(client_id.to_string(), p.to_string());
+            }
+            None => {
+                self.client_scopes.remove(client_id);
+            }
+        }
+    }
+
+    /// Find the registered HTTP client whose stored hash matches `token`'s
+    /// SHA-256, if any. The bridge uses this to resolve a bearer to its scope.
+    pub fn http_client_for_token(&self, token: &str) -> Option<&HttpClient> {
+        let h = sha256_hex(token);
+        self.http_clients.iter().find(|c| c.token_sha256 == h)
+    }
 }
 
 /// Conduit's data dir, anchored so every process agrees regardless of launch
@@ -613,6 +711,71 @@ mod tests {
         assert_eq!(by_id, vec![db]);
         // Unknown reference falls back to the active profile (default).
         assert_eq!(r.enabled_servers_for("nope").len(), 1);
+    }
+
+    #[test]
+    fn client_scope_records_and_clears() {
+        let mut r = Registry::default();
+        r.set_client_scope("cursor", Some("Billing"));
+        assert_eq!(r.client_scopes.get("cursor").map(String::as_str), Some("Billing"));
+        // Whitespace-only / empty / None all clear the binding.
+        r.set_client_scope("cursor", Some("  "));
+        assert!(!r.client_scopes.contains_key("cursor"));
+        r.set_client_scope("claude", Some("Work"));
+        r.set_client_scope("claude", None);
+        assert!(!r.client_scopes.contains_key("claude"));
+    }
+
+    #[test]
+    fn http_client_lookup_by_token_hash() {
+        let mut r = Registry::default();
+        let token = "tok_abc123";
+        r.http_clients.push(HttpClient {
+            id: "c1".into(),
+            label: "Open WebUI".into(),
+            token_sha256: sha256_hex(token),
+            profile: "Billing".into(),
+        });
+        // The plaintext token resolves to its client; a wrong token doesn't.
+        assert_eq!(r.http_client_for_token(token).map(|c| c.profile.as_str()), Some("Billing"));
+        assert!(r.http_client_for_token("tok_wrong").is_none());
+        // The hash is deterministic and not the plaintext.
+        assert_eq!(sha256_hex(token), sha256_hex(token));
+        assert_ne!(sha256_hex(token), token);
+    }
+
+    #[test]
+    fn bridge_union_connects_every_clients_servers() {
+        let mut r = Registry::default();
+        let a = r.add_server(sample_server("alpha"));
+        let b = r.add_server(sample_server("bravo"));
+        let c = r.add_server(sample_server("charlie"));
+        let billing = r.add_profile("Billing");
+        let support = r.add_profile("Support");
+        // default (active) enables alpha; Billing -> bravo; Support -> charlie.
+        r.set_server_enabled("default", &a, true).unwrap();
+        r.set_server_enabled(&billing, &b, true).unwrap();
+        r.set_server_enabled(&support, &c, true).unwrap();
+        // Base alone (no clients) connects only the active profile's server.
+        assert_eq!(
+            r.bridge_enabled_servers(None).iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+            vec![a.clone()]
+        );
+        // Two clients scoped to Billing and Support -> the bridge connects the union.
+        r.http_clients.push(HttpClient {
+            id: "1".into(), label: "x".into(), token_sha256: "h1".into(), profile: "Billing".into(),
+        });
+        r.http_clients.push(HttpClient {
+            id: "2".into(), label: "y".into(), token_sha256: "h2".into(), profile: "Support".into(),
+        });
+        let ids: Vec<_> = r.bridge_enabled_servers(None).iter().map(|s| s.id.clone()).collect();
+        assert!(ids.contains(&a) && ids.contains(&b) && ids.contains(&c));
+        assert_eq!(ids.len(), 3);
+        // An unscoped (empty-profile) client adds nothing beyond the union.
+        r.http_clients.push(HttpClient {
+            id: "3".into(), label: "z".into(), token_sha256: "h3".into(), profile: String::new(),
+        });
+        assert_eq!(r.bridge_enabled_servers(None).len(), 3);
     }
 
     #[test]

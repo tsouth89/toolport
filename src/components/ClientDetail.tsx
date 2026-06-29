@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowRight, Check, Download, Link2, Plug, PlugZap, Puzzle, Shuffle } from "lucide-react";
 import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
@@ -52,6 +52,42 @@ export function ClientDetail({
   // config into a client that isn't installed just creates a file nothing reads.
   const present = client.appPresent;
   const profiles = registry?.profiles ?? [];
+  // The scope Conduit last connected this client with ("" = follow the active
+  // profile). Keep the picker in sync with it as the selected client changes.
+  const currentScope = registry?.clientScopes?.[client.id] ?? "";
+  useEffect(() => {
+    setProfile(currentScope);
+  }, [currentScope, client.id]);
+
+  /** How many servers a given scope ("" = active profile, else a named profile)
+   * resolves to, for the "scoped to X · N servers" summary. */
+  function scopeServerCount(scopeName: string): number {
+    const target = scopeName
+      ? profiles.find((p) => p.name.toLowerCase() === scopeName.toLowerCase())
+      : (profiles.find((p) => p.id === registry?.activeProfileId) ?? profiles[0]);
+    if (!target) return 0;
+    const ids = new Set((registry?.servers ?? []).map((s) => s.id));
+    return target.enabledServerIds.filter((id) => ids.has(id)).length;
+  }
+
+  /** Re-apply a scope to an already-connected client (overwrites its gateway
+   * entry's CONDUIT_PROFILE in place, no disconnect needed). */
+  async function applyScope() {
+    setBusy(true);
+    try {
+      await installGateway(client.id, profile || undefined);
+      toast.success(
+        profile
+          ? `${client.name} scoped to "${profile}".`
+          : `${client.name} now uses all enabled servers.`,
+      );
+      onChanged();
+    } catch (e) {
+      toastError(`${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
   // Servers configured directly in the client (not the gateway) that migrate
   // would move into Conduit and strip from the client's config.
   const movable = client.servers.filter(
@@ -192,6 +228,16 @@ export function ClientDetail({
                 ? "installed - no MCP config yet"
                 : "not installed on this machine"}
           </p>
+          {installed && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Sees{" "}
+              <span className="font-medium text-foreground">
+                {currentScope ? `the "${currentScope}" profile` : "all enabled servers"}
+              </span>{" "}
+              · {scopeServerCount(currentScope)} server
+              {scopeServerCount(currentScope) === 1 ? "" : "s"}
+            </p>
+          )}
           {!present && !installed && (
             <p className="mt-1 text-xs text-warning">
               {client.name} doesn't appear to be installed here. Install it first,
@@ -200,7 +246,7 @@ export function ClientDetail({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {!installed && profiles.length > 1 && (
+          {profiles.length > 1 && (
             <Select value={profile || "__all__"} onValueChange={(v) => setProfile(v === "__all__" ? "" : v)}>
               <SelectTrigger size="sm" className="w-40">
                 <SelectValue />
@@ -214,6 +260,12 @@ export function ClientDetail({
                 ))}
               </SelectContent>
             </Select>
+          )}
+          {installed && profile !== currentScope && (
+            <Button size="sm" onClick={applyScope} disabled={busy}>
+              <Check className="size-4" />
+              Apply scope
+            </Button>
           )}
           {installed ? (
             <ConfirmDialog

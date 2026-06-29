@@ -1,8 +1,8 @@
 import { useState, type ReactNode } from "react";
-import { Loader2, Plus, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
-import { addServer, setSecret, updateServer } from "@/lib/api";
+import { addServer, setSecret, testServer, updateServer } from "@/lib/api";
 import type { Registry, ServerEntry, Transport } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,9 +30,11 @@ interface Props {
   editId?: string;
   /** Pre-fill values (for edit, or duplicating an existing server). */
   initial?: ServerEntry;
+  /** Names of servers that already exist, to warn on a duplicate name. */
+  existingNames?: string[];
 }
 
-export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
+export function ServerDialog({ trigger, onSaved, editId, initial, existingNames }: Props) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({
     name: initial?.name ?? "",
@@ -47,8 +49,17 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
     initial?.env.map((e) => ({ key: e.key, value: "" })) ?? [],
   );
   const [busy, setBusy] = useState(false);
+  const [test, setTest] = useState<{
+    status: "idle" | "testing" | "ok" | "fail";
+    message: string;
+  }>({ status: "idle", message: "" });
   const isStdio = form.transport === "stdio";
   const editing = editId !== undefined;
+
+  // A prior test result is stale the moment the connection details change.
+  function clearTest() {
+    setTest((t) => (t.status === "idle" ? t : { status: "idle", message: "" }));
+  }
 
   // The dialog instance is mounted persistently (e.g. the header "Add server"
   // button), so reset the form each time it opens - otherwise it keeps the last
@@ -63,39 +74,97 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
         url: initial?.url ?? "",
       });
       setEnvRows(initial?.env.map((e) => ({ key: e.key, value: "" })) ?? []);
+      setTest({ status: "idle", message: "" });
     }
     setOpen(next);
   }
 
   function set<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
     setForm((f) => ({ ...f, [key]: value }));
+    clearTest();
   }
 
   function setEnvRow(i: number, field: "key" | "value", value: string) {
     setEnvRows((rows) => rows.map((r, j) => (j === i ? { ...r, [field]: value } : r)));
+    clearTest();
   }
   function addEnvRow() {
     setEnvRows((rows) => [...rows, { key: "", value: "" }]);
+    clearTest();
   }
   function removeEnvRow(i: number) {
     setEnvRows((rows) => rows.filter((_, j) => j !== i));
+    clearTest();
   }
 
-  async function handleSave() {
-    if (!form.name.trim()) return;
+  // Build the entry from the form. For a real save the secret values are vaulted
+  // separately (never written to the registry); for a connection test they ride
+  // along on `env` so the probe can actually launch/authenticate the server.
+  function buildEntry(withSecretValues: boolean): ServerEntry {
     const declared = envRows.filter((r) => r.key.trim());
-    const entry: ServerEntry = {
+    return {
       id: editId ?? "",
       name: form.name.trim(),
       transport: form.transport,
       command: isStdio ? form.command.trim() || null : null,
       args: isStdio ? form.args.split(/\s+/).filter(Boolean) : [],
-      // Declare every env-var name as a secret; the values are vaulted separately
-      // below (they never enter the registry file).
-      env: declared.map((r) => ({ key: r.key.trim(), value: null, secret: true })),
+      env: declared.map((r) => ({
+        key: r.key.trim(),
+        value: withSecretValues && r.value ? r.value : null,
+        secret: true,
+      })),
       url: isStdio ? null : form.url.trim() || null,
       source: initial?.source ?? "manual",
     };
+  }
+
+  // Per-transport validation. `errors` block Save; the duplicate-name case is a
+  // soft warning, since duplicating a server per account is a real workflow.
+  const nameTrim = form.name.trim();
+  const urlTrim = form.url.trim();
+  const cmdTrim = form.command.trim();
+  const errors: string[] = [];
+  if (!nameTrim) errors.push("Give the server a name.");
+  if (isStdio) {
+    if (!cmdTrim) errors.push("Enter the command to run (e.g. npx).");
+  } else if (!urlTrim) {
+    errors.push("Enter the server URL.");
+  } else if (!/^https?:\/\//i.test(urlTrim)) {
+    errors.push("The URL must start with http:// or https://.");
+  }
+  const ownName = editing ? initial?.name?.trim().toLowerCase() : undefined;
+  const duplicateName =
+    !!nameTrim &&
+    nameTrim.toLowerCase() !== ownName &&
+    (existingNames ?? []).some((n) => n.trim().toLowerCase() === nameTrim.toLowerCase());
+  const canSave = errors.length === 0 && !busy && test.status !== "testing";
+
+  async function handleTest() {
+    setTest({ status: "testing", message: "" });
+    try {
+      const r = await testServer(buildEntry(true));
+      if (r.ok) {
+        setTest({
+          status: "ok",
+          message: `Connected. Found ${r.toolCount} tool${r.toolCount === 1 ? "" : "s"}.`,
+        });
+      } else {
+        setTest({
+          status: "fail",
+          message: r.authRequired
+            ? `Reachable, but needs credentials: ${r.error ?? "authentication required"}`
+            : (r.error ?? "Could not connect."),
+        });
+      }
+    } catch (e) {
+      setTest({ status: "fail", message: String(e) });
+    }
+  }
+
+  async function handleSave() {
+    if (errors.length > 0) return;
+    const entry = buildEntry(false);
+    const declared = envRows.filter((r) => r.key.trim());
     setBusy(true);
     try {
       let result = editing ? await updateServer(entry) : await addServer(entry);
@@ -231,23 +300,70 @@ export function ServerDialog({ trigger, onSaved, editId, initial }: Props) {
               Add variable
             </Button>
           </div>
+
+          {(errors.length > 0 || duplicateName || test.status === "ok" || test.status === "fail") && (
+            <div className="flex flex-col gap-1.5 text-xs">
+              {errors.map((msg) => (
+                <p key={msg} className="text-destructive">
+                  {msg}
+                </p>
+              ))}
+              {duplicateName && (
+                <p className="flex items-start gap-1.5 text-amber-600 dark:text-amber-500">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                  <span>
+                    Another server is already named "{nameTrim}". That's fine for multiple accounts;
+                    it'll be saved as a separate entry.
+                  </span>
+                </p>
+              )}
+              {test.status === "ok" && (
+                <p className="flex items-start gap-1.5 text-emerald-600 dark:text-emerald-500">
+                  <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" />
+                  <span>{test.message}</span>
+                </p>
+              )}
+              {test.status === "fail" && (
+                <p className="flex items-start gap-1.5 text-destructive">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                  <span>{test.message}</span>
+                </p>
+              )}
+            </div>
+          )}
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>
-            Cancel
-          </Button>
-          <Button onClick={handleSave} disabled={busy || !form.name.trim()}>
-            {busy ? (
+        <DialogFooter className="sm:justify-between">
+          <Button
+            variant="ghost"
+            onClick={handleTest}
+            disabled={busy || errors.length > 0 || test.status === "testing"}
+          >
+            {test.status === "testing" ? (
               <>
                 <Loader2 className="size-4 animate-spin" />
-                {editing ? "Saving…" : "Adding…"}
+                Testing…
               </>
-            ) : editing ? (
-              "Save"
             ) : (
-              "Add"
+              "Test connection"
             )}
           </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>
+              Cancel
+            </Button>
+            <Button onClick={handleSave} disabled={!canSave}>
+              {busy ? (
+                <>
+                  <Loader2 className="size-4 animate-spin" />
+                  {editing ? "Saving…" : "Adding…"}
+                </>
+              ) : editing ? (
+                "Save"
+              ) : (
+                "Add"
+              )}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>
