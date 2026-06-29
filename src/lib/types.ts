@@ -19,6 +19,16 @@ export interface McpServer {
   url: string | null;
 }
 
+/** A server parsed from a pasted config snippet. Includes env-var values. */
+export interface ParsedSnippetServer {
+  name: string;
+  transport: Transport;
+  command: string | null;
+  args: string[];
+  url: string | null;
+  env: { key: string; value: string | null }[];
+}
+
 export interface DetectedClient {
   id: string;
   name: string;

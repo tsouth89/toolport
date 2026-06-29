@@ -66,6 +66,11 @@ fixes both.
 
 - **Set up once, use everywhere.** Each client points at one gateway. Add and
   authenticate a server a single time and it appears in every client.
+- **Paste from any client's docs.** Copy a server config snippet straight from
+  an MCP server's installation instructions — Cursor JSON, Codex TOML, VS Code,
+  Zed, Claude Code CLI, or any other supported client — and paste it into the Add
+  Server dialog. Conduit auto-detects the format and pre-fills the fields,
+  including environment variable values.
 - **Per-agent scoping.** Give each client only the servers it should see. A coding
   agent literally cannot call a billing tool that isn't in its profile.
 - **Obvious auth.** OAuth or API key, stored once in the OS keychain, a single click per

@@ -193,10 +193,7 @@ fn resolve_client_config_path(
         "codex" => home.join(".codex").join("config.toml"),
         "claude-code" => home.join(".claude.json"),
         "gemini-cli" => home.join(".gemini").join("settings.json"),
-        "antigravity" => home
-            .join(".gemini")
-            .join("config")
-            .join("mcp_config.json"),
+        "antigravity" => home.join(".gemini").join("config").join("mcp_config.json"),
         "cline" => config
             .join("Code")
             .join("User")
@@ -269,10 +266,7 @@ fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> 
         "codex" => home.join(".codex").join("config.toml"),
         "claude-code" => home.join(".claude.json"),
         "gemini-cli" => home.join(".gemini").join("settings.json"),
-        "antigravity" => home
-            .join(".gemini")
-            .join("config")
-            .join("mcp_config.json"),
+        "antigravity" => home.join(".gemini").join("config").join("mcp_config.json"),
         "cline" => config
             .join("Code")
             .join("User")
@@ -722,15 +716,54 @@ fn classify(command: &Option<String>, url: &Option<String>, type_hint: Option<&s
 }
 
 fn json_server(name: &str, def: &serde_json::Value) -> McpServer {
-    // Treat an empty command string as no command: some clients (e.g. Jan's `exa`
-    // default) ship a remote/url server with `"command": ""`, which must not read
-    // as a broken stdio server.
+    // Delegate to the with-values parser, then strip values for the security
+    // boundary: detection reads other apps' files, so env values must not leak.
+    let parsed = json_server_with_values(name, def);
+    McpServer {
+        name: parsed.name,
+        transport: parsed.transport,
+        command: parsed.command,
+        args: parsed.args,
+        env_keys: parsed.env.into_iter().map(|e| e.key).collect(),
+        url: parsed.url,
+    }
+}
+
+/// A server parsed from a user-pasted config snippet. Unlike `McpServer` (which
+/// only carries env-var keys for security), this includes env-var VALUES because
+/// the user explicitly pasted them — many are non-secret paths/flags
+/// (OD_DATA_DIR, ELECTRON_RUN_AS_NODE), and discarding them would force
+/// pointless re-entry.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParsedSnippetServer {
+    pub name: String,
+    /// "stdio" | "http" | "sse" | "unknown"
+    pub transport: String,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub url: Option<String>,
+    /// Full env entries (key + optional value), since the user pasted them.
+    pub env: Vec<SnippetEnvVar>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetEnvVar {
+    pub key: String,
+    pub value: Option<String>,
+}
+
+/// Like `json_server`, but also captures env-var values from the JSON def.
+/// Used for pasted snippets where the user is voluntarily providing values.
+/// Non-string values (numbers, booleans) are stringified so e.g.
+/// `{"PORT": 3000}` doesn't silently lose its value.
+fn json_server_with_values(name: &str, def: &serde_json::Value) -> ParsedSnippetServer {
     let command = def
         .get("command")
         .and_then(|c| c.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from);
-    // Standard MCP uses `url`; Windsurf/Antigravity use `serverUrl` for remotes.
     let url = def
         .get("url")
         .or_else(|| def.get("serverUrl"))
@@ -745,20 +778,39 @@ fn json_server(name: &str, def: &serde_json::Value) -> McpServer {
                 .collect()
         })
         .unwrap_or_default();
-    let env_keys = def
+    let env = def
         .get("env")
         .and_then(|e| e.as_object())
-        .map(|o| o.keys().cloned().collect())
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| SnippetEnvVar {
+                    key: k.clone(),
+                    value: json_value_to_string(v),
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let type_hint = def.get("type").and_then(|t| t.as_str());
     let transport = classify(&command, &url, type_hint);
-    McpServer {
+    ParsedSnippetServer {
         name: name.to_string(),
         transport,
         command,
         args,
-        env_keys,
         url,
+        env,
+    }
+}
+
+/// Coerce a JSON value to its env-var string representation. Strings pass
+/// through; numbers/booleans are stringified; null/objects/arrays yield None
+/// (they're not valid env values).
+fn json_value_to_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
     }
 }
 
@@ -780,6 +832,352 @@ fn parse_json_value(content: &str) -> Result<serde_json::Value, String> {
         err.column(),
         err
     ))
+}
+
+/// Extract a server definition from a `claude mcp add-json` CLI invocation.
+/// Pattern: `claude mcp add-json [--scope <scope>] <name> '<json>'`
+/// Returns (name, json_string) if the input matches, else None.
+fn extract_claude_cli(input: &str) -> Option<(String, String)> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with("claude mcp add-json") {
+        return None;
+    }
+    // Find the JSON payload: first `{` to its matching `}`, skipping braces
+    // that appear inside JSON string literals (e.g. `"desc": "use { for blocks"`).
+    let start = trimmed.find('{')?;
+    let bytes = trimmed.as_bytes();
+    let mut depth = 0i32;
+    let mut end = start;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut i = start;
+    while i < trimmed.len() {
+        let ch = bytes[i];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == b'\\' {
+                escape = true;
+            } else if ch == b'"' {
+                in_string = false;
+            }
+        } else if ch == b'"' {
+            in_string = true;
+        } else if ch == b'{' {
+            depth += 1;
+        } else if ch == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                end = i;
+                break;
+            }
+        }
+        i += 1;
+    }
+    if depth != 0 {
+        return None;
+    }
+    let json_str = &trimmed[start..=end];
+
+    // Extract the server name: the last non-flag token before the JSON.
+    // Tokens are trimmed of shell quotes first, then filtered.
+    let before = trimmed[..start].trim();
+    let name = before
+        .split_whitespace()
+        .map(|tok| tok.trim_matches(|c| c == '\'' || c == '"'))
+        .filter(|tok| {
+            !tok.eq_ignore_ascii_case("claude")
+                && !tok.eq_ignore_ascii_case("mcp")
+                && !tok.eq_ignore_ascii_case("add-json")
+                && !tok.starts_with("--")
+                && !tok.is_empty()
+        })
+        .last()
+        .map(String::from);
+
+    Some((name.unwrap_or_default(), json_str.to_string()))
+}
+
+/// Parse a pasted config snippet, auto-detecting the format.
+///
+/// Tries each format in order: Claude Code CLI → TOML → JSON (mcpServers,
+/// servers, context_servers, or bare server object) → YAML. Returns all servers
+/// found (the first is pre-filled in the UI; extras get a toast).
+///
+/// Unlike `detect_clients`, this includes env-var values because the user
+/// explicitly pasted them.
+pub fn parse_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err("Empty input".to_string());
+    }
+
+    // 1. Claude Code CLI: `claude mcp add-json ... <name> '{...}'`
+    if let Some((name, json_str)) = extract_claude_cli(trimmed) {
+        let value: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| format!("Invalid JSON in CLI command: {e}"))?;
+        // Bare server object (the common case from the CLI).
+        if value.is_object() && (value.get("command").is_some() || value.get("url").is_some()) {
+            return Ok(vec![json_server_with_values(&name, &value)]);
+        }
+        // Wrapped in a key (unusual for CLI, but handle it).
+        return parse_json_snippet(&json_str, &name);
+    }
+
+    // 2. TOML: `[mcp_servers.<name>]` tables. Check before JSON because TOML
+    //    table headers start with `[`, which would otherwise match the JSON
+    //    array heuristic below.
+    if trimmed.contains("[mcp_servers.") || trimmed.contains("[mcp_servers]") {
+        return parse_toml_snippet(trimmed);
+    }
+
+    // 3. JSON (including JSON5 for Zed-style comments).
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return parse_json_snippet(trimmed, "");
+    }
+
+    // 4. YAML fallback (Hermes `mcp_servers:` or Goose `extensions:`).
+    if let Ok(servers) = parse_yaml_snippet(trimmed) {
+        if !servers.is_empty() {
+            return Ok(servers);
+        }
+    }
+
+    Err(
+        "Could not detect format. Expected JSON, TOML, YAML, or a 'claude mcp add-json' command."
+            .to_string(),
+    )
+}
+
+/// Parse a JSON snippet, trying each known wrapper key, then a bare server object.
+fn parse_json_snippet(
+    content: &str,
+    forced_name: &str,
+) -> Result<Vec<ParsedSnippetServer>, String> {
+    let value = parse_json_value(content)?;
+
+    // Try each wrapper key.
+    for key in ["mcpServers", "servers", "context_servers"] {
+        if let Some(obj) = value.get(key).and_then(|v| v.as_object()) {
+            let servers: Vec<ParsedSnippetServer> = obj
+                .iter()
+                .filter(|(_, def)| def.is_object())
+                .map(|(name, def)| json_server_with_values(name, def))
+                .collect();
+            if !servers.is_empty() {
+                return Ok(servers);
+            }
+        }
+    }
+
+    // Bare server object: has `command` or `url` at the top level.
+    if value.get("command").is_some() || value.get("url").is_some() {
+        let name = if forced_name.is_empty() {
+            // Derive a name from the command path.
+            value
+                .get("command")
+                .and_then(|c| c.as_str())
+                .map(|c| {
+                    std::path::Path::new(c)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(c)
+                        .to_string()
+                })
+                .unwrap_or_default()
+        } else {
+            forced_name.to_string()
+        };
+        return Ok(vec![json_server_with_values(&name, &value)]);
+    }
+
+    Err("JSON parsed but no server definition found (expected mcpServers, servers, context_servers, or a bare server object)".to_string())
+}
+
+/// Parse a TOML snippet with `[mcp_servers.<name>]` tables.
+fn parse_toml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String> {
+    let value: toml::Value = toml::from_str(content).map_err(|e| e.to_string())?;
+    let table = value
+        .get("mcp_servers")
+        .and_then(|v| v.as_table())
+        .ok_or("No [mcp_servers] table found in TOML")?;
+
+    let servers: Vec<ParsedSnippetServer> = table
+        .iter()
+        .filter(|(_, def)| def.is_table())
+        .map(|(name, def)| {
+            let command = def
+                .get("command")
+                .and_then(|c| c.as_str())
+                .map(String::from);
+            let url = def.get("url").and_then(|u| u.as_str()).map(String::from);
+            let args = def
+                .get("args")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let env = def
+                .get("env")
+                .and_then(|e| e.as_table())
+                .map(|t| {
+                    t.iter()
+                        .map(|(k, v)| SnippetEnvVar {
+                            key: k.clone(),
+                            value: toml_value_to_string(v),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let type_hint = def.get("type").and_then(|t| t.as_str());
+            let transport = classify(&command, &url, type_hint);
+            ParsedSnippetServer {
+                name: name.clone(),
+                transport,
+                command,
+                args,
+                url,
+                env,
+            }
+        })
+        .collect();
+
+    if servers.is_empty() {
+        Err("No servers found in TOML mcp_servers table".to_string())
+    } else {
+        Ok(servers)
+    }
+}
+
+/// Coerce a TOML value to its env-var string representation.
+fn toml_value_to_string(v: &toml::Value) -> Option<String> {
+    match v {
+        toml::Value::String(s) => Some(s.clone()),
+        toml::Value::Integer(i) => Some(i.to_string()),
+        toml::Value::Float(f) => Some(f.to_string()),
+        toml::Value::Boolean(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Coerce a YAML value to its env-var string representation.
+fn yaml_value_to_string(v: &serde_yaml::Value) -> Option<String> {
+    match v {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Parse a YAML snippet (Hermes `mcp_servers:` or Goose `extensions:`).
+fn parse_yaml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String> {
+    let value: serde_yaml::Value = serde_yaml::from_str(content).map_err(|e| e.to_string())?;
+
+    // Try Hermes format: `mcp_servers:` map.
+    if let Some(servers_map) = value.get("mcp_servers").and_then(|v| v.as_mapping()) {
+        let servers: Vec<ParsedSnippetServer> = servers_map
+            .iter()
+            .filter_map(|(k, def)| {
+                let name = k.as_str()?.to_string();
+                let def = def.as_mapping()?;
+                let str_of = |key: &str| def.get(key).and_then(|v| v.as_str()).map(String::from);
+                let command = str_of("command").filter(|s| !s.is_empty());
+                let url = str_of("url").filter(|s| !s.is_empty());
+                if command.is_none() && url.is_none() {
+                    return None;
+                }
+                let args = def
+                    .get("args")
+                    .and_then(|v| v.as_sequence())
+                    .map(|seq| {
+                        seq.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let env = def
+                    .get("env")
+                    .and_then(|v| v.as_mapping())
+                    .map(|m| {
+                        m.iter()
+                            .map(|(k, v)| SnippetEnvVar {
+                                key: k.as_str().unwrap_or("").to_string(),
+                                value: yaml_value_to_string(v),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let transport = classify(&command, &url, str_of("type").as_deref());
+                Some(ParsedSnippetServer {
+                    name,
+                    transport,
+                    command,
+                    args,
+                    url,
+                    env,
+                })
+            })
+            .collect();
+        if !servers.is_empty() {
+            return Ok(servers);
+        }
+    }
+
+    // Try Goose format: `extensions:` map.
+    if let Some(exts) = value.get("extensions").and_then(|v| v.as_mapping()) {
+        let servers: Vec<ParsedSnippetServer> = exts
+            .iter()
+            .filter_map(|(k, def)| {
+                let name = k.as_str()?.to_string();
+                let def = def.as_mapping()?;
+                let str_of = |key: &str| def.get(key).and_then(|v| v.as_str()).map(String::from);
+                let command = str_of("cmd").filter(|s| !s.is_empty());
+                let url = str_of("url").filter(|s| !s.is_empty());
+                if command.is_none() && url.is_none() {
+                    return None;
+                }
+                let args = def
+                    .get("args")
+                    .and_then(|v| v.as_sequence())
+                    .map(|seq| {
+                        seq.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let env = def
+                    .get("envs")
+                    .and_then(|v| v.as_mapping())
+                    .map(|m| {
+                        m.iter()
+                            .map(|(k, v)| SnippetEnvVar {
+                                key: k.as_str().unwrap_or("").to_string(),
+                                value: yaml_value_to_string(v),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let transport = classify(&command, &url, str_of("type").as_deref());
+                Some(ParsedSnippetServer {
+                    name,
+                    transport,
+                    command,
+                    args,
+                    url,
+                    env,
+                })
+            })
+            .collect();
+        if !servers.is_empty() {
+            return Ok(servers);
+        }
+    }
+
+    Ok(Vec::new())
 }
 
 /// Parse YAML, preserving serde_yaml's line/column in the error text.
@@ -841,9 +1239,7 @@ fn parse_toml(content: &str) -> Result<Vec<McpServer>, String> {
         None => return Ok(Vec::new()),
         Some(v) if v.is_table() => v.as_table().unwrap(),
         Some(_) => {
-            return Err(
-                "'mcp_servers' must be a table mapping server names to definitions".into(),
-            );
+            return Err("'mcp_servers' must be a table mapping server names to definitions".into());
         }
     };
 
@@ -857,8 +1253,7 @@ fn parse_toml(content: &str) -> Result<Vec<McpServer>, String> {
         servers.push(McpServer {
             name: name.clone(),
             transport: classify(
-                &def
-                    .get("command")
+                &def.get("command")
                     .and_then(|c| c.as_str())
                     .map(String::from),
                 &def.get("url").and_then(|u| u.as_str()).map(String::from),
@@ -1284,9 +1679,7 @@ fn parse_yaml_extensions(content: &str) -> Result<Vec<McpServer>, String> {
         None => return Ok(Vec::new()),
         Some(v) if v.is_mapping() => v.as_mapping().unwrap(),
         Some(_) => {
-            return Err(
-                "'extensions' must be a mapping of extension names to definitions".into(),
-            );
+            return Err("'extensions' must be a mapping of extension names to definitions".into());
         }
     };
     let mut malformed = Vec::new();
@@ -1433,16 +1826,13 @@ fn parse_continue_yaml_servers(content: &str) -> Result<Vec<McpServer>, String> 
         return Ok(Vec::new());
     }
 
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(content).map_err(|e| e.to_string())?;
+    let value: serde_yaml::Value = serde_yaml::from_str(content).map_err(|e| e.to_string())?;
 
     let entries = match value.get("mcpServers") {
         None => return Ok(Vec::new()),
         Some(v) if v.is_sequence() => v.as_sequence().unwrap(),
         Some(_) => {
-            return Err(
-                "'mcpServers' must be a sequence of server definitions".into(),
-            );
+            return Err("'mcpServers' must be a sequence of server definitions".into());
         }
     };
 
@@ -1617,9 +2007,7 @@ fn parse_hermes_yaml_servers(content: &str) -> Result<Vec<McpServer>, String> {
         None => return Ok(Vec::new()),
         Some(v) if v.is_mapping() => v.as_mapping().unwrap(),
         Some(_) => {
-            return Err(
-                "'mcp_servers' must be a mapping of server names to definitions".into(),
-            );
+            return Err("'mcp_servers' must be a mapping of server names to definitions".into());
         }
     };
     let mut malformed = Vec::new();
@@ -2142,7 +2530,10 @@ mod tests {
     fn json_malformed_server_entry_names_key() {
         let content = r#"{"mcpServers":{"good":{"command":"npx"},"bad":"not-an-object"}}"#;
         let err = parse_json(content, "mcpServers").unwrap_err();
-        assert!(err.contains("bad"), "error should name the bad entry: {err}");
+        assert!(
+            err.contains("bad"),
+            "error should name the bad entry: {err}"
+        );
         assert!(err.contains("malformed 'mcpServers' entry"));
     }
 
@@ -2162,7 +2553,10 @@ good = { command = "npx", args = ["-y", "server"] }
 bad = "not-a-table"
 "#;
         let err = parse_toml(content).unwrap_err();
-        assert!(err.contains("bad"), "error should name the bad entry: {err}");
+        assert!(
+            err.contains("bad"),
+            "error should name the bad entry: {err}"
+        );
         assert!(err.contains("malformed mcp_servers entry"));
     }
 
@@ -2186,13 +2580,17 @@ bad = "not-a-table"
     fn yaml_extensions_malformed_entry_names_key() {
         let content = "extensions:\n  good:\n    type: stdio\n    cmd: uvx\n  bad: not-a-mapping\n";
         let err = parse_yaml_extensions(content).unwrap_err();
-        assert!(err.contains("bad"), "error should name the bad entry: {err}");
+        assert!(
+            err.contains("bad"),
+            "error should name the bad entry: {err}"
+        );
         assert!(err.contains("malformed 'extensions' entry"));
     }
 
     #[test]
     fn hermes_yaml_syntax_error_includes_location() {
-        let content = "mcp_servers:\n  srv:\n    url: https://example.com\n  bad:\n  - [unbalanced\n";
+        let content =
+            "mcp_servers:\n  srv:\n    url: https://example.com\n  bad:\n  - [unbalanced\n";
         let err = parse_hermes_yaml_servers(content).unwrap_err();
         assert!(err.contains("YAML syntax error"), "got: {err}");
         assert!(err.contains("line"), "got: {err}");
@@ -2202,7 +2600,10 @@ bad = "not-a-table"
     fn hermes_yaml_malformed_entry_names_key() {
         let content = "mcp_servers:\n  good:\n    url: https://example.com\n  bad: not-a-mapping\n";
         let err = parse_hermes_yaml_servers(content).unwrap_err();
-        assert!(err.contains("bad"), "error should name the bad entry: {err}");
+        assert!(
+            err.contains("bad"),
+            "error should name the bad entry: {err}"
+        );
         assert!(err.contains("malformed 'mcp_servers' entry"));
     }
 
@@ -2503,9 +2904,7 @@ bad = "not-a-table"
         assert!((d.path)().is_some());
     }
 
-  
-   
-   #[test]
+    #[test]
     fn continue_yaml_parses_stdio_server() {
         let content = "mcpServers:\n  - name: fetch\n    command: uvx\n    args:\n      - mcp-server-fetch\n    env:\n      TOKEN: abc123\n";
 
@@ -2530,7 +2929,7 @@ bad = "not-a-table"
             "error should identify the malformed entry: {err}"
         );
         assert!(err.contains("malformed 'mcpServers' entry"));
-}
+    }
 
     #[test]
     fn hermes_yaml_round_trip_preserves_config() {
@@ -2661,82 +3060,64 @@ bad = "not-a-table"
     fn client_config_paths_are_stable_across_platforms() {
         let cases: &[(&str, fn(&Path, Platform) -> PathBuf)] = &[
             ("cursor", |home, _| home.join(".cursor").join("mcp.json")),
-            (
-                "vscode",
-                |home, platform| {
-                    roaming_config_dir(home, platform)
-                        .join("Code")
-                        .join("User")
-                        .join("mcp.json")
-                },
-            ),
-            (
-                "claude-desktop",
-                |home, platform| {
-                    roaming_config_dir(home, platform)
-                        .join("Claude")
-                        .join("claude_desktop_config.json")
-                },
-            ),
-            (
-                "cline",
-                |home, platform| {
-                    roaming_config_dir(home, platform)
-                        .join("Code")
-                        .join("User")
-                        .join("globalStorage")
-                        .join("saoudrizwan.claude-dev")
-                        .join("settings")
-                        .join("cline_mcp_settings.json")
-                },
-            ),
-            (
-                "goose",
-                |home, platform| match platform {
-                    Platform::Windows => home
-                        .join("AppData")
-                        .join("Roaming")
-                        .join("Block")
-                        .join("goose")
-                        .join("config")
-                        .join("config.yaml"),
-                    Platform::MacOs => home
-                        .join("Library")
-                        .join("Application Support")
-                        .join("Block")
-                        .join("goose")
-                        .join("config.yaml"),
-                    Platform::Linux => home.join(".config").join("goose").join("config.yaml"),
-                },
-            ),
-            (
-                "zed",
-                |home, platform| match platform {
-                    Platform::Windows => home
-                        .join("AppData")
-                        .join("Roaming")
-                        .join("Zed")
-                        .join("settings.json"),
-                    Platform::MacOs | Platform::Linux => {
-                        home.join(".config").join("zed").join("settings.json")
-                    }
-                },
-            ),
-            (
-                "jan",
-                |home, platform| match platform {
-                    Platform::Windows | Platform::MacOs => app_data_dir(home, platform)
-                        .join("Jan")
-                        .join("data")
-                        .join("mcp_config.json"),
-                    Platform::Linux => home
-                        .join(".local")
-                        .join("share")
-                        .join("Jan")
-                        .join("data")
-                        .join("mcp_config.json"),
-                },
-            ),
+            ("vscode", |home, platform| {
+                roaming_config_dir(home, platform)
+                    .join("Code")
+                    .join("User")
+                    .join("mcp.json")
+            }),
+            ("claude-desktop", |home, platform| {
+                roaming_config_dir(home, platform)
+                    .join("Claude")
+                    .join("claude_desktop_config.json")
+            }),
+            ("cline", |home, platform| {
+                roaming_config_dir(home, platform)
+                    .join("Code")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("saoudrizwan.claude-dev")
+                    .join("settings")
+                    .join("cline_mcp_settings.json")
+            }),
+            ("goose", |home, platform| match platform {
+                Platform::Windows => home
+                    .join("AppData")
+                    .join("Roaming")
+                    .join("Block")
+                    .join("goose")
+                    .join("config")
+                    .join("config.yaml"),
+                Platform::MacOs => home
+                    .join("Library")
+                    .join("Application Support")
+                    .join("Block")
+                    .join("goose")
+                    .join("config.yaml"),
+                Platform::Linux => home.join(".config").join("goose").join("config.yaml"),
+            }),
+            ("zed", |home, platform| match platform {
+                Platform::Windows => home
+                    .join("AppData")
+                    .join("Roaming")
+                    .join("Zed")
+                    .join("settings.json"),
+                Platform::MacOs | Platform::Linux => {
+                    home.join(".config").join("zed").join("settings.json")
+                }
+            }),
+            ("jan", |home, platform| match platform {
+                Platform::Windows | Platform::MacOs => app_data_dir(home, platform)
+                    .join("Jan")
+                    .join("data")
+                    .join("mcp_config.json"),
+                Platform::Linux => home
+                    .join(".local")
+                    .join("share")
+                    .join("Jan")
+                    .join("data")
+                    .join("mcp_config.json"),
+            }),
         ];
 
         for (client_id, build_expected) in cases {
@@ -2783,5 +3164,325 @@ bad = "not-a-table"
             xdg_data.join("Jan").join("data").join("mcp_config.json")
         );
         let _ = home;
+    }
+
+    // --- parse_snippet tests ---
+
+    #[test]
+    fn parse_cursor_json_snippet() {
+        let json = r#"{"mcpServers":{"open-design":{"command":"/usr/bin/node","args":["server.mjs"],"env":{"KEY":"val"}}}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "open-design");
+        assert_eq!(servers[0].command.as_deref(), Some("/usr/bin/node"));
+        assert_eq!(servers[0].args, vec!["server.mjs"]);
+        assert_eq!(servers[0].env.len(), 1);
+        assert_eq!(servers[0].env[0].key, "KEY");
+        assert_eq!(servers[0].env[0].value.as_deref(), Some("val"));
+    }
+
+    #[test]
+    fn parse_vscode_json_snippet() {
+        let json =
+            r#"{"servers":{"my-server":{"type":"stdio","command":"npx","args":["-y","foo"]}}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "my-server");
+        assert_eq!(servers[0].transport, "stdio");
+    }
+
+    #[test]
+    fn parse_codex_toml_snippet() {
+        let toml = r#"
+[mcp_servers.open-design]
+command = "/usr/bin/node"
+args = ["server.mjs"]
+
+[mcp_servers.open-design.env]
+OD_DATA_DIR = "/tmp/data"
+"#;
+        let servers = parse_snippet(toml).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "open-design");
+        assert_eq!(servers[0].env[0].key, "OD_DATA_DIR");
+        assert_eq!(servers[0].env[0].value.as_deref(), Some("/tmp/data"));
+    }
+
+    #[test]
+    fn parse_claude_cli_snippet() {
+        let cli = r#"claude mcp add-json --scope user open-design '{"command":"/usr/bin/node","args":["server.mjs"],"env":{"KEY":"val"}}'"#;
+        let servers = parse_snippet(cli).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "open-design");
+        assert_eq!(servers[0].command.as_deref(), Some("/usr/bin/node"));
+    }
+
+    #[test]
+    fn parse_bare_json_server() {
+        let json = r#"{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "npx");
+        assert_eq!(servers[0].command.as_deref(), Some("npx"));
+    }
+
+    #[test]
+    fn parse_zed_jsonc_snippet() {
+        let json = r#"{
+            "context_servers": {
+                "my-server": {
+                    "source": "custom",
+                    "command": "npx",
+                    "args": ["-y", "foo"]
+                }
+            }
+        }"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "my-server");
+        assert_eq!(servers[0].command.as_deref(), Some("npx"));
+    }
+
+    #[test]
+    fn parse_hermes_yaml_snippet() {
+        let yaml = r#"
+mcp_servers:
+  my-server:
+    command: npx
+    args:
+      - "-y"
+      - "foo"
+    env:
+      API_KEY: secret123
+"#;
+        let servers = parse_snippet(yaml).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "my-server");
+        assert_eq!(servers[0].command.as_deref(), Some("npx"));
+        assert_eq!(servers[0].env[0].key, "API_KEY");
+        assert_eq!(servers[0].env[0].value.as_deref(), Some("secret123"));
+    }
+
+    #[test]
+    fn parse_goose_yaml_snippet() {
+        let yaml = r#"
+extensions:
+  my-server:
+    enabled: true
+    type: stdio
+    cmd: npx
+    args:
+      - "-y"
+      - "foo"
+    envs:
+      KEY: val
+"#;
+        let servers = parse_snippet(yaml).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "my-server");
+        assert_eq!(servers[0].command.as_deref(), Some("npx"));
+        assert_eq!(servers[0].env[0].key, "KEY");
+        assert_eq!(servers[0].env[0].value.as_deref(), Some("val"));
+    }
+
+    #[test]
+    fn parse_empty_snippet_errors() {
+        assert!(parse_snippet("").is_err());
+        assert!(parse_snippet("   ").is_err());
+    }
+
+    #[test]
+    fn parse_garbage_errors() {
+        assert!(parse_snippet("this is not a config").is_err());
+    }
+
+    #[test]
+    fn parse_multi_server_json_snippet() {
+        let json = r#"{"mcpServers":{"one":{"command":"npx","args":["a"]},"two":{"command":"node","args":["b"]}}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers.len(), 2);
+    }
+
+    #[test]
+    fn parse_http_server_snippet() {
+        // Windsurf/Antigravity use `serverUrl` for remote servers.
+        let json = r#"{"mcpServers":{"supabase":{"serverUrl":"https://mcp.supabase.com/mcp"}}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "supabase");
+        assert_eq!(servers[0].transport, "http");
+        assert_eq!(
+            servers[0].url.as_deref(),
+            Some("https://mcp.supabase.com/mcp")
+        );
+        assert!(servers[0].command.is_none());
+    }
+
+    #[test]
+    fn parse_sse_server_snippet() {
+        // VS Code `type: "sse"` classification.
+        let json =
+            r#"{"servers":{"remote":{"type":"sse","url":"https://events.example.com/sse"}}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].transport, "sse");
+    }
+
+    #[test]
+    fn parse_toml_sse_type_hint() {
+        // TOML `type = "sse"` should classify as sse, not http.
+        let toml = r#"
+[mcp_servers.remote]
+url = "https://events.example.com/sse"
+type = "sse"
+"#;
+        let servers = parse_snippet(toml).unwrap();
+        assert_eq!(servers[0].transport, "sse");
+    }
+
+    #[test]
+    fn parse_json_malformed_entry_skipped() {
+        // Non-object entries should be silently skipped, not produce "unknown" servers.
+        let json =
+            r#"{"mcpServers":{"good":{"command":"npx","args":["x"]},"bad":"not-an-object"}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "good");
+    }
+
+    #[test]
+    fn parse_claude_cli_without_scope() {
+        // Minimal form: `claude mcp add-json name '{...}'`
+        let cli = r#"claude mcp add-json my-server '{"command":"npx","args":["-y","foo"]}'"#;
+        let servers = parse_snippet(cli).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "my-server");
+        assert_eq!(servers[0].command.as_deref(), Some("npx"));
+    }
+
+    #[test]
+    fn parse_multiple_env_values() {
+        let json = r#"{"mcpServers":{"srv":{"command":"npx","args":["x"],"env":{"KEY1":"val1","KEY2":"val2","KEY3":"val3"}}}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers[0].env.len(), 3);
+        let vals: std::collections::HashMap<&str, &str> = servers[0]
+            .env
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(vals.get("KEY1"), Some(&"val1"));
+        assert_eq!(vals.get("KEY2"), Some(&"val2"));
+        assert_eq!(vals.get("KEY3"), Some(&"val3"));
+    }
+
+    #[test]
+    fn parse_non_string_env_values() {
+        let json = r#"{"mcpServers":{"srv":{"command":"npx","args":["x"],"env":{"PORT":3000,"DEBUG":true,"NAME":"string-val"}}}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers[0].env.len(), 3);
+        let vals: std::collections::HashMap<&str, &str> = servers[0]
+            .env
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(vals.get("PORT"), Some(&"3000"));
+        assert_eq!(vals.get("DEBUG"), Some(&"true"));
+        assert_eq!(vals.get("NAME"), Some(&"string-val"));
+    }
+
+    #[test]
+    fn parse_toml_non_string_env_values() {
+        let toml = r#"
+[mcp_servers.srv]
+command = "npx"
+args = ["x"]
+
+[mcp_servers.srv.env]
+PORT = 3000
+DEBUG = true
+"#;
+        let servers = parse_snippet(toml).unwrap();
+        assert_eq!(servers[0].env.len(), 2);
+        let vals: std::collections::HashMap<&str, &str> = servers[0]
+            .env
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(vals.get("PORT"), Some(&"3000"));
+        assert_eq!(vals.get("DEBUG"), Some(&"true"));
+    }
+
+    #[test]
+    fn parse_claude_cli_with_braces_in_string() {
+        let cli = r#"claude mcp add-json srv '{"command":"npx","args":["x"],"description":"use { for blocks"}'"#;
+        let servers = parse_snippet(cli).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "srv");
+        assert_eq!(servers[0].command.as_deref(), Some("npx"));
+    }
+
+    #[test]
+    fn parse_json_server_with_extraneous_keys() {
+        let json = r#"{"context_servers":{"srv":{"source":"custom","type":"stdio","command":"npx","args":["x"]}}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers[0].name, "srv");
+        assert_eq!(servers[0].command.as_deref(), Some("npx"));
+    }
+
+    #[test]
+    fn parse_json_server_url_only() {
+        let json = r#"{"mcpServers":{"remote":{"url":"https://api.example.com/mcp"}}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers[0].transport, "http");
+        assert!(servers[0].command.is_none());
+        assert!(servers[0].url.is_some());
+    }
+
+    #[test]
+    fn parse_yaml_non_string_env_values() {
+        let yaml = r#"
+mcp_servers:
+  srv:
+    command: npx
+    args:
+      - "x"
+    env:
+      PORT: 3000
+      DEBUG: true
+"#;
+        let servers = parse_snippet(yaml).unwrap();
+        assert_eq!(servers[0].env.len(), 2);
+        let vals: std::collections::HashMap<&str, &str> = servers[0]
+            .env
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(vals.get("PORT"), Some(&"3000"));
+        assert_eq!(vals.get("DEBUG"), Some(&"true"));
+    }
+
+    #[test]
+    fn parse_goose_non_string_env_values() {
+        let yaml = r#"
+extensions:
+  srv:
+    enabled: true
+    type: stdio
+    cmd: npx
+    args:
+      - "x"
+    envs:
+      PORT: 3000
+      DEBUG: true
+"#;
+        let servers = parse_snippet(yaml).unwrap();
+        assert_eq!(servers[0].env.len(), 2);
+        let vals: std::collections::HashMap<&str, &str> = servers[0]
+            .env
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(vals.get("PORT"), Some(&"3000"));
+        assert_eq!(vals.get("DEBUG"), Some(&"true"));
     }
 }
