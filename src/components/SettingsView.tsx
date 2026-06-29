@@ -14,6 +14,13 @@ import {
 } from "@/lib/api";
 import type { Registry } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface Props {
   registry: Registry | null;
@@ -292,19 +299,26 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
                     className="h-8 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2 text-xs focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
                   />
                   {profiles.length > 0 && (
-                    <select
-                      value={newProfile}
-                      onChange={(e) => setNewProfile(e.target.value)}
-                      aria-label="Scope"
-                      className="h-8 shrink-0 rounded-md border border-input bg-transparent px-2 text-xs"
+                    <Select
+                      value={newProfile || "__all__"}
+                      onValueChange={(v) => setNewProfile(v === "__all__" ? "" : v)}
                     >
-                      <option value="">All servers</option>
-                      {profiles.map((p) => (
-                        <option key={p.id} value={p.name}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
+                      <SelectTrigger
+                        size="sm"
+                        aria-label="Scope"
+                        className="h-8 w-32 shrink-0 text-xs"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__all__">All servers</SelectItem>
+                        {profiles.map((p) => (
+                          <SelectItem key={p.id} value={p.name}>
+                            {p.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   )}
                   <button
                     type="button"
