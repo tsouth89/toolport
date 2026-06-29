@@ -13,6 +13,7 @@
 //! map so `tools/call` still forwards the server's real, hyphenated tool name.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
@@ -133,9 +134,22 @@ impl ToolPolicy {
     }
 }
 
+/// One connected downstream server behind its own lock. A call to it only blocks
+/// other calls to the SAME server (a single stdio pipe is one-in-flight by
+/// design), never calls to other servers. Held as an `Arc` so an in-flight call
+/// can keep the slot (and its live child process) alive across the downstream I/O
+/// without holding the router lock, and survive a concurrent router replacement.
+struct ServerSlot {
+    id: String,
+    inner: Mutex<DownstreamServer>,
+}
+
 #[derive(Default)]
 pub struct Router {
-    servers: Vec<DownstreamServer>,
+    servers: Vec<Arc<ServerSlot>>,
+    /// Server id -> index into `servers`, so a call resolves its server without a
+    /// linear scan and without locking any server to read its id.
+    by_id: HashMap<String, usize>,
     /// Exposed (client-facing) tools, names already sanitized, in add order.
     tools: Vec<Value>,
     /// Exposed tool name -> (server id, original downstream tool name).
@@ -170,15 +184,25 @@ impl Router {
         }
     }
 
-    pub fn add(&mut self, server: DownstreamServer) {
-        for tool in &server.tools {
+    /// Index one server's advertised tools/resources/prompts into the exposed
+    /// aggregation (names, routes, policy). Shared by `add` (a new server) and
+    /// `rebuild_aggregation` (after a refresh); the call order is the exposed-name
+    /// order, so `_2` collision suffixes stay stable.
+    fn index_server(
+        &mut self,
+        server_id: &str,
+        tools: &[Value],
+        resources: &[Value],
+        prompts: &[Value],
+    ) {
+        for tool in tools {
             let Some(orig) = tool.get("name").and_then(|n| n.as_str()) else {
                 continue;
             };
             // Allocate the exposed name regardless of policy so toggling one tool
             // never renames its siblings (their `_2` suffixes stay put).
-            let exposed = self.exposed_name(&server.id, orig);
-            if let Some(reason) = self.policy.blocked_reason(&server.id, orig, tool) {
+            let exposed = self.exposed_name(server_id, orig);
+            if let Some(reason) = self.policy.blocked_reason(server_id, orig, tool) {
                 self.blocked.insert(exposed, reason.to_string());
                 continue;
             }
@@ -189,33 +213,42 @@ impl Router {
             }
             self.tools.push(t);
             self.routes
-                .insert(exposed, (server.id.clone(), orig.to_string()));
+                .insert(exposed, (server_id.to_string(), orig.to_string()));
         }
 
         // Resources: pass uris through unchanged (they're already server-scoped)
         // and remember which server owns each, so resources/read can reach it.
-        for resource in &server.resources {
+        for resource in resources {
             if let Some(uri) = resource.get("uri").and_then(|u| u.as_str()) {
                 self.resources.push(resource.clone());
                 self.resource_routes
-                    .insert(uri.to_string(), server.id.clone());
+                    .insert(uri.to_string(), server_id.to_string());
             }
         }
 
         // Prompts: namespace names like tools so two servers can't collide.
-        for prompt in &server.prompts {
+        for prompt in prompts {
             let Some(orig) = prompt.get("name").and_then(|n| n.as_str()) else {
                 continue;
             };
-            let exposed = self.exposed_name(&server.id, orig);
+            let exposed = self.exposed_name(server_id, orig);
             let mut p = prompt.clone();
             p["name"] = json!(exposed);
             self.prompts.push(p);
             self.prompt_routes
-                .insert(exposed, (server.id.clone(), orig.to_string()));
+                .insert(exposed, (server_id.to_string(), orig.to_string()));
         }
+    }
 
-        self.servers.push(server);
+    pub fn add(&mut self, server: DownstreamServer) {
+        let id = server.id.clone();
+        self.index_server(&id, &server.tools, &server.resources, &server.prompts);
+        let idx = self.servers.len();
+        self.servers.push(Arc::new(ServerSlot {
+            id: id.clone(),
+            inner: Mutex::new(server),
+        }));
+        self.by_id.insert(id, idx);
     }
 
     pub fn server_count(&self) -> usize {
@@ -250,17 +283,21 @@ impl Router {
     /// session-scoped tool change isn't lost to a freshly spawned process that
     /// never saw it.
     pub fn refresh_tools(&mut self) {
-        for server in &mut self.servers {
-            server.refresh_tools();
+        // `&mut self` is exclusive, so locking each slot here can't contend.
+        for slot in &self.servers {
+            slot.inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refresh_tools();
         }
-        self.reindex();
+        self.rebuild_aggregation();
     }
 
     /// Re-derive the exposed tool/resource/prompt aggregation from the current
-    /// servers' (possibly refreshed) lists. Order is preserved, so exposed names
-    /// and their `_2` collision suffixes stay stable across a refresh.
-    fn reindex(&mut self) {
-        let servers = std::mem::take(&mut self.servers);
+    /// servers' (possibly refreshed) lists, in the original add order so exposed
+    /// names and their `_2` collision suffixes stay stable. The server set itself
+    /// is unchanged, so `servers` and `by_id` are kept.
+    fn rebuild_aggregation(&mut self) {
         self.tools.clear();
         self.routes.clear();
         self.seen.clear();
@@ -269,14 +306,38 @@ impl Router {
         self.resource_routes.clear();
         self.prompts.clear();
         self.prompt_routes.clear();
-        for server in servers {
-            self.add(server);
+        // Clone the Arcs (cheap) and snapshot each slot's lists under its lock, so
+        // we hold neither a slot lock nor a borrow of `self.servers` across the
+        // `&mut self` re-index.
+        let slots: Vec<Arc<ServerSlot>> = self.servers.clone();
+        for slot in &slots {
+            let (tools, resources, prompts) = {
+                let s = slot
+                    .inner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (s.tools.clone(), s.resources.clone(), s.prompts.clone())
+            };
+            self.index_server(&slot.id, &tools, &resources, &prompts);
         }
     }
 
+    /// The slot owning `server_id`, as a cloned `Arc` so the caller can lock and
+    /// use it after dropping any borrow of the router (this is what lets the
+    /// downstream call run without holding the router lock).
+    fn slot_for(&self, server_id: &str) -> Result<Arc<ServerSlot>, String> {
+        self.by_id
+            .get(server_id)
+            .and_then(|&i| self.servers.get(i))
+            .cloned()
+            .ok_or_else(|| format!("no connected server '{server_id}'"))
+    }
+
     /// Forward an exposed tool call to its owning downstream server, using that
-    /// server's original tool name.
-    pub fn route_call(&mut self, exposed_name: &str, arguments: Value) -> Result<Value, String> {
+    /// server's original tool name. Takes `&self`: it locks only the target
+    /// server, so concurrent calls to different servers run in parallel while
+    /// calls to the same server (one stdio pipe) serialize.
+    pub fn route_call(&self, exposed_name: &str, arguments: Value) -> Result<Value, String> {
         if let Some(reason) = self.blocked.get(exposed_name) {
             return Err(format!("tool '{exposed_name}' is {reason}"));
         }
@@ -285,11 +346,11 @@ impl Router {
             .get(exposed_name)
             .cloned()
             .ok_or_else(|| format!("no route for tool '{exposed_name}'"))?;
-        let server = self
-            .servers
-            .iter_mut()
-            .find(|s| s.id == server_id)
-            .ok_or_else(|| format!("no connected server '{server_id}'"))?;
+        let slot = self.slot_for(&server_id)?;
+        let mut server = slot
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         server.call(&tool, arguments)
     }
 
@@ -303,33 +364,35 @@ impl Router {
         self.prompts.clone()
     }
 
-    /// Read a resource by uri from whichever server advertised it.
-    pub fn read_resource(&mut self, uri: &str) -> Result<Value, String> {
+    /// Read a resource by uri from whichever server advertised it. `&self`: locks
+    /// only the owning server (see `route_call`).
+    pub fn read_resource(&self, uri: &str) -> Result<Value, String> {
         let server_id = self
             .resource_routes
             .get(uri)
             .cloned()
             .ok_or_else(|| format!("no server owns resource '{uri}'"))?;
-        let server = self
-            .servers
-            .iter_mut()
-            .find(|s| s.id == server_id)
-            .ok_or_else(|| format!("no connected server '{server_id}'"))?;
+        let slot = self.slot_for(&server_id)?;
+        let mut server = slot
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         server.read_resource(uri)
     }
 
     /// Get a prompt by its exposed name, forwarding the server's real name.
-    pub fn get_prompt(&mut self, exposed_name: &str, arguments: Value) -> Result<Value, String> {
+    /// `&self`: locks only the owning server (see `route_call`).
+    pub fn get_prompt(&self, exposed_name: &str, arguments: Value) -> Result<Value, String> {
         let (server_id, name) = self
             .prompt_routes
             .get(exposed_name)
             .cloned()
             .ok_or_else(|| format!("no route for prompt '{exposed_name}'"))?;
-        let server = self
-            .servers
-            .iter_mut()
-            .find(|s| s.id == server_id)
-            .ok_or_else(|| format!("no connected server '{server_id}'"))?;
+        let slot = self.slot_for(&server_id)?;
+        let mut server = slot
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         server.get_prompt(&name, arguments)
     }
 }
