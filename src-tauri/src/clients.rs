@@ -450,6 +450,20 @@ fn cursor_plugins_dir() -> Option<PathBuf> {
     Some(home()?.join(".cursor").join("plugins").join("cache"))
 }
 
+fn plugin_cache_dir_from_settings_path(settings_path: &Path) -> Option<PathBuf> {
+    Some(
+        settings_path
+            .parent()?
+            .parent()?
+            .join("plugins")
+            .join("cache"),
+    )
+}
+
+fn roo_code_plugins_dir() -> Option<PathBuf> {
+    plugin_cache_dir_from_settings_path(&roo_code_path()?)
+}
+
 fn collect_mcp_files(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
     if depth == 0 {
         return;
@@ -475,18 +489,14 @@ fn collect_mcp_files(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
     }
 }
 
-/// Read Cursor's plugin MCP servers from `~/.cursor/plugins/cache/**/mcp.json`.
+/// Read plugin MCP servers from `**/mcp.json` or `**/.mcp.json` files.
 /// Two shapes appear: `{ "<name>": {...} }` and `{ "mcpServers": { ... } }`.
-fn scan_cursor_plugins() -> Vec<McpServer> {
-    let dir = match cursor_plugins_dir() {
-        Some(d) => d,
-        None => return Vec::new(),
-    };
+fn scan_plugin_mcp_servers(dir: &Path) -> Vec<McpServer> {
     if !dir.exists() {
         return Vec::new();
     }
     let mut files = Vec::new();
-    collect_mcp_files(&dir, &mut files, 8);
+    collect_mcp_files(dir, &mut files, 8);
 
     let mut servers: Vec<McpServer> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -513,6 +523,20 @@ fn scan_cursor_plugins() -> Vec<McpServer> {
     }
     servers.sort_by_key(|s| s.name.to_lowercase());
     servers
+}
+
+/// Read Cursor's plugin MCP servers from `~/.cursor/plugins/cache/**/mcp.json`.
+fn scan_cursor_plugins() -> Vec<McpServer> {
+    cursor_plugins_dir()
+        .map(|dir| scan_plugin_mcp_servers(&dir))
+        .unwrap_or_default()
+}
+
+/// Read Roo Code's plugin MCP servers from its global storage plugin cache.
+fn scan_roo_code_plugins() -> Vec<McpServer> {
+    roo_code_plugins_dir()
+        .map(|dir| scan_plugin_mcp_servers(&dir))
+        .unwrap_or_default()
 }
 
 fn defs() -> Vec<ClientDef> {
@@ -596,7 +620,7 @@ fn defs() -> Vec<ClientDef> {
             format: Format::JsonMcpServers,
             uses_connectors: false,
             path: roo_code_path,
-            plugin_scan: None,
+            plugin_scan: Some(scan_roo_code_plugins),
         },
         ClientDef {
             id: "warp",
@@ -2256,6 +2280,84 @@ bad = "not-a-table"
                 .unwrap_or_default();
             println!("  {} [{}] {}", s.name, s.transport, target);
         }
+    }
+
+    #[test]
+    fn plugin_mcp_scan_reads_nested_mcp_files() {
+        let root = std::env::temp_dir().join(format!("conduit-plugin-scan-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("alpha")).unwrap();
+        std::fs::create_dir_all(root.join("beta").join("nested")).unwrap();
+        std::fs::create_dir_all(root.join("ignored")).unwrap();
+
+        std::fs::write(
+            root.join("alpha").join("mcp.json"),
+            r#"{
+  "mcpServers": {
+    "remote": {
+      "type": "sse",
+      "url": "https://example.com/sse",
+      "env": { "REMOTE_TOKEN": "secret" }
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("beta").join("nested").join(".mcp.json"),
+            r#"{
+  "local": {
+    "command": "npx",
+    "args": ["-y", "@example/mcp"],
+    "env": { "LOCAL_TOKEN": "secret" }
+  }
+}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("ignored").join("mcp.json"), "not json").unwrap();
+
+        let servers = scan_plugin_mcp_servers(&root);
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "local");
+        assert_eq!(servers[0].transport, "stdio");
+        assert_eq!(servers[0].command.as_deref(), Some("npx"));
+        assert_eq!(servers[0].args, vec!["-y", "@example/mcp"]);
+        assert_eq!(servers[0].env_keys, vec!["LOCAL_TOKEN"]);
+        assert_eq!(servers[1].name, "remote");
+        assert_eq!(servers[1].transport, "sse");
+        assert_eq!(servers[1].url.as_deref(), Some("https://example.com/sse"));
+        assert_eq!(servers[1].env_keys, vec!["REMOTE_TOKEN"]);
+    }
+
+    #[test]
+    fn roo_code_plugin_cache_is_under_extension_storage() {
+        for platform in Platform::ALL {
+            let home = mock_home(platform);
+            let settings_path = resolve_client_config_path("roo-code", &home, platform)
+                .unwrap_or_else(|| panic!("missing Roo Code path on {platform:?}"));
+            let expected = settings_path
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("plugins")
+                .join("cache");
+            assert_eq!(
+                plugin_cache_dir_from_settings_path(&settings_path).unwrap(),
+                expected,
+                "Roo Code plugin cache path on {platform:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn roo_code_is_registered_with_plugin_scan() {
+        let d = defs().into_iter().find(|d| d.id == "roo-code").unwrap();
+        assert!(matches!(d.format, Format::JsonMcpServers));
+        assert!(d.plugin_scan.is_some());
+        assert!((d.path)().is_some());
     }
 
     #[test]
