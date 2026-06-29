@@ -2522,8 +2522,19 @@ bad = "not-a-table"
         }
     }
 
+    /// Serializes tests that read or mutate the process-global XDG env vars. Rust
+    /// runs tests in parallel, so without this the test that sets `XDG_CONFIG_HOME`
+    /// could change `dirs::config_dir()` mid-flight under a test that reads it,
+    /// which is exactly what made `client_config_paths_match_current_platform`
+    /// flake on CI. Poison is recovered: a panic elsewhere shouldn't wedge these.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn client_config_paths_match_current_platform() {
+        // Hold the env lock: the path resolution reads `dirs::config_dir()`, which
+        // another test mutates via `XDG_CONFIG_HOME`. Serialize so we never read it
+        // mid-change.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = home().expect("home dir should be available in tests");
         let platform = Platform::current();
         for client in defs() {
@@ -2640,6 +2651,9 @@ bad = "not-a-table"
     #[test]
     #[cfg(all(unix, not(target_os = "macos")))]
     fn client_config_paths_honor_xdg_dirs_on_linux() {
+        // Hold the env lock across the set/read/remove so no concurrent test reads
+        // `dirs::config_dir()` while XDG is temporarily overridden here.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("conduit-xdg-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let xdg_config = base.join("xdg-config");
