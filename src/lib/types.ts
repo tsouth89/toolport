@@ -200,6 +200,8 @@ export interface CatalogEntry {
   credentialsUrl?: string;
   /** One-line hint on what credential to create (scopes, what to paste). */
   setupHint?: string;
+  /** Placeholder for URL field when self-hosted (opens dialog on add). */
+  urlHint?: string;
 }
 
 /** A curated "stack": a role-based bundle of catalog servers for guided setup. */

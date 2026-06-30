@@ -32,10 +32,14 @@ interface Props {
   initial?: ServerEntry;
   /** Names of servers that already exist, to warn on a duplicate name. */
   existingNames?: string[];
+  /** Open the dialog automatically on mount (used by catalog configure-add). */
+  autoOpen?: boolean;
+  /** Placeholder text for the URL field (e.g. self-hosted server hint). */
+  urlPlaceholder?: string;
 }
 
-export function ServerDialog({ trigger, onSaved, editId, initial, existingNames }: Props) {
-  const [open, setOpen] = useState(false);
+export function ServerDialog({ trigger, onSaved, editId, initial, existingNames, autoOpen, urlPlaceholder }: Props) {
+  const [open, setOpen] = useState(autoOpen ?? false);
   const [form, setForm] = useState({
     name: initial?.name ?? "",
     transport: (initial?.transport ?? "stdio") as Transport,
@@ -338,7 +342,7 @@ export function ServerDialog({ trigger, onSaved, editId, initial, existingNames 
               <Label htmlFor="srv-url">URL</Label>
               <Input
                 id="srv-url"
-                placeholder="https://mcp.example.com/mcp"
+                placeholder={urlPlaceholder ?? "https://mcp.example.com/mcp"}
                 value={form.url}
                 onChange={(e) => set("url", e.target.value)}
               />
