@@ -104,7 +104,7 @@ export function TeamsView({
             <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Team server URL</span>
               <Input
-                placeholder="https://teams.yourcompany.com"
+                placeholder="https://conduit.yourcompany.com"
                 value={serverUrl}
                 onChange={(e) => setServerUrl(e.target.value)}
               />
