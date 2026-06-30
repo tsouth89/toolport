@@ -326,7 +326,115 @@ mod platform {
     }
 }
 
+/// Encrypted-file secret backend for headless / no-keychain environments. It is
+/// activated by setting `CONDUIT_SECRET_KEY` to any non-empty string: a 32-byte key is
+/// derived from it (SHA-256) and secrets live in `secrets.enc` as one XChaCha20-Poly1305
+/// sealed JSON map, re-sealed on every write. With the env var unset the OS keychain is
+/// used exactly as before, so desktop installs are untouched. The same env var must be
+/// present for both the app (writes) and the gateway (reads).
+mod file {
+    use super::account;
+    use base64::Engine;
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    const NONCE_LEN: usize = 24;
+
+    /// account -> secret value.
+    type Store = BTreeMap<String, String>;
+
+    /// The 32-byte key derived from `CONDUIT_SECRET_KEY`, or None when it's unset/empty
+    /// (the signal to use the OS keychain instead).
+    fn key_material() -> Option<[u8; 32]> {
+        let secret = std::env::var("CONDUIT_SECRET_KEY").ok()?;
+        if secret.is_empty() {
+            return None;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&Sha256::digest(secret.as_bytes()));
+        Some(key)
+    }
+
+    pub fn active() -> bool {
+        key_material().is_some()
+    }
+
+    fn path() -> Result<PathBuf, String> {
+        crate::registry::conduit_dir()
+            .map(|d| d.join("secrets.enc"))
+            .ok_or_else(|| "no conduit data directory".to_string())
+    }
+
+    /// Seal `plain` as base64(`nonce` || ciphertext) under `key` with a fresh nonce.
+    pub(super) fn seal(key: &[u8; 32], plain: &[u8]) -> Result<String, String> {
+        let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|e| e.to_string())?;
+        let mut nonce = [0u8; NONCE_LEN];
+        getrandom::getrandom(&mut nonce).map_err(|e| e.to_string())?;
+        let ct = cipher
+            .encrypt(XNonce::from_slice(&nonce), plain)
+            .map_err(|_| "encryption failed".to_string())?;
+        let mut blob = nonce.to_vec();
+        blob.extend_from_slice(&ct);
+        Ok(base64::engine::general_purpose::STANDARD.encode(&blob))
+    }
+
+    /// Reverse of `seal`: authenticate and decrypt. Fails on a wrong key or tamper.
+    pub(super) fn open(key: &[u8; 32], encoded: &str) -> Result<Vec<u8>, String> {
+        let blob = base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .map_err(|e| e.to_string())?;
+        if blob.len() < NONCE_LEN {
+            return Err("secrets.enc is truncated or corrupt".to_string());
+        }
+        let (nonce, ct) = blob.split_at(NONCE_LEN);
+        let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|e| e.to_string())?;
+        cipher
+            .decrypt(XNonce::from_slice(nonce), ct)
+            .map_err(|_| "could not decrypt secrets.enc (wrong CONDUIT_SECRET_KEY?)".to_string())
+    }
+
+    fn load() -> Result<Store, String> {
+        let key = key_material().ok_or("CONDUIT_SECRET_KEY is not set")?;
+        let encoded = match std::fs::read_to_string(path()?) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Store::new()),
+            Err(e) => return Err(e.to_string()),
+        };
+        serde_json::from_slice(&open(&key, &encoded)?).map_err(|e| e.to_string())
+    }
+
+    fn save(store: &Store) -> Result<(), String> {
+        let key = key_material().ok_or("CONDUIT_SECRET_KEY is not set")?;
+        let plain = serde_json::to_vec(store).map_err(|e| e.to_string())?;
+        crate::registry::atomic_write(&path()?, &seal(&key, &plain)?)
+    }
+
+    pub fn set_secret(server_id: &str, key: &str, value: &str) -> Result<(), String> {
+        let mut store = load()?;
+        store.insert(account(server_id, key), value.to_string());
+        save(&store)
+    }
+
+    pub fn get_secret_result(server_id: &str, key: &str) -> Result<Option<String>, String> {
+        Ok(load()?.get(&account(server_id, key)).cloned())
+    }
+
+    pub fn delete_secret(server_id: &str, key: &str) -> Result<(), String> {
+        let mut store = load()?;
+        if store.remove(&account(server_id, key)).is_some() {
+            save(&store)?;
+        }
+        Ok(())
+    }
+}
+
 pub fn set_secret(server_id: &str, key: &str, value: &str) -> Result<(), String> {
+    if file::active() {
+        return file::set_secret(server_id, key, value);
+    }
     platform::set_secret(server_id, key, value)
 }
 
@@ -339,10 +447,16 @@ pub fn get_secret(server_id: &str, key: &str) -> Option<String> {
 /// access to this app). Callers that need to explain *why* a secret is missing
 /// use this so a read failure isn't silently treated as "never saved".
 pub fn get_secret_result(server_id: &str, key: &str) -> Result<Option<String>, String> {
+    if file::active() {
+        return file::get_secret_result(server_id, key);
+    }
     platform::get_secret_result(server_id, key)
 }
 
 pub fn delete_secret(server_id: &str, key: &str) -> Result<(), String> {
+    if file::active() {
+        return file::delete_secret(server_id, key);
+    }
     platform::delete_secret(server_id, key)
 }
 
@@ -450,6 +564,19 @@ mod tests {
         assert_eq!(get_secret(sid, key).as_deref(), Some("s3cr3t"));
         delete_secret(sid, key).unwrap();
         assert_eq!(get_secret(sid, key), None);
+    }
+
+    #[test]
+    fn file_backend_seal_open_round_trip() {
+        let key = [7u8; 32];
+        let sealed = file::seal(&key, b"s3cr3t value").unwrap();
+        // A fresh nonce per seal means the same plaintext seals to different bytes.
+        assert_ne!(sealed, file::seal(&key, b"s3cr3t value").unwrap());
+        // The right key recovers the plaintext; a wrong key is rejected.
+        assert_eq!(file::open(&key, &sealed).unwrap(), b"s3cr3t value");
+        let mut wrong = key;
+        wrong[0] ^= 0xff;
+        assert!(file::open(&wrong, &sealed).is_err());
     }
 
     /// The migration preserves secret values: it reads, deletes, and re-creates

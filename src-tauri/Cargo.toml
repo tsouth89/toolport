@@ -34,6 +34,7 @@ ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.2"
+chacha20poly1305 = "0.10"
 urlencoding = "2"
 # Minimal synchronous HTTP server for the gateway's native HTTP/OpenAPI mode
 # (first-class Open WebUI and any OpenAPI tool client, no external bridge).
