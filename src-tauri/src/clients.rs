@@ -2204,6 +2204,31 @@ pub(crate) fn resolve_gateway_path() -> Option<PathBuf> {
     // and the Linux .deb (/usr/bin).
     let plain = dir.join(format!("conduit-gateway{ext}"));
 
+    // macOS signed bundle: the keychain-access-group wrapper (scripts/macos-sign-local.sh)
+    // re-homes the gateway into a nested helper bundle so it can carry its own
+    // embedded provisioning profile:
+    //     Conduit.app/Contents/Helpers/ConduitGateway.app/Contents/MacOS/conduit-gateway
+    // The app binary runs from Conduit.app/Contents/MacOS, so `dir` is that
+    // directory. Prefer the nested binary when it exists. The old bare path
+    // (Contents/MacOS/conduit-gateway) is kept as a SYMLINK to this same binary by
+    // the signing script for backward compatibility with already-written client
+    // configs, so spawning either path reaches the same signed, profile-bearing
+    // gateway. (Existing-install client-config rewrite to the nested path is a
+    // later concern; not handled here.)
+    #[cfg(target_os = "macos")]
+    {
+        let nested = dir
+            .join("..")
+            .join("Helpers")
+            .join("ConduitGateway.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("conduit-gateway");
+        if nested.exists() {
+            return Some(nested);
+        }
+    }
+
     // AppImage is the exception: it runs from an ephemeral mount (e.g.
     // /tmp/.mount_XXXX) that disappears when the app exits, so a gateway path inside
     // it would be dead by the time a client tries to spawn it. Copy the gateway to a

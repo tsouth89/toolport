@@ -1534,14 +1534,16 @@ fn http_bridge_status(state: State<HttpBridgeState>) -> Result<HttpBridgeStatus,
 pub fn run() {
     let registry = registry::load().unwrap_or_default();
 
-    // Migrate legacy (ACL-bearing) keychain entries in the background. On macOS,
-    // older versions of Conduit created keychain items via the `keyring` crate,
-    // which attaches per-app ACLs that trigger repeated password prompts. This
-    // reads each entry's value, deletes it, and re-creates it via the ACL-free
-    // SecItemAdd path — no secret values are lost. Guarded by a marker file so it
-    // runs exactly once. Only the app runs this (the gateway can't read legacy
-    // entries without triggering prompts). Best-effort: failures are logged but
-    // never block startup.
+    // Migrate legacy keychain secrets into the data-protection keychain (the
+    // team-scoped shared access group) in the background. On macOS, older versions
+    // of Conduit stored secrets as per-app-ACL keychain items that trigger a
+    // password prompt every time a freshly-signed app/gateway reads them. This
+    // moves each value into the data-protection keychain, which the separately
+    // signed gateway reads with NO prompt across updates — read each value, write +
+    // verify the data-protection copy, then delete the legacy item (no secret is
+    // lost; an item that can't move is left in place). Guarded by a marker file so
+    // it runs once. Only the app runs this (the gateway is read-only). Best-effort:
+    // failures are logged but never block startup.
     {
         let reg = registry.clone();
         std::thread::spawn(move || {
@@ -1565,10 +1567,10 @@ pub fn run() {
                 teams::TEAM_TOKEN_SERVER.to_string(),
                 teams::TEAM_TOKEN_KEY.to_string(),
             ));
-            let report = secrets::migrate_legacy_entries(&keys);
+            let report = secrets::migrate_secrets_to_dpk(&keys);
             if report.migrated > 0 || report.failed > 0 {
                 eprintln!(
-                    "conduit: keychain migration complete ({} entries rewritten, {} failed, {} not found)",
+                    "conduit: keychain migration complete ({} entries moved to data-protection keychain, {} failed, {} not found)",
                     report.migrated, report.failed, report.not_found
                 );
             }

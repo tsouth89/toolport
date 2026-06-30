@@ -1,0 +1,4 @@
+# Shell scripts must stay LF, or they fail to run on the macOS/Linux CI runners
+# (a CRLF in the shebang line gives "bad interpreter"). This pins them regardless
+# of a contributor's core.autocrlf setting.
+*.sh text eol=lf
