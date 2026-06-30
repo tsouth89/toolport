@@ -39,7 +39,10 @@ fn live_tool_change_surfaces_via_refresh_without_respawn() {
     // have falsely flagged dirty (the watch is only armed post-handshake).
     let before = tool_names(&router);
     assert!(before.contains(&"mock__grow".to_string()), "got {before:?}");
-    assert!(!before.contains(&"mock__greet".to_string()), "got {before:?}");
+    assert!(
+        !before.contains(&"mock__greet".to_string()),
+        "got {before:?}"
+    );
     assert!(!dirty.load(Ordering::SeqCst), "nothing changed yet");
 
     // Drive the live server to add a tool and announce the change.

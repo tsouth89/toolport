@@ -23,7 +23,13 @@ use crate::downstream::DownstreamServer;
 /// (`[A-Za-z0-9_]`); every other character becomes `_`.
 pub fn sanitize_segment(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -63,7 +69,10 @@ fn has_ref(node: &Value) -> bool {
 /// pointer collapses to a permissive `{}` so NO `$ref` ever leaks to a consumer that
 /// can't resolve it. Cycles thus terminate with a wildcard rather than recursing.
 fn inline_node(node: &mut Value, root: &Value, active: &mut HashSet<String>) {
-    let ref_str = node.get("$ref").and_then(|v| v.as_str()).map(str::to_string);
+    let ref_str = node
+        .get("$ref")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     if let Some(r) = ref_str {
         let mut resolved = None;
         if let Some(ptr) = r.strip_prefix('#') {
@@ -495,14 +504,18 @@ mod tests {
                 })),
                 "resources/read" => {
                     let uri = params.get("uri").and_then(|u| u.as_str()).unwrap_or("");
-                    Ok(json!({ "contents": [{ "uri": uri, "text": format!("{}-body", self.label) }] }))
+                    Ok(
+                        json!({ "contents": [{ "uri": uri, "text": format!("{}-body", self.label) }] }),
+                    )
                 }
                 "prompts/list" => Ok(json!({
                     "prompts": [{ "name": "greet", "description": "greeting" }]
                 })),
                 "prompts/get" => {
                     let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                    Ok(json!({ "messages": [{ "role": "user", "content": format!("{}:{}", self.label, name) }] }))
+                    Ok(
+                        json!({ "messages": [{ "role": "user", "content": format!("{}:{}", self.label, name) }] }),
+                    )
                 }
                 other => Err(format!("unexpected method {other}")),
             }
@@ -562,7 +575,9 @@ mod tests {
         router.add(mock_server("github"));
         router.add(mock_server("postgres"));
 
-        let result = router.route_call("postgres__add", json!({ "a": 1 })).unwrap();
+        let result = router
+            .route_call("postgres__add", json!({ "a": 1 }))
+            .unwrap();
         let text = result["content"][0]["text"].as_str().unwrap();
         assert_eq!(text, "postgres:add");
     }
@@ -618,18 +633,23 @@ mod tests {
 
     #[test]
     fn is_destructive_reads_annotations() {
-        assert!(is_destructive(&json!({ "annotations": { "destructiveHint": true } })));
+        assert!(is_destructive(
+            &json!({ "annotations": { "destructiveHint": true } })
+        ));
         assert!(is_destructive(&json!({ "destructiveHint": true }))); // top-level fallback
-        assert!(!is_destructive(&json!({ "annotations": { "destructiveHint": false } })));
+        assert!(!is_destructive(
+            &json!({ "annotations": { "destructiveHint": false } })
+        ));
         assert!(!is_destructive(&json!({ "name": "x" })));
     }
 
     #[test]
     fn disabled_tool_is_hidden_and_blocked() {
         let mut policy = ToolPolicy::default();
-        policy
-            .disabled
-            .insert("github".to_string(), ["echo".to_string()].into_iter().collect());
+        policy.disabled.insert(
+            "github".to_string(),
+            ["echo".to_string()].into_iter().collect(),
+        );
         let mut router = Router::with_policy(policy);
         router.add(mock_server("github"));
 
@@ -741,6 +761,10 @@ mod tests {
         let before = names(&router);
         assert_eq!(before, vec!["s__a_b", "s__a_b_2"]);
         router.refresh_tools();
-        assert_eq!(names(&router), before, "refresh shuffled the collision suffixes");
+        assert_eq!(
+            names(&router),
+            before,
+            "refresh shuffled the collision suffixes"
+        );
     }
 }

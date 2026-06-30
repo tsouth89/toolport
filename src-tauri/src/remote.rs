@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::downstream::{DownstreamServer, HttpTransport};
+use crate::downstream::{DownstreamServer, HttpTransport, RefreshFn};
 use crate::registry::ServerEntry;
 use crate::{oauth, secrets};
 
@@ -44,8 +44,7 @@ pub fn store_oauth_state(
 }
 
 fn load_state(server_id: &str) -> Option<OAuthState> {
-    secrets::get_secret(server_id, STATE_KEY)
-        .and_then(|s| serde_json::from_str(&s).ok())
+    secrets::get_secret(server_id, STATE_KEY).and_then(|s| serde_json::from_str(&s).ok())
 }
 
 /// Use the stored refresh token to mint a fresh access token, vault it, and
@@ -102,11 +101,24 @@ fn require_secure_for_auth(url: &str) -> Result<(), String> {
 }
 
 /// Build an HTTP transport, refusing to attach a token to a cleartext public URL.
-fn authed_transport(url: &str, token: Option<String>) -> Result<HttpTransport, String> {
+/// When authed, the transport gets a refresh callback: on a mid-session 401/403 it
+/// mints a fresh access token from the stored refresh token and retries, so a
+/// short-lived token expiring no longer breaks the session until reconnect.
+fn authed_transport(
+    url: &str,
+    token: Option<String>,
+    server_id: &str,
+) -> Result<HttpTransport, String> {
     if token.is_some() {
         require_secure_for_auth(url)?;
     }
-    Ok(HttpTransport::with_auth(url, token))
+    let refresh: Option<RefreshFn> = if token.is_some() {
+        let sid = server_id.to_string();
+        Some(Box::new(move || refresh_token(&sid).ok()))
+    } else {
+        None
+    };
+    Ok(HttpTransport::with_auth_refresh(url, token, refresh))
 }
 
 /// Provenance Conduit doesn't trust to point at the user's private network. Shared
@@ -186,12 +198,12 @@ pub fn connect_remote(server: &ServerEntry) -> Result<DownstreamServer, String> 
     let server_id = &server.id;
     let auth = secrets::get_secret(server_id, secrets::HTTP_AUTH_KEY)
         .or_else(|| first_vaulted_secret(server));
-    let transport = authed_transport(url, auth)?;
+    let transport = authed_transport(url, auth, server_id)?;
     match DownstreamServer::connect(server_id.to_string(), Box::new(transport)) {
         Ok(ds) => Ok(ds),
         Err(e) if is_auth_error(&e) => match refresh_token(server_id) {
             Ok(fresh) => {
-                let transport = authed_transport(url, Some(fresh))?;
+                let transport = authed_transport(url, Some(fresh), server_id)?;
                 DownstreamServer::connect(server_id.to_string(), Box::new(transport))
             }
             Err(_) => Err(e),

@@ -48,7 +48,9 @@ impl SemanticConfig {
             enabled,
             endpoint: env("CONDUIT_EMBED_ENDPOINT").unwrap_or(endpoint),
             model: env("CONDUIT_EMBED_MODEL").unwrap_or(model),
-            blend: env("CONDUIT_EMBED_BLEND").and_then(|v| v.parse().ok()).unwrap_or(blend),
+            blend: env("CONDUIT_EMBED_BLEND")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(blend),
         }
     }
 }
@@ -57,7 +59,10 @@ impl SemanticConfig {
 /// lexical ranker reads, so both score the same signal.
 pub fn tool_document(tool: &Value) -> String {
     let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
-    let desc = tool.get("description").and_then(Value::as_str).unwrap_or("");
+    let desc = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let server = name.split("__").next().unwrap_or("");
     format!("{server} {name}: {desc}")
 }
@@ -150,7 +155,9 @@ fn embed_batch(cfg: &SemanticConfig, inputs: &[String]) -> Option<Vec<Vec<f32>>>
 
 /// Embed a single string (e.g. the query).
 pub fn embed_query(cfg: &SemanticConfig, text: &str) -> Option<Vec<f32>> {
-    embed_batch(cfg, std::slice::from_ref(&text.to_string()))?.into_iter().next()
+    embed_batch(cfg, std::slice::from_ref(&text.to_string()))?
+        .into_iter()
+        .next()
 }
 
 /// Embeddings for each tool (keyed by tool name), using the on-disk cache and
@@ -234,8 +241,20 @@ mod tests {
             blend: 0.5,
         };
         assert!(base.is_active());
-        assert!(!SemanticConfig { enabled: false, ..base.clone() }.is_active());
-        assert!(!SemanticConfig { endpoint: "".into(), ..base.clone() }.is_active());
-        assert!(!SemanticConfig { model: "".into(), ..base }.is_active());
+        assert!(!SemanticConfig {
+            enabled: false,
+            ..base.clone()
+        }
+        .is_active());
+        assert!(!SemanticConfig {
+            endpoint: "".into(),
+            ..base.clone()
+        }
+        .is_active());
+        assert!(!SemanticConfig {
+            model: "".into(),
+            ..base
+        }
+        .is_active());
     }
 }

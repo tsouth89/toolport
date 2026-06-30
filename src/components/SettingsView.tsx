@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { Bot, Check, Copy, Globe, Layers, ShieldAlert, Trash2, X } from "lucide-react";
+import { Bot, Check, Copy, Globe, Layers, ShieldAlert, ShieldCheck, Trash2, X } from "lucide-react";
 import { toastError } from "@/lib/toast";
 import {
   addHttpClient,
   httpBridgeStatus,
   removeHttpClient,
   setAllowAgentControl,
+  setConfirmDestructive,
   setDenyDestructive,
   setLazyDiscovery,
   startHttpBridge,
@@ -32,6 +33,7 @@ interface Props {
 export function SettingsView({ registry, onRegistryChange }: Props) {
   const lazyDiscovery = registry?.lazyDiscovery ?? true;
   const denyDestructive = registry?.denyDestructive ?? false;
+  const confirmDestructive = registry?.confirmDestructive ?? false;
   const allowAgentControl = registry?.allowAgentControl ?? false;
   const [busy, setBusy] = useState(false);
   const [bridge, setBridge] = useState<HttpBridgeStatus | null>(null);
@@ -151,6 +153,14 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           "Block destructive tools",
           "Hide every destructiveHint tool from all clients",
           apply(setDenyDestructive),
+        )}
+        {toggle(
+          ShieldCheck,
+          confirmDestructive,
+          "text-info",
+          "Confirm destructive tools",
+          "Intercept each destructive call with a preview; agent must confirm via conduit_confirm",
+          apply(setConfirmDestructive),
         )}
         {toggle(
           Bot,

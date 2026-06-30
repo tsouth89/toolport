@@ -287,6 +287,8 @@ export interface Registry {
   activeProfileId: string | null;
   /** Global switch: hide and block every destructive-hinted tool. */
   denyDestructive?: boolean;
+  /** Per-call confirmation: intercept destructive tools with a preview + token. */
+  confirmDestructive?: boolean;
   /** Global switch: expose 3 meta-tools instead of the full catalog. */
   lazyDiscovery?: boolean;
   /** Opt-in: let an agent enable/disable servers via the gateway's control tools. */

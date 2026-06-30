@@ -293,7 +293,9 @@ pub fn discover(mcp_url: &str) -> Result<Endpoints, String> {
     // Is the configured MCP server itself local? If so, local OAuth endpoints are
     // expected and allowed; if it's public, its metadata must not redirect us at a
     // private/loopback host (SSRF).
-    let server_local = host_of_url(mcp_url).map(|h| host_is_private(&h)).unwrap_or(false);
+    let server_local = host_of_url(mcp_url)
+        .map(|h| host_is_private(&h))
+        .unwrap_or(false);
     // The issuer can come from the protected-resource document, so guard the
     // metadata fetch too, not just the final endpoints.
     guard_endpoint(&issuer, server_local, "authorization server")?;
@@ -310,7 +312,11 @@ pub fn discover(mcp_url: &str) -> Result<Endpoints, String> {
                 require_https(reg, "registration endpoint")?;
             }
             // SSRF: a public server must not point these at a private/loopback host.
-            guard_endpoint(&meta.authorization_endpoint, server_local, "authorization endpoint")?;
+            guard_endpoint(
+                &meta.authorization_endpoint,
+                server_local,
+                "authorization endpoint",
+            )?;
             guard_endpoint(&meta.token_endpoint, server_local, "token endpoint")?;
             if let Some(reg) = &meta.registration_endpoint {
                 guard_endpoint(reg, server_local, "registration endpoint")?;
@@ -492,7 +498,8 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
                 // it back to blocking so read_callback_query's read timeout applies.
                 let _ = stream.set_nonblocking(false);
                 let query = read_callback_query(&mut stream);
-                let mut params: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                let mut params: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
                 for kv in query.split('&') {
                     let mut it = kv.splitn(2, '=');
                     let k = it.next().unwrap_or("");
@@ -530,16 +537,27 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
                         .get("error_description")
                         .map(|d| format!(": {d}"))
                         .unwrap_or_default();
-                    write_callback_page(&mut stream, "Authorization failed. You can close this window and return to Conduit.");
-                    return Err(format!("authorization server returned an error ({error}){desc}"));
+                    write_callback_page(
+                        &mut stream,
+                        "Authorization failed. You can close this window and return to Conduit.",
+                    );
+                    return Err(format!(
+                        "authorization server returned an error ({error}){desc}"
+                    ));
                 }
 
                 // We have a code. Validate state before accepting it.
                 if params.get("state").map(String::as_str) != Some(expected_state) {
-                    write_callback_page(&mut stream, "Authorization could not be verified. You can close this window.");
+                    write_callback_page(
+                        &mut stream,
+                        "Authorization could not be verified. You can close this window.",
+                    );
                     return Err("state mismatch (possible CSRF); try connecting again".to_string());
                 }
-                write_callback_page(&mut stream, "Authorization complete. You can close this window and return to Conduit.");
+                write_callback_page(
+                    &mut stream,
+                    "Authorization complete. You can close this window and return to Conduit.",
+                );
                 return Ok(code.cloned().unwrap_or_default());
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -592,9 +610,8 @@ fn read_callback_query(stream: &mut std::net::TcpStream) -> String {
 }
 
 fn write_callback_page(stream: &mut std::net::TcpStream, message: &str) {
-    let html = format!(
-        "<html><body style='font-family:sans-serif;padding:2rem'>{message}</body></html>"
-    );
+    let html =
+        format!("<html><body style='font-family:sans-serif;padding:2rem'>{message}</body></html>");
     let resp = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         html.len(),
@@ -630,14 +647,15 @@ pub fn authenticate(mcp_url: &str) -> Result<AuthResult, String> {
 
     let client_id = match &endpoints.registration_endpoint {
         Some(reg) => register_client(reg, &redirect_uri)?,
-        None => {
-            return Err(
-                "this server has no dynamic-registration endpoint; OAuth needs a pre-registered client"
-                    .to_string(),
-            )
-        }
+        None => return Err(
+            "this server has no dynamic-registration endpoint; OAuth needs a pre-registered client"
+                .to_string(),
+        ),
     };
-    debug_log(&format!("client_id='{client_id}' (len {})", client_id.len()));
+    debug_log(&format!(
+        "client_id='{client_id}' (len {})",
+        client_id.len()
+    ));
     if client_id.trim().is_empty() {
         return Err("dynamic registration returned an empty client_id".to_string());
     }
@@ -721,17 +739,32 @@ mod tests {
 
     #[test]
     fn origin_strips_path() {
-        assert_eq!(origin_of("https://mcp.example.com/mcp"), "https://mcp.example.com");
+        assert_eq!(
+            origin_of("https://mcp.example.com/mcp"),
+            "https://mcp.example.com"
+        );
         assert_eq!(origin_of("https://a.b:8080/x/y"), "https://a.b:8080");
     }
 
     #[test]
     fn host_of_url_extracts_host() {
-        assert_eq!(host_of_url("https://example.com/x").as_deref(), Some("example.com"));
-        assert_eq!(host_of_url("https://example.com:8443/x").as_deref(), Some("example.com"));
+        assert_eq!(
+            host_of_url("https://example.com/x").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            host_of_url("https://example.com:8443/x").as_deref(),
+            Some("example.com")
+        );
         assert_eq!(host_of_url("http://[::1]:7000/cb").as_deref(), Some("::1"));
-        assert_eq!(host_of_url("https://user:pw@host.tld/p").as_deref(), Some("host.tld"));
-        assert_eq!(host_of_url("https://127.0.0.1/x").as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            host_of_url("https://user:pw@host.tld/p").as_deref(),
+            Some("host.tld")
+        );
+        assert_eq!(
+            host_of_url("https://127.0.0.1/x").as_deref(),
+            Some("127.0.0.1")
+        );
     }
 
     #[test]

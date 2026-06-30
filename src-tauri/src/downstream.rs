@@ -149,7 +149,10 @@ pub fn augmented_path() -> &'static str {
         }
         if let Some(home) = dirs::home_dir() {
             for sub in [".local/bin", ".cargo/bin", ".bun/bin"] {
-                push(home.join(sub).to_string_lossy().into_owned(), &mut dirs_list);
+                push(
+                    home.join(sub).to_string_lossy().into_owned(),
+                    &mut dirs_list,
+                );
             }
         }
         for d in ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"] {
@@ -401,9 +404,7 @@ impl Transport for StdioTransport {
                 Err(RecvTimeoutError::Timeout) => {
                     return Err(format!("timed out waiting for '{method}' response"))
                 }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(self.closed_error())
-                }
+                Err(RecvTimeoutError::Disconnected) => return Err(self.closed_error()),
             };
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -466,6 +467,10 @@ fn ids_match(got: Option<&Value>, wanted: Option<&Value>) -> bool {
     }
 }
 
+/// A callback that mints a fresh token on a 401/403 (e.g. an OAuth refresh), so a
+/// long-running session recovers from an expired access token instead of failing.
+pub type RefreshFn = Box<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// Talks to a remote MCP server over the Streamable HTTP transport: each request
 /// is a POST, and the response is either a JSON body or an SSE stream carrying
 /// the JSON-RPC message. A session id from `initialize` is echoed on later calls.
@@ -476,6 +481,12 @@ pub struct HttpTransport {
     next_id: i64,
     /// Raw bearer token (without the "Bearer " prefix), if the server needs auth.
     auth: Option<String>,
+    /// Called once on a 401/403 to mint a fresh token (an OAuth refresh). Returns
+    /// the new raw token; the request is then retried with it. `None` = no refresh
+    /// available, so an auth failure surfaces as before. This is what lets a long-
+    /// running gateway recover from a short-lived access token expiring mid-session
+    /// instead of 401ing until the server is manually reconnected.
+    refresh: Option<RefreshFn>,
 }
 
 impl HttpTransport {
@@ -484,6 +495,12 @@ impl HttpTransport {
     }
 
     pub fn with_auth(url: &str, auth: Option<String>) -> Self {
+        Self::with_auth_refresh(url, auth, None)
+    }
+
+    /// Like `with_auth`, but with a callback invoked once on a 401/403 to mint a
+    /// fresh token; the request is retried with whatever it returns.
+    pub fn with_auth_refresh(url: &str, auth: Option<String>, refresh: Option<RefreshFn>) -> Self {
         HttpTransport {
             url: url.to_string(),
             agent: ureq::AgentBuilder::new()
@@ -497,12 +514,14 @@ impl HttpTransport {
             session_id: None,
             next_id: 1,
             auth,
+            refresh,
         }
     }
 
     fn post(&mut self, body: &Value, expect_response: bool) -> Result<Option<Value>, String> {
         let payload = body.to_string();
         let mut attempt = 0u32;
+        let mut refreshed = false;
         // Retry only the genuinely-safe transient failures (429 and
         // connection-never-reached). Each attempt rebuilds the request (ureq
         // consumes it on send).
@@ -533,6 +552,23 @@ impl HttpTransport {
                     let _ = read_capped(r, 8 * 1024);
                     std::thread::sleep(wait);
                     attempt += 1;
+                }
+                // The access token likely expired: refresh it once and retry with
+                // the new token, so a long-running session self-heals instead of
+                // 401ing until the server is manually reconnected.
+                Err(ureq::Error::Status(code, r))
+                    if (code == 401 || code == 403) && !refreshed && self.refresh.is_some() =>
+                {
+                    let _ = read_capped(r, 8 * 1024); // drain so the connection can be reused
+                    refreshed = true;
+                    match self.refresh.as_ref().and_then(|f| f()) {
+                        Some(tok) => self.auth = Some(tok),
+                        None => {
+                            return Err(format!(
+                                "HTTP {code} (needs authentication): token refresh failed"
+                            ))
+                        }
+                    }
                 }
                 Err(ureq::Error::Status(code, r)) => {
                     let detail: String = read_capped(r, 64 * 1024).chars().take(200).collect();
@@ -697,8 +733,10 @@ impl DownstreamServer {
     }
 
     pub fn call(&mut self, tool: &str, arguments: Value) -> Result<Value, String> {
-        self.transport
-            .request("tools/call", json!({ "name": tool, "arguments": arguments }))
+        self.transport.request(
+            "tools/call",
+            json!({ "name": tool, "arguments": arguments }),
+        )
     }
 
     /// Read one resource by its (original, downstream) uri.
@@ -709,8 +747,10 @@ impl DownstreamServer {
 
     /// Get one prompt by its (original, downstream) name.
     pub fn get_prompt(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
-        self.transport
-            .request("prompts/get", json!({ "name": name, "arguments": arguments }))
+        self.transport.request(
+            "prompts/get",
+            json!({ "name": name, "arguments": arguments }),
+        )
     }
 }
 
@@ -798,7 +838,9 @@ mod tests {
             "  {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n"
         ));
         // A response to our own tools/list call is not the notification.
-        assert!(!is_list_changed(r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}"#));
+        assert!(!is_list_changed(
+            r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}"#
+        ));
         // Other notifications and unrelated lines are ignored (and skip the parse).
         assert!(!is_list_changed(
             r#"{"jsonrpc":"2.0","method":"notifications/message","params":{}}"#
@@ -840,5 +882,71 @@ mod tests {
         // A closed receiver makes forward_line report "stop".
         drop(rx);
         assert!(!forward_line(notif.to_string(), &tx, &dirty, &armed));
+    }
+
+    #[test]
+    fn post_refreshes_token_and_retries_on_401() {
+        use super::{HttpTransport, RefreshFn};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        // Mock MCP server: 401 on the first POST (token expired), 200 JSON-RPC on
+        // the retry. Record the Authorization header on the second request.
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let retry_auth = Arc::new(Mutex::new(String::new()));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (ra, hc) = (Arc::clone(&retry_auth), Arc::clone(&hits));
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let req = match server.recv() {
+                    Ok(r) => r,
+                    Err(_) => return,
+                };
+                let auth = req
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.as_str().to_string())
+                    .unwrap_or_default();
+                if hc.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let _ = req.respond(
+                        tiny_http::Response::from_string("unauthorized").with_status_code(401),
+                    );
+                } else {
+                    *ra.lock().unwrap() = auth;
+                    let ct = tiny_http::Header::from_bytes(
+                        &b"Content-Type"[..],
+                        &b"application/json"[..],
+                    )
+                    .unwrap();
+                    let body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+                    let _ = req.respond(tiny_http::Response::from_string(body).with_header(ct));
+                }
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{port}/");
+        let refresh: Option<RefreshFn> = Some(Box::new(|| Some("fresh".to_string())));
+        let mut t = HttpTransport::with_auth_refresh(&url, Some("stale".to_string()), refresh);
+        let res = t
+            .post(
+                &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }),
+                true,
+            )
+            .expect("post should succeed after the token refresh");
+        handle.join().unwrap();
+
+        assert!(res.is_some(), "got the 200 result after refreshing");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "exactly one 401 then one retry"
+        );
+        assert_eq!(
+            *retry_auth.lock().unwrap(),
+            "Bearer fresh",
+            "retry used the new token"
+        );
     }
 }

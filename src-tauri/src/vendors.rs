@@ -169,7 +169,10 @@ mod tests {
 
     #[test]
     fn matches_known_vendors() {
-        assert_eq!(match_vendor("https://mcp.stripe.com").unwrap().name, "Stripe");
+        assert_eq!(
+            match_vendor("https://mcp.stripe.com").unwrap().name,
+            "Stripe"
+        );
         assert_eq!(
             match_vendor("https://mcp.revenuecat.ai/mcp").unwrap().name,
             "RevenueCat"

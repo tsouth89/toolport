@@ -172,7 +172,10 @@ mod platform {
             (k_access, access_cf),
         ]);
         let st = unsafe {
-            SecItemAdd(add.as_concrete_TypeRef() as *const c_void, std::ptr::null_mut())
+            SecItemAdd(
+                add.as_concrete_TypeRef() as *const c_void,
+                std::ptr::null_mut(),
+            )
         };
         if st != 0 {
             return Err(format!("SecItemAdd with shared access failed: {st}"));

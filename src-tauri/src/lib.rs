@@ -12,9 +12,9 @@ pub mod registry;
 pub mod remote;
 pub mod router;
 pub mod savings;
+pub mod secrets;
 pub mod semantic;
 pub mod shaping;
-pub mod secrets;
 pub mod stacks;
 pub mod teams;
 pub mod vendors;
@@ -163,7 +163,10 @@ async fn detect_clients() -> Result<Vec<clients::DetectedClient>, String> {
 
 #[tauri::command]
 fn get_registry(state: State<RegistryState>) -> Registry {
-    state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 fn server_from_detected(server: &clients::McpServer, client_id: &str) -> ServerEntry {
@@ -197,11 +200,16 @@ async fn import_servers(state: State<'_, RegistryState>) -> Result<Registry, Str
     let detected = tauri::async_runtime::spawn_blocking(clients::detect_clients)
         .await
         .map_err(|e| e.to_string())?;
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for client in &detected {
         for server in &client.servers {
             // Never import our own gateway entry (it would recurse).
-            if server.name.eq_ignore_ascii_case(clients::GATEWAY_ENTRY_NAME) {
+            if server
+                .name
+                .eq_ignore_ascii_case(clients::GATEWAY_ENTRY_NAME)
+            {
                 continue;
             }
             let exists = reg
@@ -234,7 +242,9 @@ fn parse_server_snippet(text: String) -> Result<Vec<clients::ParsedSnippetServer
 
 #[tauri::command]
 fn add_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.add_server(entry);
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -242,7 +252,9 @@ fn add_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Registr
 
 #[tauri::command]
 fn update_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.update_server(entry)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -250,7 +262,9 @@ fn update_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Regi
 
 #[tauri::command]
 fn remove_server(state: State<RegistryState>, id: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.remove_server(&id)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -263,7 +277,9 @@ fn set_server_enabled(
     server_id: String,
     enabled: bool,
 ) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_server_enabled(&profile_id, &server_id, enabled)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -275,7 +291,9 @@ fn set_all_enabled(
     profile_id: String,
     enabled: bool,
 ) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_all_enabled(&profile_id, enabled)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -283,7 +301,9 @@ fn set_all_enabled(
 
 #[tauri::command]
 fn create_profile(state: State<RegistryState>, name: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.add_profile(&name);
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -291,7 +311,9 @@ fn create_profile(state: State<RegistryState>, name: String) -> Result<Registry,
 
 #[tauri::command]
 fn delete_profile(state: State<RegistryState>, id: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.remove_profile(&id)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -299,7 +321,9 @@ fn delete_profile(state: State<RegistryState>, id: String) -> Result<Registry, S
 
 #[tauri::command]
 fn set_active_profile(state: State<RegistryState>, id: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_active_profile(&id)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -326,7 +350,9 @@ fn install_gateway(
     let outcome = clients::install_gateway(&client_id, profile.as_deref())?;
     // Record the scope we just wrote into the client's config, so the UI can show
     // and re-apply this client's effective scope without re-reading the config.
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_client_scope(&client_id, profile.as_deref());
     registry::save(&reg)?;
     Ok(outcome)
@@ -339,7 +365,9 @@ fn uninstall_gateway(
     client_id: String,
 ) -> Result<clients::WriteOutcome, String> {
     let outcome = clients::uninstall_gateway(&client_id)?;
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_client_scope(&client_id, None);
     registry::save(&reg)?;
     Ok(outcome)
@@ -372,7 +400,9 @@ fn add_http_client(
 ) -> Result<AddedHttpClient, String> {
     let token = random_hex()?;
     let id = random_hex()?;
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.http_clients.push(registry::HttpClient {
         id,
         label: label.trim().to_string(),
@@ -389,7 +419,9 @@ fn add_http_client(
 /// Remove a registered HTTP-bridge client (revokes its token).
 #[tauri::command]
 fn remove_http_client(state: State<RegistryState>, id: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.http_clients.retain(|c| c.id != id);
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -426,11 +458,16 @@ async fn migrate_client(
         .ok_or_else(|| format!("Unknown client '{client_id}'"))?;
 
     let (imported, moved) = {
-        let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut reg = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut imported = 0;
         let mut moved = Vec::new();
         for server in &client.servers {
-            if server.name.eq_ignore_ascii_case(clients::GATEWAY_ENTRY_NAME) {
+            if server
+                .name
+                .eq_ignore_ascii_case(clients::GATEWAY_ENTRY_NAME)
+            {
                 continue;
             }
             moved.push(server.name.clone());
@@ -452,7 +489,9 @@ async fn migrate_client(
 
     // Record the scope now that the client config was rewritten to the gateway.
     let registry = {
-        let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut reg = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reg.set_client_scope(&client_id, profile.as_deref());
         registry::save(&reg)?;
         reg.clone()
@@ -475,7 +514,9 @@ fn set_secret(
     value: String,
 ) -> Result<Registry, String> {
     secrets::set_secret(&server_id, &key, &value)?;
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(server) = reg.servers.iter_mut().find(|s| s.id == server_id) {
         match server.env.iter_mut().find(|e| e.key == key) {
             Some(ev) => {
@@ -501,7 +542,9 @@ fn delete_secret(
     key: String,
 ) -> Result<Registry, String> {
     secrets::delete_secret(&server_id, &key)?;
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(server) = reg.servers.iter_mut().find(|s| s.id == server_id) {
         server.env.retain(|e| e.key != key);
     }
@@ -550,7 +593,12 @@ fn gather_diagnostics() -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Conduit diagnostics");
     let _ = writeln!(out, "version: {}", env!("CARGO_PKG_VERSION"));
-    let _ = writeln!(out, "os: {} {}", std::env::consts::OS, std::env::consts::ARCH);
+    let _ = writeln!(
+        out,
+        "os: {} {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
 
     // A load failure is exactly what a bug report needs to surface, not a
     // silently-empty registry from unwrap_or_default.
@@ -580,7 +628,11 @@ fn registry_summary(reg: &Registry) -> String {
 
     let _ = writeln!(out, "\nservers ({}):", reg.servers.len());
     for s in &reg.servers {
-        let on = if reg.is_enabled(&active, &s.id) { "on" } else { "off" };
+        let on = if reg.is_enabled(&active, &s.id) {
+            "on"
+        } else {
+            "off"
+        };
         let target = match (&s.command, &s.url) {
             (Some(cmd), _) => format!("{cmd} {}", s.args.join(" ")).trim().to_string(),
             (None, Some(url)) => url.clone(),
@@ -591,7 +643,13 @@ fn registry_summary(reg: &Registry) -> String {
             let keys: Vec<String> = s
                 .env
                 .iter()
-                .map(|e| if e.secret { format!("{} (secret)", e.key) } else { e.key.clone() })
+                .map(|e| {
+                    if e.secret {
+                        format!("{} (secret)", e.key)
+                    } else {
+                        e.key.clone()
+                    }
+                })
                 .collect();
             let _ = writeln!(out, "        env: {}", keys.join(", "));
         }
@@ -633,7 +691,9 @@ fn last_lines(text: &str, n: usize) -> String {
 async fn probe_servers(state: State<'_, RegistryState>) -> Result<Vec<ProbeResult>, String> {
     // Snapshot which servers to probe, then drop the lock before any I/O.
     let servers: Vec<ServerEntry> = {
-        let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reg = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reg.enabled_servers()
             .into_iter()
             .filter(|s| !clients::is_gateway_server(s))
@@ -654,7 +714,9 @@ async fn probe_servers(state: State<'_, RegistryState>) -> Result<Vec<ProbeResul
 
 /// Snapshot one server out of the registry by id (dropping the lock before I/O).
 fn server_by_id(state: &RegistryState, server_id: &str) -> Result<ServerEntry, String> {
-    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.servers
         .iter()
         .find(|s| s.id == server_id)
@@ -791,7 +853,9 @@ fn set_tool_enabled(
     tool: String,
     enabled: bool,
 ) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_tool_enabled(&server_id, &tool, enabled)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -801,8 +865,24 @@ fn set_tool_enabled(
 /// blocks every tool annotated `destructiveHint: true` across all servers.
 #[tauri::command]
 fn set_deny_destructive(state: State<RegistryState>, deny: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_deny_destructive(deny);
+    registry::save(&reg)?;
+    Ok(reg.clone())
+}
+
+/// Toggle per-call confirmation for destructive tools. When enabled, the gateway
+/// intercepts each destructive tool call, returns a preview with a token, and
+/// requires `conduit_confirm { token }` to proceed. Mutually exclusive with
+/// `deny_destructive` (confirm turns deny off).
+#[tauri::command]
+fn set_confirm_destructive(state: State<RegistryState>, confirm: bool) -> Result<Registry, String> {
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.set_confirm_destructive(confirm);
     registry::save(&reg)?;
     Ok(reg.clone())
 }
@@ -812,7 +892,9 @@ fn set_deny_destructive(state: State<RegistryState>, deny: bool) -> Result<Regis
 /// Clients pick it up the next time they (re)spawn the gateway.
 #[tauri::command]
 fn set_lazy_discovery(state: State<RegistryState>, lazy: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_lazy_discovery(lazy);
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -823,7 +905,9 @@ fn set_lazy_discovery(state: State<RegistryState>, lazy: bool) -> Result<Registr
 /// default; the destructive-tool safety switch stays user-only regardless of this.
 #[tauri::command]
 fn set_allow_agent_control(state: State<RegistryState>, allow: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.allow_agent_control = allow;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -833,13 +917,17 @@ fn set_allow_agent_control(state: State<RegistryState>, allow: bool) -> Result<R
 /// file) operates on the current state, then refresh the in-memory state from disk
 /// after the team operation merged into it.
 fn flush_to_disk(state: &RegistryState) -> Result<(), String> {
-    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     registry::save(&reg)
 }
 
 fn reload_into_state(state: &RegistryState) -> Result<Registry, String> {
     let fresh = registry::load()?;
-    *state.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = fresh.clone();
+    *state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh.clone();
     Ok(fresh)
 }
 
@@ -895,7 +983,9 @@ fn nudge_gateway(state: &RegistryState) {
     // Recover from a poisoned lock like every other command does; otherwise a
     // poisoned mutex would skip this re-save and freshly-vaulted credentials would
     // silently never propagate to the running gateway.
-    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _ = registry::save(&reg);
 }
 
@@ -1020,7 +1110,9 @@ fn export_config(
     description: Option<String>,
     server_names: Option<Vec<String>>,
 ) -> Result<String, String> {
-    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     serde_json::to_string_pretty(&build_export(
         &reg,
         name.as_deref(),
@@ -1041,7 +1133,9 @@ fn export_config_to_path(
     server_names: Option<Vec<String>>,
 ) -> Result<(), String> {
     let json = {
-        let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reg = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         serde_json::to_string_pretty(&build_export(
             &reg,
             name.as_deref(),
@@ -1155,7 +1249,9 @@ fn deliver_shared_import(handle: &tauri::AppHandle, id: String) {
 /// values are never included, so each new server is left for the user to vault.
 #[tauri::command]
 fn import_config(state: State<RegistryState>, json: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     apply_import(&mut reg, &json)?;
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -1199,7 +1295,9 @@ fn preview_import(state: State<RegistryState>, json: String) -> Result<Vec<Impor
     }
     let doc: Doc = serde_json::from_str(&json)
         .map_err(|e| format!("That doesn't look like a Conduit setup: {e}"))?;
-    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     Ok(doc
         .servers
         .into_iter()
@@ -1228,7 +1326,13 @@ fn preview_import(state: State<RegistryState>, json: String) -> Result<Vec<Impor
 fn arg_looks_secret(arg: &str) -> bool {
     let lower = arg.to_ascii_lowercase();
     const NEEDLES: [&str; 8] = [
-        "password=", "pwd=", "token=", "apikey=", "api_key=", "secret=", "accountkey=",
+        "password=",
+        "pwd=",
+        "token=",
+        "apikey=",
+        "api_key=",
+        "secret=",
+        "accountkey=",
         "access_key",
     ];
     if NEEDLES.iter().any(|n| lower.contains(n)) {
@@ -1306,7 +1410,11 @@ fn apply_import(reg: &mut Registry, json: &str) -> Result<(), String> {
     let doc: Doc = serde_json::from_str(json)
         .map_err(|e| format!("That doesn't look like a Conduit setup: {e}"))?;
     for mut s in doc.servers {
-        if reg.servers.iter().any(|e| e.name.eq_ignore_ascii_case(&s.name)) {
+        if reg
+            .servers
+            .iter()
+            .any(|e| e.name.eq_ignore_ascii_case(&s.name))
+        {
             continue;
         }
         s.id = String::new();
@@ -1351,7 +1459,9 @@ fn watch_registry_for_app(handle: tauri::AppHandle) {
         last_json = fresh_json;
         {
             let state = handle.state::<RegistryState>();
-            *state.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = fresh.clone();
+            *state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh.clone();
         }
         let _ = handle.emit("registry-changed", &fresh);
     }
@@ -1380,7 +1490,9 @@ fn start_http_bridge(
     port: Option<u16>,
 ) -> Result<HttpBridgeStatus, String> {
     let port = port.unwrap_or(8765);
-    let mut bridge = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut bridge = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if http_bridge_alive(&mut bridge) {
         return Ok(HttpBridgeStatus::new(bridge.port, bridge.token.clone()));
     }
@@ -1447,7 +1559,9 @@ fn start_http_bridge(
 /// Stop the supervised HTTP bridge child, if any.
 #[tauri::command]
 fn stop_http_bridge(state: State<HttpBridgeState>) -> Result<HttpBridgeStatus, String> {
-    let mut bridge = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut bridge = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(mut child) = bridge.child.take() {
         let _ = child.kill();
         let _ = child.wait();
@@ -1460,7 +1574,9 @@ fn stop_http_bridge(state: State<HttpBridgeState>) -> Result<HttpBridgeStatus, S
 /// Report whether the HTTP bridge is running, reaping it if it has exited.
 #[tauri::command]
 fn http_bridge_status(state: State<HttpBridgeState>) -> Result<HttpBridgeStatus, String> {
-    let mut bridge = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut bridge = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     http_bridge_alive(&mut bridge);
     Ok(HttpBridgeStatus::new(bridge.port, bridge.token.clone()))
 }
@@ -1563,6 +1679,7 @@ pub fn run() {
             call_tool,
             set_tool_enabled,
             set_deny_destructive,
+            set_confirm_destructive,
             set_lazy_discovery,
             set_allow_agent_control,
             team_connect,
@@ -1642,8 +1759,9 @@ pub fn run() {
                 tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
             ) {
                 if let Some(state) = app_handle.try_state::<HttpBridgeState>() {
-                    let mut bridge =
-                        state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut bridge = state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if let Some(mut child) = bridge.child.take() {
                         let _ = child.kill();
                     }
@@ -1715,7 +1833,9 @@ mod tests {
     #[test]
     fn export_redacts_inline_secret_args() {
         // The connection-URI and inline-credential heuristics.
-        assert!(arg_looks_secret("postgresql://admin:hunter2@db.example.com:5432/app"));
+        assert!(arg_looks_secret(
+            "postgresql://admin:hunter2@db.example.com:5432/app"
+        ));
         assert!(arg_looks_secret("--dsn=postgres://u:p@h/db"));
         assert!(arg_looks_secret("PASSWORD=hunter2"));
         assert!(arg_looks_secret("Authorization: token=abc123"));

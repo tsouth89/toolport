@@ -50,7 +50,11 @@ pub struct Joined {
 }
 
 /// Redeem an invite code, returning the member token, team id, and role.
-pub fn join(server_url: &str, invite_code: &str, member_name: Option<&str>) -> Result<Joined, String> {
+pub fn join(
+    server_url: &str,
+    invite_code: &str,
+    member_name: Option<&str>,
+) -> Result<Joined, String> {
     let url = format!("{}/join", base(server_url));
     let body = serde_json::json!({ "invite_code": invite_code, "member_name": member_name });
     let resp = agent().post(&url).send_json(body).map_err(stringify)?;
@@ -106,7 +110,12 @@ pub fn pull_config(
 }
 
 /// Admin push of the team config. Returns the new version.
-pub fn push_config(server_url: &str, team_id: &str, token: &str, config: &Value) -> Result<i64, String> {
+pub fn push_config(
+    server_url: &str,
+    team_id: &str,
+    token: &str,
+    config: &Value,
+) -> Result<i64, String> {
     let url = format!("{}/teams/{}/config", base(server_url), team_id);
     let body = serde_json::json!({ "config": config });
     let resp = agent()
@@ -134,7 +143,11 @@ fn stringify(e: ureq::Error) -> String {
 
 /// Join a team: redeem the invite, vault the token, record the connection, and do the
 /// first pull + merge. Returns the stored connection.
-pub fn connect(server_url: &str, invite_code: &str, member_name: Option<&str>) -> Result<TeamConnection, String> {
+pub fn connect(
+    server_url: &str,
+    invite_code: &str,
+    member_name: Option<&str>,
+) -> Result<TeamConnection, String> {
     let joined = join(server_url, invite_code, member_name)?;
     save_token(&joined.member_token)?;
     // The token is now in the keychain. Any failure past this point must clear it,
@@ -144,7 +157,11 @@ pub fn connect(server_url: &str, invite_code: &str, member_name: Option<&str>) -
     })
 }
 
-fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -> Result<TeamConnection, String> {
+fn finish_connect(
+    server_url: &str,
+    member_name: Option<&str>,
+    joined: Joined,
+) -> Result<TeamConnection, String> {
     let mut reg = crate::registry::load()?;
     let conn = TeamConnection {
         server_url: base(server_url),
@@ -154,14 +171,18 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
         last_version: 0,
     };
     reg.team = Some(conn);
-    if let Some((version, cfg)) = pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0)? {
+    if let Some((version, cfg)) =
+        pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0)?
+    {
         apply_team_config(&mut reg, &joined.team_id, &cfg);
         if let Some(t) = reg.team.as_mut() {
             t.last_version = version;
         }
     }
     crate::registry::save(&reg)?;
-    reg.team.clone().ok_or_else(|| "team connection lost after save".into())
+    reg.team
+        .clone()
+        .ok_or_else(|| "team connection lost after save".into())
 }
 
 /// Pull the latest team config and merge it. `Ok(None)` if nothing changed.
@@ -321,7 +342,11 @@ fn team_server_entry(s: &Value, tag: &str) -> Option<ServerEntry> {
     let str_array = |k: &str| {
         s.get(k)
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let env = s
@@ -355,7 +380,13 @@ fn team_server_entry(s: &Value, tag: &str) -> Option<ServerEntry> {
 
 fn slugify_id(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .trim_matches('-')
         .to_string()
@@ -407,7 +438,12 @@ mod tests {
 
     fn active_enabled(r: &Registry) -> Vec<String> {
         let active = r.active_profile_id.clone().unwrap();
-        r.profiles.iter().find(|p| p.id == active).unwrap().enabled_server_ids.clone()
+        r.profiles
+            .iter()
+            .find(|p| p.id == active)
+            .unwrap()
+            .enabled_server_ids
+            .clone()
     }
 
     #[test]
@@ -420,16 +456,25 @@ mod tests {
         ]});
         assert_eq!(apply_team_config(&mut r, "t1", &cfg), 2);
 
-        assert!(r.servers.iter().any(|s| s.id == "mine"), "local server preserved");
+        assert!(
+            r.servers.iter().any(|s| s.id == "mine"),
+            "local server preserved"
+        );
         let gh = r.servers.iter().find(|s| s.id == "team_github").unwrap();
         assert_eq!(gh.source.as_deref(), Some("team:t1"));
         assert_eq!(gh.env[0].key, "TOKEN");
-        assert!(gh.env[0].value.is_none(), "no secret value carried from the team");
+        assert!(
+            gh.env[0].value.is_none(),
+            "no secret value carried from the team"
+        );
 
         let enabled = active_enabled(&r);
         assert!(enabled.contains(&"team_github".to_string()));
         assert!(enabled.contains(&"team_stripe".to_string()));
-        assert!(enabled.contains(&"mine".to_string()), "local enablement preserved");
+        assert!(
+            enabled.contains(&"mine".to_string()),
+            "local enablement preserved"
+        );
     }
 
     #[test]
@@ -461,18 +506,31 @@ mod tests {
         assert_eq!(team_ids.len(), 2);
         assert!(team_ids.contains(&"team_a".to_string()));
         assert!(team_ids.contains(&"team_c".to_string()));
-        assert!(!team_ids.contains(&"team_b".to_string()), "removed team server is gone");
-        assert!(!active_enabled(&r).contains(&"team_b".to_string()), "no stale profile entry");
+        assert!(
+            !team_ids.contains(&"team_b".to_string()),
+            "removed team server is gone"
+        );
+        assert!(
+            !active_enabled(&r).contains(&"team_b".to_string()),
+            "no stale profile entry"
+        );
     }
 
     #[test]
     fn policy_can_tighten_but_never_loosen() {
         let mut r = base_registry();
         r.deny_destructive = false;
-        apply_team_config(&mut r, "t1", &json!({ "servers": [], "denyDestructive": true }));
+        apply_team_config(
+            &mut r,
+            "t1",
+            &json!({ "servers": [], "denyDestructive": true }),
+        );
         assert!(r.deny_destructive, "team policy tightened safety");
         apply_team_config(&mut r, "t1", &json!({ "servers": [] }));
-        assert!(r.deny_destructive, "absence of the flag never loosens an existing lock");
+        assert!(
+            r.deny_destructive,
+            "absence of the flag never loosens an existing lock"
+        );
     }
 
     #[test]
@@ -484,8 +542,14 @@ mod tests {
             &json!({ "servers": [{ "id": "a", "name": "A", "transport": "http", "url": "https://1.2.3.4/mcp" }] }),
         );
         remove_team(&mut r, "t1");
-        assert!(r.servers.iter().all(|s| s.source.as_deref() != Some("team:t1")));
-        assert!(r.servers.iter().any(|s| s.id == "mine"), "local server preserved");
+        assert!(r
+            .servers
+            .iter()
+            .all(|s| s.source.as_deref() != Some("team:t1")));
+        assert!(
+            r.servers.iter().any(|s| s.id == "mine"),
+            "local server preserved"
+        );
         assert!(!active_enabled(&r).iter().any(|id| id.starts_with("team_")));
     }
 
@@ -501,10 +565,21 @@ mod tests {
             { "id": "ssrf", "name": "SSRF", "transport": "http", "url": "http://169.254.169.254/latest/meta-data/" },
             { "id": "ssrf2", "name": "SSRF2", "transport": "http", "url": "http://127.0.0.1:9000/mcp" }
         ]});
-        assert_eq!(apply_team_config(&mut r, "t1", &cfg), 1, "only the safe remote server is merged");
-        let team: Vec<_> = r.servers.iter().filter(|s| s.source.as_deref() == Some("team:t1")).collect();
+        assert_eq!(
+            apply_team_config(&mut r, "t1", &cfg),
+            1,
+            "only the safe remote server is merged"
+        );
+        let team: Vec<_> = r
+            .servers
+            .iter()
+            .filter(|s| s.source.as_deref() == Some("team:t1"))
+            .collect();
         assert_eq!(team.len(), 1);
         assert_eq!(team[0].id, "team_safe");
-        assert!(team[0].command.is_none(), "no command ever carried from a team");
+        assert!(
+            team[0].command.is_none(),
+            "no command ever carried from a team"
+        );
     }
 }

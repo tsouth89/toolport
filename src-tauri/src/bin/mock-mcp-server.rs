@@ -52,10 +52,20 @@ fn handle(req: &Value, grown: &mut bool) -> Option<Value> {
         "tools/list" => Some(success(id, tool_list(*grown))),
         "tools/call" => {
             let params = req.get("params");
-            let name = params.and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("");
-            let args = params.and_then(|p| p.get("arguments")).cloned().unwrap_or_else(|| json!({}));
+            let name = params
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            let args = params
+                .and_then(|p| p.get("arguments"))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             let text = match name {
-                "echo" => args.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                "echo" => args
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 "add" => {
                     let a = args.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let b = args.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);

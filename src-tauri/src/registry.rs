@@ -130,6 +130,15 @@ pub struct Registry {
     /// One toggle to keep agents read-only across every connected server.
     #[serde(default)]
     pub deny_destructive: bool,
+    /// Per-call confirmation for destructive tools: when true, the gateway
+    /// intercepts each call to a destructive-hinted tool, returns a preview
+    /// with a confirmation token, and requires `conduit_confirm { token }` to
+    /// proceed. The original arguments are replayed exactly — the agent cannot
+    /// change them. Unlike `deny_destructive` (which hides tools entirely),
+    /// this lets agents use destructive tools — but forces a conscious review
+    /// of every call first.
+    #[serde(default)]
+    pub confirm_destructive: bool,
     /// Lazy discovery: the gateway exposes 3 meta-tools (status/search/call)
     /// instead of every downstream tool, so clients with tool-count limits don't
     /// drop tools. The gateway reads this from the registry file it already
@@ -227,7 +236,12 @@ fn default_blend() -> f32 {
 
 impl Default for SemanticSettings {
     fn default() -> Self {
-        SemanticSettings { enabled: false, endpoint: String::new(), model: String::new(), blend: 0.5 }
+        SemanticSettings {
+            enabled: false,
+            endpoint: String::new(),
+            model: String::new(),
+            blend: 0.5,
+        }
     }
 }
 
@@ -247,6 +261,7 @@ impl Default for Registry {
             }],
             active_profile_id: Some(DEFAULT_PROFILE_ID.to_string()),
             deny_destructive: false,
+            confirm_destructive: false,
             lazy_discovery: true,
             allow_agent_control: false,
             integrity_check: true,
@@ -411,9 +426,23 @@ impl Registry {
             .unwrap_or(true)
     }
 
-    /// Set the global destructive-tool deny switch.
+    /// Set the global destructive-tool deny switch. Mutually exclusive with
+    /// `confirm_destructive`: enabling deny clears confirm.
     pub fn set_deny_destructive(&mut self, deny: bool) {
         self.deny_destructive = deny;
+        if deny {
+            self.confirm_destructive = false;
+        }
+    }
+
+    /// Set per-call confirmation mode for destructive tools. When enabled,
+    /// `deny_destructive` is forced off (they're mutually exclusive: deny hides
+    /// tools entirely, confirm intercepts them with a preview).
+    pub fn set_confirm_destructive(&mut self, confirm: bool) {
+        self.confirm_destructive = confirm;
+        if confirm {
+            self.deny_destructive = false;
+        }
     }
 
     /// Set lazy discovery mode (gateway exposes meta-tools vs the full catalog).
@@ -527,7 +556,8 @@ impl Registry {
     pub fn set_client_scope(&mut self, client_id: &str, profile: Option<&str>) {
         match profile.map(str::trim).filter(|p| !p.is_empty()) {
             Some(p) => {
-                self.client_scopes.insert(client_id.to_string(), p.to_string());
+                self.client_scopes
+                    .insert(client_id.to_string(), p.to_string());
             }
             None => {
                 self.client_scopes.remove(client_id);
@@ -705,9 +735,17 @@ mod tests {
         r.set_server_enabled(&billing, &pay, true).unwrap();
 
         // Resolve by name (case-insensitive) and by id, independent of active.
-        let by_name: Vec<_> = r.enabled_servers_for("billing").iter().map(|s| s.id.clone()).collect();
+        let by_name: Vec<_> = r
+            .enabled_servers_for("billing")
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
         assert_eq!(by_name, vec![pay.clone()]);
-        let by_id: Vec<_> = r.enabled_servers_for("default").iter().map(|s| s.id.clone()).collect();
+        let by_id: Vec<_> = r
+            .enabled_servers_for("default")
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
         assert_eq!(by_id, vec![db]);
         // Unknown reference falls back to the active profile (default).
         assert_eq!(r.enabled_servers_for("nope").len(), 1);
@@ -717,7 +755,10 @@ mod tests {
     fn client_scope_records_and_clears() {
         let mut r = Registry::default();
         r.set_client_scope("cursor", Some("Billing"));
-        assert_eq!(r.client_scopes.get("cursor").map(String::as_str), Some("Billing"));
+        assert_eq!(
+            r.client_scopes.get("cursor").map(String::as_str),
+            Some("Billing")
+        );
         // Whitespace-only / empty / None all clear the binding.
         r.set_client_scope("cursor", Some("  "));
         assert!(!r.client_scopes.contains_key("cursor"));
@@ -737,7 +778,10 @@ mod tests {
             profile: "Billing".into(),
         });
         // The plaintext token resolves to its client; a wrong token doesn't.
-        assert_eq!(r.http_client_for_token(token).map(|c| c.profile.as_str()), Some("Billing"));
+        assert_eq!(
+            r.http_client_for_token(token).map(|c| c.profile.as_str()),
+            Some("Billing")
+        );
         assert!(r.http_client_for_token("tok_wrong").is_none());
         // The hash is deterministic and not the plaintext.
         assert_eq!(sha256_hex(token), sha256_hex(token));
@@ -758,22 +802,38 @@ mod tests {
         r.set_server_enabled(&support, &c, true).unwrap();
         // Base alone (no clients) connects only the active profile's server.
         assert_eq!(
-            r.bridge_enabled_servers(None).iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+            r.bridge_enabled_servers(None)
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>(),
             vec![a.clone()]
         );
         // Two clients scoped to Billing and Support -> the bridge connects the union.
         r.http_clients.push(HttpClient {
-            id: "1".into(), label: "x".into(), token_sha256: "h1".into(), profile: "Billing".into(),
+            id: "1".into(),
+            label: "x".into(),
+            token_sha256: "h1".into(),
+            profile: "Billing".into(),
         });
         r.http_clients.push(HttpClient {
-            id: "2".into(), label: "y".into(), token_sha256: "h2".into(), profile: "Support".into(),
+            id: "2".into(),
+            label: "y".into(),
+            token_sha256: "h2".into(),
+            profile: "Support".into(),
         });
-        let ids: Vec<_> = r.bridge_enabled_servers(None).iter().map(|s| s.id.clone()).collect();
+        let ids: Vec<_> = r
+            .bridge_enabled_servers(None)
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
         assert!(ids.contains(&a) && ids.contains(&b) && ids.contains(&c));
         assert_eq!(ids.len(), 3);
         // An unscoped (empty-profile) client adds nothing beyond the union.
         r.http_clients.push(HttpClient {
-            id: "3".into(), label: "z".into(), token_sha256: "h3".into(), profile: String::new(),
+            id: "3".into(),
+            label: "z".into(),
+            token_sha256: "h3".into(),
+            profile: String::new(),
         });
         assert_eq!(r.bridge_enabled_servers(None).len(), 3);
     }
@@ -793,7 +853,13 @@ mod tests {
         // Re-enable removes it.
         r.set_tool_enabled(&id, "create_issue", true).unwrap();
         assert!(r.is_tool_enabled(&id, "create_issue"));
-        assert!(r.servers.iter().find(|s| s.id == id).unwrap().disabled_tools.is_empty());
+        assert!(r
+            .servers
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .disabled_tools
+            .is_empty());
     }
 
     #[test]
