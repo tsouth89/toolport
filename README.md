@@ -336,7 +336,7 @@ syncs them, and each member's keys still never leave their own machine.
 
 - **Free for up to 4 people** — self-host with one Docker command
   (`docker pull ghcr.io/tsouth89/conduit-teams`).
-- **$20/seat/month** beyond that; the first 4 seats stay free.
+- **$12/seat/month** beyond that; the first 4 seats stay free.
 - Central destructive-tool policy, an exportable audit trail, and per-member opt-in for
   local-command servers (a team config can never silently run code on a member's machine).
 
