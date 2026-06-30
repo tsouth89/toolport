@@ -32,11 +32,13 @@ fn account(server_id: &str, key: &str) -> String {
 // still live in the file-based keychain and carry per-app ACLs. On macOS,
 // `migrate_legacy_entries()` runs once at app startup (guarded by a marker file)
 // to read each entry's value, delete it, and re-create it via the ACL-free
-// `SecItemAdd` path. This is transparent: no secret values are lost, and after
-// the migration both the app and gateway read silently.
+// `SecItemAdd` path. This is best-effort: if the rewrite fails, the legacy item
+// is restored when possible and the marker stays unset so the migration retries.
+// After a successful migration, both the app and gateway read silently.
 #[cfg(target_os = "macos")]
 mod platform {
     use core_foundation::base::TCFType;
+    use keyring::Entry;
     use security_framework::item::{ItemClass, ItemSearchOptions, Limit, Reference, SearchResult};
     use security_framework::os::macos::keychain_item::SecKeychainItem;
     use security_framework::passwords::{
@@ -48,136 +50,18 @@ mod platform {
 
     pub fn set_secret(server_id: &str, key: &str, value: &str) -> Result<(), String> {
         let acct = account(server_id, key);
-        // Preferred path: create the item WITH a shared-access ACL (this app + the
-        // gateway) in one atomic SecItemAdd. Setting the ACL at creation needs no
-        // prompt; setting it AFTER creation (SecKeychainItemSetAccess) prompts for
-        // the keychain password. With the ACL in place the separately-signed gateway
-        // reads the secret with no prompt either.
-        match add_with_shared_access(&acct, value) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                // Never let secret storage fail: fall back to the plain ACL-free
-                // write (the gateway then falls back to a one-time "Always Allow").
-                eprintln!("conduit: shared-access write failed ({e}); using plain write");
-                let _ = delete_generic_password(SERVICE, &acct);
-                set_generic_password(SERVICE, &acct, value.as_bytes()).map_err(|e| e.to_string())
-            }
-        }
-    }
-
-    /// Create a generic-password item that BOTH the Conduit app and the
-    /// `conduit-gateway` binary can read with no keychain prompt: build a legacy
-    /// `SecAccess` whose trusted-applications list names both binaries and pass it
-    /// as `kSecAttrAccess` on `SecItemAdd`. Setting the ACL atomically at creation
-    /// avoids the keychain-password prompt that a post-hoc `SecKeychainItemSetAccess`
-    /// would raise.
-    ///
-    /// Why this and not `keychain-access-groups`: that's a *restricted* entitlement
-    /// requiring an embedded provisioning profile, which a bare CLI binary (the
-    /// gateway, spawned standalone by clients) cannot carry, so AMFI SIGKILLs it at
-    /// launch (-34018 / amfid -413). The legacy trusted-application ACL works for
-    /// Developer ID distribution with no profile. APIs are deprecated-but-functional.
-    fn add_with_shared_access(account_str: &str, value: &str) -> Result<(), String> {
-        use core_foundation::array::CFArray;
-        use core_foundation::base::{CFType, CFTypeRef, TCFType};
-        use core_foundation::data::CFData;
-        use core_foundation::dictionary::CFDictionary;
-        use core_foundation::string::CFString;
-        use std::ffi::{c_void, CString};
-        use std::os::raw::c_char;
-
-        #[link(name = "Security", kind = "framework")]
-        extern "C" {
-            fn SecTrustedApplicationCreateFromPath(
-                path: *const c_char,
-                app: *mut *mut c_void,
-            ) -> i32;
-            fn SecAccessCreate(
-                descriptor: *const c_void,
-                trustedlist: *const c_void,
-                access_ref: *mut *mut c_void,
-            ) -> i32;
-            fn SecItemAdd(attributes: *const c_void, result: *mut *const c_void) -> i32;
-            fn SecItemDelete(query: *const c_void) -> i32;
-            static kSecClass: CFTypeRef;
-            static kSecClassGenericPassword: CFTypeRef;
-            static kSecAttrService: CFTypeRef;
-            static kSecAttrAccount: CFTypeRef;
-            static kSecValueData: CFTypeRef;
-            static kSecAttrAccess: CFTypeRef;
-        }
-
-        // 1. Build a SecAccess trusting the two binaries (this app + the gateway).
-        let app_path = std::env::current_exe().map_err(|e| e.to_string())?;
-        let gw_path = crate::clients::resolve_gateway_path()
-            .ok_or_else(|| "could not resolve gateway path".to_string())?;
-        let trusted_app = |p: &std::path::Path| -> Result<CFType, String> {
-            let c = CString::new(p.to_string_lossy().into_owned()).map_err(|e| e.to_string())?;
-            let mut app: *mut c_void = std::ptr::null_mut();
-            let st = unsafe { SecTrustedApplicationCreateFromPath(c.as_ptr(), &mut app) };
-            if st != 0 || app.is_null() {
-                return Err(format!(
-                    "SecTrustedApplicationCreateFromPath({}) failed: {st}",
-                    p.display()
-                ));
-            }
-            Ok(unsafe { CFType::wrap_under_create_rule(app as CFTypeRef) })
-        };
-        let trusted = CFArray::from_CFTypes(&[trusted_app(&app_path)?, trusted_app(&gw_path)?]);
-        let label = CFString::new("conduit-mcp");
-        let mut access: *mut c_void = std::ptr::null_mut();
-        let st = unsafe {
-            SecAccessCreate(
-                label.as_concrete_TypeRef() as *const c_void,
-                trusted.as_concrete_TypeRef() as *const c_void,
-                &mut access,
-            )
-        };
-        if st != 0 || access.is_null() {
-            return Err(format!("SecAccessCreate failed: {st}"));
-        }
-        let access_cf = unsafe { CFType::wrap_under_create_rule(access as CFTypeRef) };
-
-        // The kSec* keys are CFString constants; pull them into safe CFType values.
-        let (k_class, k_generic, k_service, k_account, k_value, k_access) = unsafe {
-            (
-                CFType::wrap_under_get_rule(kSecClass),
-                CFType::wrap_under_get_rule(kSecClassGenericPassword),
-                CFType::wrap_under_get_rule(kSecAttrService),
-                CFType::wrap_under_get_rule(kSecAttrAccount),
-                CFType::wrap_under_get_rule(kSecValueData),
-                CFType::wrap_under_get_rule(kSecAttrAccess),
-            )
-        };
-        let service_cf = CFString::new(SERVICE).as_CFType();
-        let account_cf = CFString::new(account_str).as_CFType();
-
-        // 2. Remove any existing item for this account (SecItemAdd rejects dups).
-        let del = CFDictionary::from_CFType_pairs(&[
-            (k_class.clone(), k_generic.clone()),
-            (k_service.clone(), service_cf.clone()),
-            (k_account.clone(), account_cf.clone()),
-        ]);
-        unsafe {
-            SecItemDelete(del.as_concrete_TypeRef() as *const c_void);
-        }
-
-        // 3. Add the item WITH the shared-access ACL, atomically (no prompt).
-        let data_cf = CFData::from_buffer(value.as_bytes()).as_CFType();
-        let add = CFDictionary::from_CFType_pairs(&[
-            (k_class, k_generic),
-            (k_service, service_cf),
-            (k_account, account_cf),
-            (k_value, data_cf),
-            (k_access, access_cf),
-        ]);
-        let st = unsafe {
-            SecItemAdd(add.as_concrete_TypeRef() as *const c_void, std::ptr::null_mut())
-        };
-        if st != 0 {
-            return Err(format!("SecItemAdd with shared access failed: {st}"));
-        }
-        Ok(())
+        // Store via the modern `SecItemAdd` path (no kSecAttrAccess). Items created
+        // this way have NO per-application ACL, so any process running as the user
+        // can read them silently — including the separately-signed `conduit-gateway`
+        // binary. This is "set it and forget it": the permission survives app
+        // updates because there is no code-signature-based ACL to invalidate.
+        //
+        // Previous versions attached a shared-access ACL via SecAccessCreate +
+        // kSecAttrAccess to let the gateway read without a prompt. That worked on
+        // the first launch, but every app update changed the binary's code signature
+        // and invalidated the ACL's trusted-app list, causing macOS to prompt for
+        // the keychain password on every startup.
+        set_generic_password(SERVICE, &acct, value.as_bytes()).map_err(|e| e.to_string())
     }
 
     pub fn get_secret_result(server_id: &str, key: &str) -> Result<Option<String>, String> {
@@ -228,12 +112,24 @@ mod platform {
                 Ok(bytes) => match String::from_utf8(bytes) {
                     Ok(value) => {
                         // Delete just this entry, then rewrite via set_secret, which
-                        // recreates it WITH the shared-access ACL (app + gateway) so
-                        // the gateway reads it with no prompt. Per-account scoping
+                        // stores it via the ACL-free path. Per-account scoping
                         // means an interruption costs one key, not the keychain.
-                        let _ = delete_entry_by_account(&acct);
-                        match set_secret(server_id, key, &value) {
-                            Ok(()) => migrated += 1,
+                        match delete_entry_by_account(&acct) {
+                            // Ok(0): no legacy file-based item found. The value was
+                            // readable via get_generic_password, so it already lives
+                            // in the ACL-free SecItem store. Count as migrated.
+                            Ok(0) => migrated += 1,
+                            Ok(_) => match set_secret(server_id, key, &value) {
+                                Ok(()) => migrated += 1,
+                                Err(_) => {
+                                    // Best-effort rollback: if the ACL-free write fails,
+                                    // restore the legacy item so we do not silently lose
+                                    // the secret before the marker is withheld.
+                                    let _ = Entry::new(SERVICE, &acct)
+                                        .and_then(|entry| entry.set_password(&value));
+                                    failed += 1;
+                                }
+                            },
                             Err(_) => failed += 1,
                         }
                     }
@@ -349,20 +245,28 @@ pub fn delete_secret(server_id: &str, key: &str) -> Result<(), String> {
 // ── Legacy keychain migration (macOS) ──────────────────────────────────────
 //
 // Older versions of Conduit used the `keyring` crate, which created keychain
-// items with per-application ACLs. This migration reads each entry's value,
-// deletes it, and re-creates it via the ACL-free `SecItemAdd` path.
+// items with per-application ACLs. A later version created items via
+// `add_with_shared_access`, which ALSO attached a code-signature-based ACL.
+// Both approaches cause repeated password prompts on app updates.
 //
-// The migration is guarded by a marker file so it runs once per marker version.
-// Only the UI app runs it — the gateway can't rewrite entries without triggering
-// prompts (it's a separately signed process). Bumping the marker name
-// (".keychain-migrated" -> ".keychain-acl-migrated") makes the migration re-run
-// once on upgrade so EXISTING secrets are rewritten WITH the shared-access ACL,
-// not just legacy keyring-API entries.
+// This migration reads each entry's value, deletes it, and re-creates it via
+// the ACL-free `SecItemAdd` path. It is guarded by a marker file so it runs
+// once per marker version. Only the UI app runs it — the gateway can't rewrite
+// entries without triggering prompts (it's a separately signed process).
+// Bumping the marker name (".keychain-acl-migrated" → ".keychain-acl-stripped")
+// makes the migration re-run once on upgrade so EXISTING secrets are rewritten
+// ACL-free.
 
 /// Marker file name in the Conduit data directory. Only the macOS migration reads
 /// it, so it's cfg-gated to avoid a dead-code warning on Windows/Linux builds.
+///
+/// Bumped from `.keychain-acl-migrated` → `.keychain-acl-stripped` so the
+/// migration re-runs once on upgrade. The prior version created items WITH a
+/// shared-access ACL (via `add_with_shared_access`); this run rewrites them
+/// ACL-free so app updates no longer invalidate the trusted-app list and cause
+/// repeated password prompts.
 #[cfg(target_os = "macos")]
-const MIGRATION_MARKER: &str = ".keychain-acl-migrated";
+const MIGRATION_MARKER: &str = ".keychain-acl-stripped";
 
 /// Result of the one-time keychain migration.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -386,9 +290,9 @@ pub struct MigrationReport {
 /// `secret_keys` is a list of `(server_id, key)` pairs for every secret env var
 /// in the registry (and `HTTP_AUTH_KEY` for remote servers).
 ///
-/// The marker file is **only** written when the platform migration returns `Ok`.
-/// If it returns `Err` (e.g. the keychain was locked so the search failed), the
-/// marker is not written and the migration retries on the next launch.
+/// The marker file is written only when the platform migration reports zero
+/// migration failures. If any key could not be safely re-written, the marker is
+/// not written and the migration retries on the next launch.
 pub fn migrate_legacy_entries(secret_keys: &[(String, String)]) -> MigrationReport {
     #[cfg(target_os = "macos")]
     {
@@ -406,7 +310,9 @@ pub fn migrate_legacy_entries(secret_keys: &[(String, String)]) -> MigrationRepo
             }
         };
 
-        let _ = create_migration_marker();
+        if report.failed == 0 {
+            let _ = create_migration_marker();
+        }
         report
     }
     #[cfg(not(target_os = "macos"))]
@@ -438,11 +344,13 @@ fn create_migration_marker() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // Round-trips through the real OS keychain. Headless Linux CI has no Secret
     // Service (D-Bus), so skip it there; it still runs on macOS and Windows.
     #[test]
     #[cfg_attr(target_os = "linux", ignore = "no Secret Service in headless CI")]
+    #[serial]
     fn set_get_delete_round_trip() {
         let sid = "conduit-test-server";
         let key = "CONDUIT_TEST_KEY";
@@ -462,6 +370,7 @@ mod tests {
     /// for that key, and verifies the value survives.
     #[cfg(target_os = "macos")]
     #[test]
+    #[serial]
     fn migrate_preserves_values() {
         let sid = "conduit-migrate-test";
         let key = "MIGRATE_PRESERVE_KEY";
@@ -489,11 +398,130 @@ mod tests {
         delete_secret(sid, key).unwrap();
     }
 
+    /// The migration is idempotent: running it a second time over already-migrated
+    /// (ACL-free) entries re-reads, re-deletes, and re-creates them without data
+    /// loss. This exercises the path where the new marker triggers a re-run on
+    /// entries that were already written via the ACL-free path.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn migrate_is_idempotent() {
+        let sid = "conduit-idempotent-test";
+        let key = "IDEMPOTENT_KEY";
+        let original = "idempotent-secret-value";
+
+        set_secret(sid, key, original).unwrap();
+        let keys = vec![(sid.to_string(), key.to_string())];
+
+        // First migration.
+        let r1 = platform::migrate_legacy_entries(&keys).expect("first migration");
+        assert_eq!(r1.migrated, 1);
+        assert_eq!(get_secret(sid, key).as_deref(), Some(original));
+
+        // Second migration — same entry, should produce the same result.
+        let r2 = platform::migrate_legacy_entries(&keys).expect("second migration");
+        assert_eq!(r2.migrated, 1, "re-migration should rewrite the entry again");
+        assert_eq!(get_secret(sid, key).as_deref(), Some(original));
+
+        delete_secret(sid, key).unwrap();
+    }
+
+    /// Setting the same key twice overwrites the old value. The SecItemUpdate path
+    /// inside set_generic_password must not create a duplicate or preserve the
+    /// old value.
+    #[test]
+    #[cfg_attr(target_os = "linux", ignore = "no Secret Service in headless CI")]
+    #[serial]
+    fn set_secret_overwrites_existing() {
+        let sid = "conduit-overwrite-test";
+        let key = "OVERWRITE_KEY";
+        set_secret(sid, key, "first").unwrap();
+        set_secret(sid, key, "second").unwrap();
+        assert_eq!(
+            get_secret(sid, key).as_deref(),
+            Some("second"),
+            "second write must overwrite the first"
+        );
+        delete_secret(sid, key).unwrap();
+    }
+
+    /// Deleting a key that doesn't exist must succeed (idempotent delete), not error.
+    #[test]
+    #[cfg_attr(target_os = "linux", ignore = "no Secret Service in headless CI")]
+    #[serial]
+    fn delete_missing_key_is_ok() {
+        let sid = "conduit-delete-missing-test";
+        let key = "THIS_KEY_NEVER_EXISTED";
+        // Delete twice — both should succeed.
+        delete_secret(sid, key).unwrap();
+        delete_secret(sid, key).unwrap();
+    }
+
+    /// An empty-string value round-trips through the keychain. macOS's SecItem
+    /// path treats empty data as a valid value; this confirms our code does too.
+    #[test]
+    #[cfg_attr(target_os = "linux", ignore = "no Secret Service in headless CI")]
+    #[serial]
+    fn empty_string_value_round_trips() {
+        let sid = "conduit-empty-test";
+        let key = "EMPTY_VALUE_KEY";
+        set_secret(sid, key, "").unwrap();
+        assert_eq!(
+            get_secret(sid, key).as_deref(),
+            Some(""),
+            "empty string must round-trip"
+        );
+        delete_secret(sid, key).unwrap();
+    }
+
+    /// The migration handles an empty key list gracefully (no-op, no error).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn migrate_empty_key_list() {
+        let report = platform::migrate_legacy_entries(&[])
+            .expect("empty migration should succeed");
+        assert_eq!(report.migrated, 0);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.not_found, 0);
+    }
+
+    /// Multiple keys for the same server are migrated independently. Each key
+    /// is read, deleted, and re-created on its own; an interruption in one does
+    /// not corrupt the others.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn migrate_handles_multiple_keys_for_one_server() {
+        let sid = "conduit-multi-key-test";
+        let keys = vec![
+            (sid.to_string(), "KEY_A".to_string()),
+            (sid.to_string(), "KEY_B".to_string()),
+            (sid.to_string(), "KEY_C".to_string()),
+        ];
+        set_secret(sid, "KEY_A", "value-a").unwrap();
+        set_secret(sid, "KEY_B", "value-b").unwrap();
+        set_secret(sid, "KEY_C", "value-c").unwrap();
+
+        let report = platform::migrate_legacy_entries(&keys).expect("migration");
+        assert_eq!(report.migrated, 3, "all three keys migrated");
+        assert_eq!(report.failed, 0);
+
+        assert_eq!(get_secret(sid, "KEY_A").as_deref(), Some("value-a"));
+        assert_eq!(get_secret(sid, "KEY_B").as_deref(), Some("value-b"));
+        assert_eq!(get_secret(sid, "KEY_C").as_deref(), Some("value-c"));
+
+        delete_secret(sid, "KEY_A").unwrap();
+        delete_secret(sid, "KEY_B").unwrap();
+        delete_secret(sid, "KEY_C").unwrap();
+    }
+
     /// The migration correctly reports `not_found` for keys that don't exist in
     /// the keychain (e.g. `__oauth_state__` on a non-OAuth server). This should
     /// not be counted as a failure.
     #[cfg(target_os = "macos")]
     #[test]
+    #[serial]
     fn migrate_reports_not_found_for_missing_keys() {
         let sid = "conduit-missing-test";
         let key = "THIS_KEY_DOES_NOT_EXIST";
@@ -510,5 +538,35 @@ mod tests {
             report.not_found, 1,
             "one key should be reported as not-found"
         );
+    }
+
+    /// When a value is readable but there's no legacy file-based item to delete
+    /// (Ok(0) from delete_entry_by_account), the item already lives in the ACL-free
+    /// SecItem store. The migration must count it as migrated, not failed — otherwise
+    /// already-migrated entries would cause the marker to never be written on re-run.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn migrate_counts_already_aclfree_as_migrated() {
+        let sid = "conduit-already-migrated-test";
+        let key = "ALREADY_FREE_KEY";
+        let value = "already-acl-free-value";
+
+        // Write via set_secret, which uses the ACL-free SecItemAdd path.
+        set_secret(sid, key, value).unwrap();
+
+        // Run the migration: it will read the value, find no legacy item to
+        // delete (Ok(0)), and must count this as migrated — not failed.
+        let keys = vec![(sid.to_string(), key.to_string())];
+        let report = platform::migrate_legacy_entries(&keys).expect("migration should succeed");
+
+        assert_eq!(
+            report.migrated, 1,
+            "already-ACL-free item must count as migrated"
+        );
+        assert_eq!(report.failed, 0, "no failures for already-clean items");
+        assert_eq!(get_secret(sid, key).as_deref(), Some(value));
+
+        delete_secret(sid, key).unwrap();
     }
 }

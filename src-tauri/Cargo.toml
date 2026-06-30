@@ -54,3 +54,5 @@ core-foundation = "0.10"
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
+[dev-dependencies]
+serial_test = "3.1.1"

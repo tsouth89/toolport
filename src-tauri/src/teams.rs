@@ -461,6 +461,7 @@ pub fn remove_team(reg: &mut Registry, team_id: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
 
     fn base_registry() -> Registry {
         let mut r = Registry::default();
@@ -488,6 +489,17 @@ mod tests {
     fn active_enabled(r: &Registry) -> Vec<String> {
         let active = r.active_profile_id.clone().unwrap();
         r.profiles.iter().find(|p| p.id == active).unwrap().enabled_server_ids.clone()
+    }
+
+    #[test]
+    #[cfg_attr(target_os = "linux", ignore = "no Secret Service in headless CI")]
+    #[serial]
+    fn team_token_round_trip() {
+        let _ = clear_token();
+        save_token("team-token-123").unwrap();
+        assert_eq!(load_token().as_deref(), Some("team-token-123"));
+        clear_token().unwrap();
+        assert_eq!(load_token(), None);
     }
 
     #[test]
