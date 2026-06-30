@@ -309,6 +309,7 @@ export function CatalogView({ registry, onAdded }: Props) {
           }}
           existingNames={(registry?.servers ?? []).map((s) => s.name)}
           autoOpen
+          urlHint={configEntry.urlHint ?? undefined}
           trigger={<span className="hidden" />}
         />
       )}

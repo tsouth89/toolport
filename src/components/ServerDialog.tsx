@@ -36,9 +36,13 @@ interface Props {
   autoOpen?: boolean;
   /** Called when the dialog closes without saving (dismiss/cancel). */
   onClose?: () => void;
+  /** Placeholder + helper text for the URL field when the server is self-hosted
+   * (e.g. n8n, Langfuse). Shown as input placeholder and as an explanatory note
+   * below the field. */
+  urlHint?: string;
 }
 
-export function ServerDialog({ trigger, onSaved, editId, initial, existingNames, autoOpen, onClose }: Props) {
+export function ServerDialog({ trigger, onSaved, editId, initial, existingNames, autoOpen, onClose, urlHint }: Props) {
   const [open, setOpen] = useState(autoOpen ?? false);
   const [form, setForm] = useState({
     name: initial?.name ?? "",
@@ -346,10 +350,16 @@ export function ServerDialog({ trigger, onSaved, editId, initial, existingNames,
               <Label htmlFor="srv-url">URL</Label>
               <Input
                 id="srv-url"
-                placeholder="https://mcp.example.com/mcp"
+                placeholder={urlHint ?? "https://mcp.example.com/mcp"}
                 value={form.url}
                 onChange={(e) => set("url", e.target.value)}
               />
+              {urlHint && (
+                <p className="text-xs text-muted-foreground">
+                  Enter the URL of your self-hosted instance. For example:{" "}
+                  <code className="font-mono">{urlHint}</code>
+                </p>
+              )}
             </div>
           )}
 
