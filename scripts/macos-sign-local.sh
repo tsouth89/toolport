@@ -123,7 +123,11 @@ SYMLINK_PATH="$APP/Contents/MacOS/$GW_EXECUTABLE"
 bold "[1/5] Locating the gateway binary inside the app"
 
 # Find every candidate named conduit-gateway, skipping symlinks (-type f).
-mapfile -t CANDIDATES < <(find "$APP/Contents" -name "$GW_EXECUTABLE" -type f 2>/dev/null || true)
+# (Portable read loop instead of `mapfile`, which is bash 4+ only; macOS ships bash 3.2.)
+CANDIDATES=()
+while IFS= read -r _candidate; do
+  [[ -n "$_candidate" ]] && CANDIDATES+=("$_candidate")
+done < <(find "$APP/Contents" -name "$GW_EXECUTABLE" -type f 2>/dev/null || true)
 
 REAL_BIN=""
 # Prefer a binary already inside the helper bundle (idempotent re-run).
