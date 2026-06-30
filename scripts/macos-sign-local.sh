@@ -281,9 +281,15 @@ print_profile_expiry() {
   local profile="$1"
   local label="$2"
   [[ -f "$profile" ]] || { red "  MISSING embedded.provisionprofile for $label: $profile"; return 1; }
-  # The profile is CMS-wrapped; decode it to plist then read ExpirationDate.
-  local exp
-  exp="$(security cms -D -i "$profile" 2>/dev/null | /usr/libexec/PlistBuddy -c 'Print :ExpirationDate' /dev/stdin 2>/dev/null || true)"
+  # The profile is CMS-wrapped; decode it to a temp plist (PlistBuddy can't read
+  # /dev/stdin) then read ExpirationDate.
+  local exp tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/conduit-profile.XXXXXX")"
+  exp=""
+  if security cms -D -i "$profile" -o "$tmp" 2>/dev/null; then
+    exp="$(/usr/libexec/PlistBuddy -c 'Print :ExpirationDate' "$tmp" 2>/dev/null || true)"
+  fi
+  rm -f "$tmp"
   if [[ -z "$exp" ]]; then
     red "  WARNING: could not read ExpirationDate from $profile"
   else

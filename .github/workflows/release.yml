@@ -33,10 +33,10 @@ jobs:
           - os: windows-latest
             bundles: nsis
           - os: macos-latest # Apple Silicon (native)
-            bundles: app,dmg
+            bundles: app
             target: aarch64-apple-darwin
           - os: macos-latest # Intel (cross-compiled on the arm64 runner)
-            bundles: app,dmg
+            bundles: app
             target: x86_64-apple-darwin
           - os: ubuntu-22.04
             bundles: deb,appimage
@@ -137,31 +137,43 @@ jobs:
           CONDUIT_SIDECAR_TARGET: ${{ matrix.target }}
           # Tauri updater signing. Required to produce signed `.sig` files for the
           # updater artifacts (createUpdaterArtifacts is set in the bundle config).
+          # macOS regenerates these in the signing step below; the others use them
+          # as-is.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS code signing + notarization. Empty/ignored on Windows and Linux;
-          # Tauri only acts on these when building the macOS bundle. Set these as
-          # repository secrets to produce a signed, notarized .dmg (see
-          # docs/SIGNING.md). Without them the macOS build is unsigned.
+          # macOS is intentionally built UNSIGNED here. The keychain-access-group
+          # fix needs the gateway nested in its own .app + embedded provisioning
+          # profiles + inside-out signing, none of which Tauri's built-in macOS
+          # signing can do. The "Sign + notarize + package (macOS)" step below owns
+          # ALL macOS signing, notarization, dmg, and updater-artifact generation.
+
+      # macOS signing + packaging. Tauri built the app UNSIGNED above; this step
+      # nests the gateway in its own .app, embeds the app + gateway provisioning
+      # profiles, signs inside-out, notarizes + staples, builds + notarizes the
+      # dmg, and regenerates the updater artifact (`Conduit_<target>.app.tar.gz`
+      # + .sig) over the re-signed app so auto-update keeps working. Each arch is
+      # named by its target so latest.json can point at the right one.
+      #
+      # Requires, in addition to the existing APPLE_*/TAURI_SIGNING_* secrets, two
+      # new ones holding the base64 of the Developer ID provisioning profiles:
+      # APPLE_PROVISIONING_PROFILE_APP and APPLE_PROVISIONING_PROFILE_GATEWAY. The
+      # script fails fast with a clear message if any required secret is missing.
+      - name: Sign + notarize + package (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: bash scripts/macos-package-ci.sh
+        env:
+          APP: src-tauri/target/${{ matrix.target }}/release/bundle/macos/Conduit.app
+          TARGET: ${{ matrix.target }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_PROVISIONING_PROFILE_APP: ${{ secrets.APPLE_PROVISIONING_PROFILE_APP }}
+          APPLE_PROVISIONING_PROFILE_GATEWAY: ${{ secrets.APPLE_PROVISIONING_PROFILE_GATEWAY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-
-      # Both macOS targets emit an identically named `Conduit.app.tar.gz` updater
-      # artifact, which would overwrite each other on one release. Tag each with
-      # its target so latest.json can point at the right arch.
-      - name: Stage macOS updater artifact (unique per arch)
-        if: startsWith(matrix.os, 'macos')
-        run: |
-          dir="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
-          base="$dir/Conduit.app.tar.gz"
-          if [ -f "$base" ]; then
-            cp "$base" "$dir/Conduit_${{ matrix.target }}.app.tar.gz"
-            cp "$base.sig" "$dir/Conduit_${{ matrix.target }}.app.tar.gz.sig"
-          fi
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Draft release with the installers
         uses: softprops/action-gh-release@v3
