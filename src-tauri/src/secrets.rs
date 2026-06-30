@@ -166,9 +166,6 @@ mod platform {
         }
 
         // 1. Build a SecAccess trusting the two binaries (this app + the gateway).
-        let app_path = std::env::current_exe().map_err(|e| e.to_string())?;
-        let gw_path = crate::clients::resolve_gateway_path()
-            .ok_or_else(|| "could not resolve gateway path".to_string())?;
         let trusted_app = |p: &std::path::Path| -> Result<CFType, String> {
             let c = CString::new(p.to_string_lossy().into_owned()).map_err(|e| e.to_string())?;
             let mut app: *mut c_void = std::ptr::null_mut();
@@ -181,7 +178,23 @@ mod platform {
             }
             Ok(unsafe { CFType::wrap_under_create_rule(app as CFTypeRef) })
         };
-        let trusted = CFArray::from_CFTypes(&[trusted_app(&app_path)?, trusted_app(&gw_path)?]);
+        // The app (this process) must be trustable; if it isn't there's nothing
+        // usable to write. The gateway is best-effort: add it when its path resolves
+        // and a trusted-application can be built for it, otherwise proceed app-only
+        // (the item stays ACL-protected, NOT world-readable; the gateway just falls
+        // back to a one-time "Always Allow" until the next rewrite names it). This
+        // also keeps unit tests working, where the gateway binary isn't on disk.
+        let app_path = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mut trusted_apps: Vec<CFType> = Vec::with_capacity(2);
+        trusted_apps.push(trusted_app(&app_path)?);
+        match crate::clients::resolve_gateway_path() {
+            Some(gw_path) => match trusted_app(&gw_path) {
+                Ok(t) => trusted_apps.push(t),
+                Err(e) => eprintln!("conduit: gateway not added to keychain ACL ({e}); app-only"),
+            },
+            None => eprintln!("conduit: gateway path unresolved; keychain ACL is app-only"),
+        }
+        let trusted = CFArray::from_CFTypes(&trusted_apps);
         let label = CFString::new("conduit-mcp");
         let mut access: *mut c_void = std::ptr::null_mut();
         let st = unsafe {
@@ -730,7 +743,7 @@ mod tests {
     #[test]
     #[cfg_attr(target_os = "linux", ignore = "no Secret Service in headless CI")]
     fn set_get_delete_round_trip() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let sid = "conduit-test-server";
         let key = "CONDUIT_TEST_KEY";
         set_secret(sid, key, "s3cr3t").unwrap();
@@ -746,7 +759,7 @@ mod tests {
     /// self-contained — it sets and then unsets the var, restoring prior state.
     #[test]
     fn file_active_when_env_key_set() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("CONDUIT_SECRET_KEY").ok();
         std::env::set_var("CONDUIT_SECRET_KEY", "unit-test-passphrase");
         assert!(
@@ -780,7 +793,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn file_active_once_master_key_exists() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Make sure the env var is not what's activating it.
         let prev = std::env::var("CONDUIT_SECRET_KEY").ok();
         std::env::remove_var("CONDUIT_SECRET_KEY");
@@ -799,7 +812,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn migrate_keychain_to_file_moves_value() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("CONDUIT_SECRET_KEY").ok();
         std::env::remove_var("CONDUIT_SECRET_KEY");
 
