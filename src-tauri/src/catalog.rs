@@ -51,17 +51,16 @@ pub struct CatalogEntry {
 /// entry list itself untouched; the UI orders the sections, not the arm order here.
 fn category_for(name: &str) -> &'static str {
     match name {
-        "GitHub" | "Vercel" | "Sentry" | "Cloudflare Docs" | "AWS" | "Kubernetes" | "Linode" => {
-            "Code & infrastructure"
-        }
+        "GitHub" | "Vercel" | "Sentry" | "Cloudflare Docs" | "AWS" | "Kubernetes" | "Linode"
+        | "Railway" => "Code & infrastructure",
         "Supabase" | "Neon" | "PostgreSQL" | "MongoDB" | "Elasticsearch" | "Qdrant" => "Databases",
         "Context7" | "DeepWiki" | "Hugging Face" | "OpenRouter" | "Brave Search" | "Exa"
-        | "Tavily" | "Perplexity" => "Search & knowledge",
+        | "Tavily" | "Perplexity" | "DataForSEO" => "Search & knowledge",
         "Firecrawl" | "Apify" | "Browserbase" => "Web & automation",
         "Stripe" | "Notion" | "Composio" | "Linear" | "Atlassian" | "Asana" | "Airtable"
-        | "Todoist" | "Slack" | "Resend" | "Figma" => "Apps & productivity",
+        | "Todoist" | "Slack" | "Resend" | "Figma" | "Postiz" | "Twilio" => "Apps & productivity",
         "Filesystem" | "Fetch" | "Git" | "Playwright" | "Sequential Thinking" | "Memory"
-        | "Time" => "Local tools",
+        | "Time" | "Chrome DevTools" => "Local tools",
         _ => "",
     }
 }
@@ -90,6 +89,10 @@ fn credentials_for(name: &str) -> Option<(&'static str, &'static str)> {
             "https://www.perplexity.ai/settings/api",
             "Create an API key (needs a small credit balance).",
         ),
+        "DataForSEO" => (
+            "https://app.dataforseo.com/api-access",
+            "Copy your API login and password from the API Access dashboard.",
+        ),
         "OpenRouter" => ("https://openrouter.ai/keys", "Create an API key."),
         "Qdrant" => (
             "https://cloud.qdrant.io",
@@ -107,6 +110,14 @@ fn credentials_for(name: &str) -> Option<(&'static str, &'static str)> {
         "Slack" => (
             "https://api.slack.com/apps",
             "Create a Slack app, add a bot token (xoxb-...), and grab your team id.",
+        ),
+        "Twilio" => (
+            "https://console.twilio.com",
+            "Create an API key (API Key SID + Secret) in the Twilio Console.",
+        ),
+        "Postiz" => (
+            "https://postiz.pro/settings/developers",
+            "Create an API key in Settings > Developers > Public API.",
         ),
         // Config you supply (no single token page).
         "PostgreSQL" => (
@@ -181,6 +192,8 @@ pub fn curated() -> Vec<CatalogEntry> {
         cmd("AWS", "AWS APIs, docs, and best practices via AWS Labs MCP.", "uvx", &["awslabs.core-mcp-server@latest"], &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], "https://github.com/awslabs/mcp"),
         cmd("Kubernetes", "Inspect and manage Kubernetes clusters via your kubeconfig.", "npx", &["-y", "mcp-server-kubernetes"], &[], "https://github.com/Flux159/mcp-server-kubernetes"),
         cmd("Linode", "Manage Linode (Akamai) cloud: instances, volumes, NodeBalancers, databases, and networking.", "npx", &["-y", "@takashito/linode-mcp-server"], &["LINODE_API_TOKEN"], "https://github.com/takashito/linode-mcp-server"),
+        http("Railway", "Deploy apps, manage environments, and pull variables on Railway.", "https://mcp.railway.com/mcp", "https://railway.com"),
+        cmd("Chrome DevTools", "Control and inspect a live Chrome browser: traces, screenshots, network, console.", "npx", &["-y", "chrome-devtools-mcp@latest"], &[], "https://github.com/ChromeDevTools/chrome-devtools-mcp"),
         // --- Databases ---
         http("Supabase", "Query and manage your Supabase projects.", "https://mcp.supabase.com/mcp", "https://supabase.com/docs/guides/getting-started/mcp"),
         http("Neon", "Serverless Postgres: branches, queries, projects.", "https://mcp.neon.tech/mcp", "https://neon.tech/docs/ai/neon-mcp-server"),
@@ -198,6 +211,8 @@ pub fn curated() -> Vec<CatalogEntry> {
         cmd("Todoist", "Manage Todoist tasks and projects.", "npx", &["-y", "@abhiz123/todoist-mcp-server"], &["TODOIST_API_TOKEN"], "https://github.com/abhiz123/todoist-mcp-server"),
         // --- Communication ---
         cmd("Slack", "Read and send Slack messages and manage channels.", "npx", &["-y", "@modelcontextprotocol/server-slack"], &["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"], "https://github.com/modelcontextprotocol/servers"),
+        cmd("Twilio", "Send SMS, make calls, and manage Twilio messaging and voice.", "npx", &["-y", "@twilio-alpha/mcp"], &["TWILIO_API_KEY", "TWILIO_API_SECRET"], "https://github.com/twilio-labs/mcp"),
+        http("Postiz", "Schedule and publish social media posts across platforms.", "https://api.postiz.com/mcp", "https://postiz.pro"),
         // --- Knowledge & search ---
         http("Context7", "Up-to-date docs and code examples for libraries.", "https://mcp.context7.com/mcp", "https://github.com/upstash/context7"),
         http("DeepWiki", "Ask questions about any public GitHub repo. No auth.", "https://mcp.deepwiki.com/mcp", "https://deepwiki.com"),
@@ -207,6 +222,7 @@ pub fn curated() -> Vec<CatalogEntry> {
         cmd("Exa", "AI-native web search built for agents.", "npx", &["-y", "exa-mcp-server"], &["EXA_API_KEY"], "https://github.com/exa-labs/exa-mcp-server"),
         cmd("Tavily", "Web search and content extraction built for LLMs.", "npx", &["-y", "tavily-mcp"], &["TAVILY_API_KEY"], "https://github.com/tavily-ai/tavily-mcp"),
         cmd("Perplexity", "Ask Perplexity for cited, up-to-date answers.", "npx", &["-y", "server-perplexity-ask"], &["PERPLEXITY_API_KEY"], "https://github.com/ppl-ai/modelcontextprotocol"),
+        cmd("DataForSEO", "SEO data: SERP tracking, keyword research, and competitor analysis.", "npx", &["-y", "dataforseo-mcp-server"], &["DATAFORSEO_USERNAME", "DATAFORSEO_PASSWORD"], "https://dataforseo.com"),
         cmd("Firecrawl", "Web scraping and data extraction from websites.", "npx", &["-y", "firecrawl-mcp"], &["FIRECRAWL_API_KEY"], "https://github.com/firecrawl/firecrawl-mcp-server"),
         cmd("Apify", "Run Apify actors for web scraping and automation.", "npx", &["-y", "@apify/actors-mcp-server"], &["APIFY_TOKEN"], "https://github.com/apify/actors-mcp-server"),
         cmd("Browserbase", "Cloud headless browsers agents can drive.", "npx", &["-y", "@browserbasehq/mcp-server-browserbase"], &["BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID"], "https://github.com/browserbase/mcp-server-browserbase"),
