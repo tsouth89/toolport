@@ -5,6 +5,7 @@ import {
   ScrollText,
   Share2,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
   X,
   XCircle,
@@ -127,6 +128,22 @@ function loadDismissed(): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+/** Calm, always-on "you're protected" state, shown whenever there are no live
+ * security notices. A protection the user never sees builds no trust, so we make
+ * the integrity + content-defense watch visible even when nothing is wrong. */
+function SecurityResting() {
+  return (
+    <div className="mb-4 flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-4 py-2.5 text-xs text-muted-foreground">
+      <ShieldCheck className="size-4 shrink-0 text-owned" />
+      <span>
+        <span className="font-medium text-foreground">Protection active.</span>{" "}
+        Conduit watches every tool for tampering (rug pulls), poisoned definitions,
+        and injected output (agentjacking). No issues right now.
+      </span>
+    </div>
+  );
 }
 
 /** Surfaces tool security events: a tool you approved changed (rug-pull signal),
@@ -526,8 +543,10 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
 
   const banner = (
     <>
-      {liveSecurity.length > 0 && (
+      {liveSecurity.length > 0 ? (
         <SecurityNotices events={liveSecurity} onDismiss={dismissSecurity} />
+      ) : (
+        <SecurityResting />
       )}
       {savings && savings.tokensSaved > 0 ? (
         <SavingsBanner savings={savings} />
