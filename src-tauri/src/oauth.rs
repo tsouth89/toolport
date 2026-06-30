@@ -257,6 +257,22 @@ pub fn host_is_private(host: &str) -> bool {
     }
 }
 
+/// True only if `host` resolves to a link-local / cloud-metadata address (169.254.0.0/16,
+/// fe80::/10, the AWS metadata form). Unlike `host_is_private`, loopback and RFC1918 are
+/// NOT link-local. Fails OPEN (false on an empty/unresolvable host) so the stricter
+/// `host_is_private` check downstream still catches those.
+pub fn host_is_link_local(host: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let h = host.trim().to_ascii_lowercase();
+    if h.is_empty() || h == "localhost" || h.ends_with(".localhost") {
+        return false;
+    }
+    match (h.as_str(), 0u16).to_socket_addrs() {
+        Ok(addrs) => addrs.map(|sa| sa.ip()).any(|ip| ip_is_link_local(&ip)),
+        Err(_) => false,
+    }
+}
+
 /// SSRF guard for an OAuth endpoint taken from a fetched metadata document. A
 /// server that is itself local may legitimately use local endpoints, but a public
 /// server must not be able to point our token POST / browser redirect at the

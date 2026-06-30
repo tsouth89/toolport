@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
-import { RefreshCw, LogOut, Upload, ShieldCheck, Users, Server } from "lucide-react";
+import { RefreshCw, LogOut, Upload, ShieldCheck, Users, Server, AlertTriangle } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Callout } from "@/components/Callout";
 import { TransportPill } from "@/components/TransportPill";
 import { Input } from "@/components/ui/input";
-import { teamConnect, teamSync, teamDisconnect, teamPush } from "@/lib/api";
+import { teamConnect, teamSync, teamDisconnect, teamPush, setServerEnabled } from "@/lib/api";
+import { isEnabled, activeProfile } from "@/lib/types";
 import type { Registry } from "@/lib/types";
 
 /**
@@ -34,16 +35,22 @@ export function TeamsView({
   const [notice, setNotice] = useState<string | null>(null);
   const [skipNote, setSkipNote] = useState<string | null>(null);
 
-  // The backend silently drops local/stdio and private-URL servers from a team config
-  // (RCE/SSRF guard). It emits a count so we can explain it, otherwise "0 servers" after
-  // a successful connect reads as a bug.
+  // Team servers that run a local command or hit a LAN address arrive OFF (the member
+  // reviews + enables them below); link-local/metadata URLs are blocked outright. The
+  // backend emits the counts so the state is explained, not a silent mystery.
   useEffect(() => {
-    const un = listen<number>("team-servers-skipped", (e) => {
-      const n = e.payload;
-      setSkipNote(
-        `${n} server${n === 1 ? "" : "s"} from your team ${n === 1 ? "was" : "were"} skipped. ` +
-          "Teams only share remote servers on public URLs, local and stdio servers are blocked so a teammate can't run code on your machine.",
-      );
+    const un = listen<{ review: number; blocked: number }>("team-servers-review", (e) => {
+      const { review, blocked } = e.payload;
+      const parts: string[] = [];
+      if (review > 0)
+        parts.push(
+          `${review} team server${review === 1 ? "" : "s"} run${review === 1 ? "s" : ""} a local command or a LAN address, so ${review === 1 ? "it's" : "they're"} off until you review and enable ${review === 1 ? "it" : "them"} below.`,
+        );
+      if (blocked > 0)
+        parts.push(
+          `${blocked} ${blocked === 1 ? "was" : "were"} blocked as unsafe (link-local or cloud-metadata URLs).`,
+        );
+      setSkipNote(parts.join(" "));
     });
     return () => {
       un.then((f) => f());
@@ -91,6 +98,16 @@ export function TeamsView({
     run("push", async () => {
       const v = await teamPush();
       setNotice(`Pushed your server set to the team (now version ${v}).`);
+    });
+
+  // Member consent: enable a review server (local command / LAN URL) into the active
+  // profile after the confirm. Nothing from a team runs until this explicit opt-in.
+  const onEnable = (serverId: string) =>
+    run("enable", async () => {
+      const pid = registry ? activeProfile(registry)?.id : undefined;
+      if (!pid) throw new Error("No active profile to enable into.");
+      onRegistryChange(await setServerEnabled(pid, serverId, true));
+      setNotice("Enabled. That server now runs in your active profile.");
     });
 
   return (
@@ -220,14 +237,64 @@ export function TeamsView({
               </p>
             ) : (
               <>
-                <ul className="mt-2 grid gap-1.5">
-                  {teamServers.map((s) => (
-                    <li key={s.id} className="flex items-center gap-2 text-sm">
-                      <Server className="size-3.5 shrink-0 text-muted-foreground" />
-                      <span className="truncate">{s.name}</span>
-                      <TransportPill transport={s.transport} />
-                    </li>
-                  ))}
+                <ul className="mt-2 grid gap-2">
+                  {teamServers.map((s) => {
+                    const on = registry ? isEnabled(registry, s.id) : false;
+                    const isLocal = s.transport === "stdio" || !!s.command;
+                    const detail = s.command
+                      ? [s.command, ...(s.args ?? [])].join(" ")
+                      : s.url ?? "";
+                    return (
+                      <li
+                        key={s.id}
+                        className={`rounded-lg border px-3 py-2 text-sm ${on ? "border-border/60" : "border-warning/40 bg-warning/5"}`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Server className="size-3.5 shrink-0 text-muted-foreground" />
+                          <span className="truncate font-medium">{s.name}</span>
+                          <TransportPill transport={s.transport} />
+                          {on ? (
+                            <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-success">
+                              <ShieldCheck className="size-3.5" /> on
+                            </span>
+                          ) : (
+                            <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-warning">
+                              <AlertTriangle className="size-3.5" /> needs review
+                            </span>
+                          )}
+                        </div>
+                        {!on && (
+                          <div className="mt-2 flex items-end justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-xs text-muted-foreground">
+                                {isLocal
+                                  ? "Runs this local command on your machine:"
+                                  : "Connects to this private/LAN address:"}
+                              </p>
+                              <code className="block truncate font-mono text-xs text-foreground">
+                                {detail}
+                              </code>
+                            </div>
+                            <ConfirmDialog
+                              trigger={
+                                <Button size="sm" variant="outline" disabled={busy !== null} className="shrink-0">
+                                  Enable
+                                </Button>
+                              }
+                              title={`Enable "${s.name}"?`}
+                              description={
+                                isLocal
+                                  ? `This runs a local command on your machine: ${detail}. Only enable it if you trust your team and recognize this command.`
+                                  : `This connects Conduit to ${detail}, a private/LAN address. Only enable it if you trust your team.`
+                              }
+                              confirmLabel="Enable"
+                              onConfirm={() => onEnable(s.id)}
+                            />
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
                 <p className="mt-3 text-xs text-muted-foreground">
                   Add each server's secrets in the Servers tab, they stay in your OS keychain.

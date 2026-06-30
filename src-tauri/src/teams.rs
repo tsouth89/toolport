@@ -134,19 +134,19 @@ fn stringify(e: ureq::Error) -> String {
 
 /// Join a team: redeem the invite, vault the token, record the connection, and do the
 /// first pull + merge. Returns the stored connection.
-pub fn connect(server_url: &str, invite_code: &str, member_name: Option<&str>) -> Result<usize, String> {
+pub fn connect(server_url: &str, invite_code: &str, member_name: Option<&str>) -> Result<MergeOutcome, String> {
     let joined = join(server_url, invite_code, member_name)?;
     save_token(&joined.member_token)?;
     // The token is now in the keychain. Any failure past this point must clear it,
     // or we'd orphan a live bearer token with no local record of the connection.
     finish_connect(server_url, member_name, joined)
-        .map(|(_conn, skipped)| skipped)
+        .map(|(_conn, outcome)| outcome)
         .inspect_err(|_| {
             let _ = clear_token();
         })
 }
 
-fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -> Result<(TeamConnection, usize), String> {
+fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -> Result<(TeamConnection, MergeOutcome), String> {
     let mut reg = crate::registry::load()?;
     let conn = TeamConnection {
         server_url: base(server_url),
@@ -156,16 +156,16 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
         last_version: 0,
     };
     reg.team = Some(conn);
-    let mut skipped = 0;
+    let mut outcome = MergeOutcome::default();
     if let Some((version, cfg)) = pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0)? {
-        skipped = apply_team_config(&mut reg, &joined.team_id, &cfg).skipped;
+        outcome = apply_team_config(&mut reg, &joined.team_id, &cfg);
         if let Some(t) = reg.team.as_mut() {
             t.last_version = version;
         }
     }
     crate::registry::save(&reg)?;
     let conn = reg.team.clone().ok_or_else(|| "team connection lost after save".to_string())?;
-    Ok((conn, skipped))
+    Ok((conn, outcome))
 }
 
 /// Pull the latest team config and merge it. `Ok(None)` if nothing changed.
@@ -251,54 +251,93 @@ fn is_team_server(s: &ServerEntry, tag: &str) -> bool {
 /// member's own servers and profiles untouched. A team `denyDestructive: true` is
 /// adopted: policy can only tighten safety, never loosen it. Returns how many servers
 /// were merged and how many were skipped for safety (local/stdio or private-URL entries).
+/// Outcome of merging a team config: `applied` = ready remote servers (auto-enabled),
+/// `review` = local-command or LAN servers added but left OFF until the member opts in,
+/// `blocked` = link-local / cloud-metadata URLs refused outright.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MergeOutcome {
     pub applied: usize,
-    pub skipped: usize,
+    pub review: usize,
+    pub blocked: usize,
+}
+
+/// How one team-config server is treated on the member's machine.
+enum TeamClass {
+    /// No name/id, or an unusable shape — ignored silently.
+    Skip,
+    /// Link-local / cloud-metadata URL: SSRF-to-credentials, never synced.
+    Blocked,
+    /// Public remote server: safe to auto-enable.
+    Ready(ServerEntry),
+    /// Runs a local command, or points at a loopback/LAN address: synced but never
+    /// auto-run. The member must enable it after seeing the command (informed consent).
+    Review(ServerEntry),
 }
 
 pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) -> MergeOutcome {
     let tag = tag_for(team_id);
 
-    // 1. Drop the previous generation of this team's servers (clean replace).
+    // 1. Capture the prior generation of this team's servers, and which of them the
+    //    member had ENABLED. That enablement is their standing consent for the
+    //    review-required ones, so we re-apply it after the replace instead of forcing a
+    //    re-approval on every sync.
     let old_ids: Vec<String> = reg
         .servers
         .iter()
         .filter(|s| is_team_server(s, &tag))
         .map(|s| s.id.clone())
         .collect();
+    let prev_enabled: std::collections::HashSet<String> = reg
+        .active_profile_id
+        .as_ref()
+        .and_then(|aid| reg.profiles.iter().find(|p| &p.id == aid))
+        .map(|p| {
+            p.enabled_server_ids
+                .iter()
+                .filter(|id| old_ids.contains(id))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     reg.servers.retain(|s| !is_team_server(s, &tag));
     for p in &mut reg.profiles {
         p.enabled_server_ids.retain(|id| !old_ids.contains(id));
     }
 
-    // 2. Build the new team servers. A real-looking entry (one with a name or id) that
-    // team_server_entry refuses is a server dropped for safety (stdio/command = RCE, or a
-    // private/loopback URL = SSRF); count those so the UI can explain the drop.
-    let mut new_ids = Vec::new();
-    let mut skipped = 0usize;
+    // 2. Classify and add the new team servers. Ready (public remote) servers are safe to
+    //    auto-enable; review servers (local command or LAN URL) are added but left off;
+    //    blocked (link-local/metadata) are refused outright.
+    let mut auto_enable: Vec<String> = Vec::new();
+    let mut review_ids: Vec<String> = Vec::new();
+    let mut outcome = MergeOutcome::default();
     if let Some(arr) = team_cfg.get("servers").and_then(Value::as_array) {
         for s in arr {
-            match team_server_entry(s, &tag) {
-                Some(entry) => {
-                    new_ids.push(entry.id.clone());
+            match classify_team_server(s, &tag) {
+                TeamClass::Ready(entry) => {
+                    auto_enable.push(entry.id.clone());
                     reg.servers.push(entry);
+                    outcome.applied += 1;
                 }
-                None => {
-                    let named = s.get("name").and_then(Value::as_str).filter(|x| !x.is_empty()).is_some()
-                        || s.get("id").and_then(Value::as_str).filter(|x| !x.is_empty()).is_some();
-                    if named {
-                        skipped += 1;
-                    }
+                TeamClass::Review(entry) => {
+                    review_ids.push(entry.id.clone());
+                    reg.servers.push(entry);
+                    outcome.review += 1;
                 }
+                TeamClass::Blocked => outcome.blocked += 1,
+                TeamClass::Skip => {}
             }
         }
     }
 
-    // 3. Enable them in the active profile so the gateway exposes them.
+    // 3. Enable: ready servers always; review servers ONLY if the member had already
+    //    consented (enabled before this sync). New review servers stay off, so nothing
+    //    local runs without an explicit opt-in.
     if let Some(active_id) = reg.active_profile_id.clone() {
         if let Some(p) = reg.profiles.iter_mut().find(|p| p.id == active_id) {
-            for id in &new_ids {
+            let to_enable = auto_enable
+                .iter()
+                .chain(review_ids.iter().filter(|id| prev_enabled.contains(*id)));
+            for id in to_enable {
                 if !p.enabled_server_ids.contains(id) {
                     p.enabled_server_ids.push(id.clone());
                 }
@@ -311,36 +350,20 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
         reg.deny_destructive = true;
     }
 
-    MergeOutcome { applied: new_ids.len(), skipped }
+    outcome
 }
 
-/// Convert one team-config server JSON into a tagged `ServerEntry`. Env keeps only keys
+/// Classify one team-config server JSON for the member's machine. Env keeps only keys
 /// (no values, since the team server never carried a secret); the member vaults each
-/// one locally. Returns None if the entry has neither a name nor an id.
-fn team_server_entry(s: &Value, tag: &str) -> Option<ServerEntry> {
+/// one locally.
+fn classify_team_server(s: &Value, tag: &str) -> TeamClass {
     let str_field = |k: &str| s.get(k).and_then(Value::as_str).filter(|x| !x.is_empty());
     let orig_id = str_field("id");
-    let name = str_field("name").or(orig_id)?;
+    let name = match str_field("name").or(orig_id) {
+        Some(n) => n,
+        None => return TeamClass::Skip,
+    };
     let id = format!("team_{}", slugify_id(orig_id.unwrap_or(name)));
-
-    // SECURITY: a synced team config must never make a member's gateway run a local
-    // command (that would be remote code execution on every member, from one
-    // compromised team server or a rogue admin) or reach a private/loopback address
-    // (SSRF into the member's own machine or internal network, e.g. cloud metadata).
-    // Teams may only share REMOTE servers on a public URL; a stdio/command entry or a
-    // private-host URL is dropped. Members add their own local servers themselves.
-    let transport = str_field("transport").unwrap_or("stdio");
-    if transport == "stdio" || str_field("command").is_some() {
-        return None;
-    }
-    let url = str_field("url")?;
-    let host_private = crate::oauth::host_of_url(url)
-        .map(|h| crate::oauth::host_is_private(&h))
-        .unwrap_or(true);
-    if host_private {
-        return None;
-    }
-
     let str_array = |k: &str| {
         s.get(k)
             .and_then(Value::as_array)
@@ -363,17 +386,51 @@ fn team_server_entry(s: &Value, tag: &str) -> Option<ServerEntry> {
                 .collect()
         })
         .unwrap_or_default();
-    Some(ServerEntry {
+
+    let transport = str_field("transport").unwrap_or("stdio").to_string();
+    let command = str_field("command").map(String::from);
+    let mut entry = ServerEntry {
         id,
         name: name.to_string(),
-        transport: transport.to_string(),
-        command: None, // never carried from a team (guarded above)
+        transport,
+        command: None,
         args: str_array("args"),
         env,
-        url: Some(url.to_string()),
+        url: None,
         source: Some(tag.to_string()),
         disabled_tools: str_array("disabledTools"),
-    })
+    };
+
+    // A server that runs a local command (stdio, or any command-bearing entry) is the RCE
+    // case: carry the command so the member CAN run it, but only after they enable it.
+    // Nothing here runs at sync time; the gateway only starts servers enabled in a profile.
+    if entry.transport == "stdio" || command.is_some() {
+        match command {
+            Some(c) => entry.command = Some(c),
+            None => return TeamClass::Skip, // stdio with no command is unusable
+        }
+        return TeamClass::Review(entry);
+    }
+
+    // A remote server needs a parseable URL.
+    let url = match str_field("url") {
+        Some(u) => u,
+        None => return TeamClass::Skip,
+    };
+    let host = match crate::oauth::host_of_url(url) {
+        Some(h) => h,
+        None => return TeamClass::Skip,
+    };
+    // Link-local / cloud-metadata (169.254.x, fe80::, AWS metadata): pure SSRF, never sync.
+    if crate::oauth::host_is_link_local(&host) {
+        return TeamClass::Blocked;
+    }
+    entry.url = Some(url.to_string());
+    // Loopback / LAN (RFC1918) is a legit internal server, but require opt-in like stdio.
+    if crate::oauth::host_is_private(&host) {
+        return TeamClass::Review(entry);
+    }
+    TeamClass::Ready(entry)
 }
 
 fn slugify_id(s: &str) -> String {
@@ -513,23 +570,51 @@ mod tests {
     }
 
     #[test]
-    fn team_config_drops_local_commands_and_private_urls() {
+    fn team_config_classifies_servers_by_safety() {
         let mut r = base_registry();
-        // From a team, a stdio command and a command-bearing entry are RCE, and a
-        // loopback/link-local URL is SSRF. Only the public remote server survives.
+        // Public remote = ready (auto-enabled). A local command (stdio or command-bearing)
+        // and a loopback/LAN URL = review (synced but OFF). A link-local/metadata URL = blocked.
         let cfg = json!({ "servers": [
             { "id": "safe", "name": "Safe", "transport": "http", "url": "https://1.2.3.4/mcp" },
             { "id": "rce", "name": "RCE", "transport": "stdio", "command": "powershell" },
             { "id": "rce2", "name": "RCE2", "transport": "http", "command": "sh", "url": "https://1.2.3.5/mcp" },
-            { "id": "ssrf", "name": "SSRF", "transport": "http", "url": "http://169.254.169.254/latest/meta-data/" },
-            { "id": "ssrf2", "name": "SSRF2", "transport": "http", "url": "http://127.0.0.1:9000/mcp" }
+            { "id": "meta", "name": "Meta", "transport": "http", "url": "http://169.254.169.254/latest/meta-data/" },
+            { "id": "lan", "name": "LAN", "transport": "http", "url": "http://127.0.0.1:9000/mcp" }
         ]});
         let outcome = apply_team_config(&mut r, "t1", &cfg);
-        assert_eq!(outcome.applied, 1, "only the safe remote server is merged");
-        assert_eq!(outcome.skipped, 4, "stdio/command/private-URL entries are reported as skipped");
+        assert_eq!(outcome.applied, 1, "only the public remote server auto-enables");
+        assert_eq!(outcome.review, 3, "two local commands + one loopback URL need review");
+        assert_eq!(outcome.blocked, 1, "the link-local/metadata URL is blocked outright");
+
         let team: Vec<_> = r.servers.iter().filter(|s| s.source.as_deref() == Some("team:t1")).collect();
-        assert_eq!(team.len(), 1);
-        assert_eq!(team[0].id, "team_safe");
-        assert!(team[0].command.is_none(), "no command ever carried from a team");
+        assert_eq!(team.len(), 4, "ready + review servers sync; only the blocked one is dropped");
+        assert!(!team.iter().any(|s| s.id == "team_meta"), "link-local server never synced");
+
+        // The review stdio server carries its command so the member can run it AFTER opt-in...
+        let rce = r.servers.iter().find(|s| s.id == "team_rce").expect("review server synced");
+        assert_eq!(rce.command.as_deref(), Some("powershell"));
+
+        // ...but only the public remote server is enabled; review servers stay OFF.
+        let enabled = active_enabled(&r);
+        assert!(enabled.contains(&"team_safe".to_string()), "ready server auto-enabled");
+        assert!(!enabled.contains(&"team_rce".to_string()), "local-command server stays off");
+        assert!(!enabled.contains(&"team_lan".to_string()), "loopback server stays off");
+    }
+
+    #[test]
+    fn re_sync_preserves_member_consent_for_review_servers() {
+        let mut r = base_registry();
+        let cfg = json!({ "servers": [
+            { "id": "tool", "name": "Tool", "transport": "stdio", "command": "npx" }
+        ]});
+        // First sync: the stdio server is added but OFF (needs review).
+        apply_team_config(&mut r, "t1", &cfg);
+        assert!(!active_enabled(&r).contains(&"team_tool".to_string()), "review server starts off");
+        // Member consents by enabling it.
+        let active = r.active_profile_id.clone().unwrap();
+        r.profiles.iter_mut().find(|p| p.id == active).unwrap().enabled_server_ids.push("team_tool".into());
+        // Re-sync (config unchanged): consent is preserved, the server stays enabled.
+        apply_team_config(&mut r, "t1", &cfg);
+        assert!(active_enabled(&r).contains(&"team_tool".to_string()), "prior consent survives re-sync");
     }
 }

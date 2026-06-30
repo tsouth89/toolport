@@ -867,14 +867,12 @@ fn team_connect(
     member_name: Option<String>,
 ) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    let skipped = teams::connect(&server_url, &invite_code, member_name.as_deref())?;
+    let outcome = teams::connect(&server_url, &invite_code, member_name.as_deref())?;
     let fresh = reload_into_state(state.inner())?;
     nudge_gateway(state.inner());
-    // Team config silently drops local/stdio and private-URL servers (RCE/SSRF guard).
-    // Tell the user so "0 servers" doesn't read as a bug.
-    if skipped > 0 {
-        let _ = app.emit("team-servers-skipped", skipped);
-    }
+    // Team config adds local/stdio + LAN servers OFF (the member reviews + enables them)
+    // and refuses link-local/metadata URLs. Surface both so the state is never a mystery.
+    emit_team_review(&app, outcome);
     Ok(fresh)
 }
 
@@ -882,13 +880,23 @@ fn team_connect(
 #[tauri::command]
 fn team_sync(app: tauri::AppHandle, state: State<RegistryState>) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    let skipped = teams::sync_now()?.map(|(_, o)| o.skipped).unwrap_or(0);
+    let outcome = teams::sync_now()?.map(|(_, o)| o).unwrap_or_default();
     let fresh = reload_into_state(state.inner())?;
     nudge_gateway(state.inner());
-    if skipped > 0 {
-        let _ = app.emit("team-servers-skipped", skipped);
-    }
+    emit_team_review(&app, outcome);
     Ok(fresh)
+}
+
+/// Tell the UI how a team config landed: how many servers need the member's review (they
+/// run a local command or hit a LAN URL, so they're added OFF) and how many were blocked
+/// outright (link-local / cloud-metadata URLs). Only fires when there's something to say.
+fn emit_team_review(app: &tauri::AppHandle, outcome: teams::MergeOutcome) {
+    if outcome.review > 0 || outcome.blocked > 0 {
+        let _ = app.emit(
+            "team-servers-review",
+            serde_json::json!({ "review": outcome.review, "blocked": outcome.blocked }),
+        );
+    }
 }
 
 /// Leave the team: remove its merged servers, clear the connection and the token.
