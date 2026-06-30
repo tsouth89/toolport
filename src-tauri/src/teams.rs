@@ -134,17 +134,19 @@ fn stringify(e: ureq::Error) -> String {
 
 /// Join a team: redeem the invite, vault the token, record the connection, and do the
 /// first pull + merge. Returns the stored connection.
-pub fn connect(server_url: &str, invite_code: &str, member_name: Option<&str>) -> Result<TeamConnection, String> {
+pub fn connect(server_url: &str, invite_code: &str, member_name: Option<&str>) -> Result<usize, String> {
     let joined = join(server_url, invite_code, member_name)?;
     save_token(&joined.member_token)?;
     // The token is now in the keychain. Any failure past this point must clear it,
     // or we'd orphan a live bearer token with no local record of the connection.
-    finish_connect(server_url, member_name, joined).inspect_err(|_| {
-        let _ = clear_token();
-    })
+    finish_connect(server_url, member_name, joined)
+        .map(|(_conn, skipped)| skipped)
+        .inspect_err(|_| {
+            let _ = clear_token();
+        })
 }
 
-fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -> Result<TeamConnection, String> {
+fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -> Result<(TeamConnection, usize), String> {
     let mut reg = crate::registry::load()?;
     let conn = TeamConnection {
         server_url: base(server_url),
@@ -154,30 +156,32 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
         last_version: 0,
     };
     reg.team = Some(conn);
+    let mut skipped = 0;
     if let Some((version, cfg)) = pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0)? {
-        apply_team_config(&mut reg, &joined.team_id, &cfg);
+        skipped = apply_team_config(&mut reg, &joined.team_id, &cfg).skipped;
         if let Some(t) = reg.team.as_mut() {
             t.last_version = version;
         }
     }
     crate::registry::save(&reg)?;
-    reg.team.clone().ok_or_else(|| "team connection lost after save".into())
+    let conn = reg.team.clone().ok_or_else(|| "team connection lost after save".to_string())?;
+    Ok((conn, skipped))
 }
 
 /// Pull the latest team config and merge it. `Ok(None)` if nothing changed.
-pub fn sync_now() -> Result<Option<(i64, usize)>, String> {
+pub fn sync_now() -> Result<Option<(i64, MergeOutcome)>, String> {
     let mut reg = crate::registry::load()?;
     let conn = reg.team.clone().ok_or("not connected to a team")?;
     let token = load_token().ok_or("team token is missing from the keychain")?;
     match pull_config(&conn.server_url, &conn.team_id, &token, conn.last_version)? {
         None => Ok(None),
         Some((version, cfg)) => {
-            let merged = apply_team_config(&mut reg, &conn.team_id, &cfg);
+            let outcome = apply_team_config(&mut reg, &conn.team_id, &cfg);
             if let Some(t) = reg.team.as_mut() {
                 t.last_version = version;
             }
             crate::registry::save(&reg)?;
-            Ok(Some((version, merged)))
+            Ok(Some((version, outcome)))
         }
     }
 }
@@ -245,8 +249,15 @@ fn is_team_server(s: &ServerEntry, tag: &str) -> bool {
 /// `team_`, and enabled in the active profile so they're actually exposed. Re-running
 /// REPLACES this team's servers (a removed team server disappears) while leaving the
 /// member's own servers and profiles untouched. A team `denyDestructive: true` is
-/// adopted: policy can only tighten safety, never loosen it. Returns servers merged.
-pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) -> usize {
+/// adopted: policy can only tighten safety, never loosen it. Returns how many servers
+/// were merged and how many were skipped for safety (local/stdio or private-URL entries).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MergeOutcome {
+    pub applied: usize,
+    pub skipped: usize,
+}
+
+pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) -> MergeOutcome {
     let tag = tag_for(team_id);
 
     // 1. Drop the previous generation of this team's servers (clean replace).
@@ -261,13 +272,25 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
         p.enabled_server_ids.retain(|id| !old_ids.contains(id));
     }
 
-    // 2. Build the new team servers.
+    // 2. Build the new team servers. A real-looking entry (one with a name or id) that
+    // team_server_entry refuses is a server dropped for safety (stdio/command = RCE, or a
+    // private/loopback URL = SSRF); count those so the UI can explain the drop.
     let mut new_ids = Vec::new();
+    let mut skipped = 0usize;
     if let Some(arr) = team_cfg.get("servers").and_then(Value::as_array) {
         for s in arr {
-            if let Some(entry) = team_server_entry(s, &tag) {
-                new_ids.push(entry.id.clone());
-                reg.servers.push(entry);
+            match team_server_entry(s, &tag) {
+                Some(entry) => {
+                    new_ids.push(entry.id.clone());
+                    reg.servers.push(entry);
+                }
+                None => {
+                    let named = s.get("name").and_then(Value::as_str).filter(|x| !x.is_empty()).is_some()
+                        || s.get("id").and_then(Value::as_str).filter(|x| !x.is_empty()).is_some();
+                    if named {
+                        skipped += 1;
+                    }
+                }
             }
         }
     }
@@ -288,7 +311,7 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
         reg.deny_destructive = true;
     }
 
-    new_ids.len()
+    MergeOutcome { applied: new_ids.len(), skipped }
 }
 
 /// Convert one team-config server JSON into a tagged `ServerEntry`. Env keeps only keys
@@ -418,7 +441,7 @@ mod tests {
               "env": [{ "key": "TOKEN", "secret": true }] },
             { "id": "stripe", "name": "Stripe", "transport": "http", "url": "https://1.2.3.5/mcp" }
         ]});
-        assert_eq!(apply_team_config(&mut r, "t1", &cfg), 2);
+        assert_eq!(apply_team_config(&mut r, "t1", &cfg).applied, 2);
 
         assert!(r.servers.iter().any(|s| s.id == "mine"), "local server preserved");
         let gh = r.servers.iter().find(|s| s.id == "team_github").unwrap();
@@ -501,7 +524,9 @@ mod tests {
             { "id": "ssrf", "name": "SSRF", "transport": "http", "url": "http://169.254.169.254/latest/meta-data/" },
             { "id": "ssrf2", "name": "SSRF2", "transport": "http", "url": "http://127.0.0.1:9000/mcp" }
         ]});
-        assert_eq!(apply_team_config(&mut r, "t1", &cfg), 1, "only the safe remote server is merged");
+        let outcome = apply_team_config(&mut r, "t1", &cfg);
+        assert_eq!(outcome.applied, 1, "only the safe remote server is merged");
+        assert_eq!(outcome.skipped, 4, "stdio/command/private-URL entries are reported as skipped");
         let team: Vec<_> = r.servers.iter().filter(|s| s.source.as_deref() == Some("team:t1")).collect();
         assert_eq!(team.len(), 1);
         assert_eq!(team[0].id, "team_safe");

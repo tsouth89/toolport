@@ -860,25 +860,34 @@ fn reload_into_state(state: &RegistryState) -> Result<Registry, String> {
 /// non-destructively (team servers are tagged and enabled in the active profile).
 #[tauri::command]
 fn team_connect(
+    app: tauri::AppHandle,
     state: State<RegistryState>,
     server_url: String,
     invite_code: String,
     member_name: Option<String>,
 ) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    teams::connect(&server_url, &invite_code, member_name.as_deref())?;
+    let skipped = teams::connect(&server_url, &invite_code, member_name.as_deref())?;
     let fresh = reload_into_state(state.inner())?;
     nudge_gateway(state.inner());
+    // Team config silently drops local/stdio and private-URL servers (RCE/SSRF guard).
+    // Tell the user so "0 servers" doesn't read as a bug.
+    if skipped > 0 {
+        let _ = app.emit("team-servers-skipped", skipped);
+    }
     Ok(fresh)
 }
 
 /// Pull the latest team config and re-merge it. A no-op when nothing changed.
 #[tauri::command]
-fn team_sync(state: State<RegistryState>) -> Result<Registry, String> {
+fn team_sync(app: tauri::AppHandle, state: State<RegistryState>) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    teams::sync_now()?;
+    let skipped = teams::sync_now()?.map(|(_, o)| o.skipped).unwrap_or(0);
     let fresh = reload_into_state(state.inner())?;
     nudge_gateway(state.inner());
+    if skipped > 0 {
+        let _ = app.emit("team-servers-skipped", skipped);
+    }
     Ok(fresh)
 }
 

@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { RefreshCw, LogOut, Upload, ShieldCheck, Users, Server } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Callout } from "@/components/Callout";
@@ -31,11 +32,29 @@ export function TeamsView({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [skipNote, setSkipNote] = useState<string | null>(null);
+
+  // The backend silently drops local/stdio and private-URL servers from a team config
+  // (RCE/SSRF guard). It emits a count so we can explain it, otherwise "0 servers" after
+  // a successful connect reads as a bug.
+  useEffect(() => {
+    const un = listen<number>("team-servers-skipped", (e) => {
+      const n = e.payload;
+      setSkipNote(
+        `${n} server${n === 1 ? "" : "s"} from your team ${n === 1 ? "was" : "were"} skipped. ` +
+          "Teams only share remote servers on public URLs, local and stdio servers are blocked so a teammate can't run code on your machine.",
+      );
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
 
   async function run(label: string, fn: () => Promise<void>) {
     setBusy(label);
     setError(null);
     setNotice(null);
+    setSkipNote(null);
     try {
       await fn();
     } catch (e) {
@@ -84,6 +103,11 @@ export function TeamsView({
       {error && (
         <Callout variant="danger" className="mb-4">
           {error}
+        </Callout>
+      )}
+      {skipNote && (
+        <Callout variant="warning" className="mb-4">
+          {skipNote}
         </Callout>
       )}
       {notice && (
