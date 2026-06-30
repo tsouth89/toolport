@@ -819,6 +819,42 @@ fn set_confirm_destructive(state: State<RegistryState>, confirm: bool) -> Result
     Ok(reg.clone())
 }
 
+/// Toggle quarantine-on-drift. When enabled, the gateway hides and blocks a high-risk
+/// tool (poisoned definition, or a destructive tool whose definition changed/appeared)
+/// that drifts from its pinned baseline, until the user re-approves it.
+#[tauri::command]
+fn set_quarantine_on_drift(state: State<RegistryState>, on: bool) -> Result<Registry, String> {
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.quarantine_on_drift = on;
+    registry::save(&reg)?;
+    Ok(reg.clone())
+}
+
+/// Tools currently quarantined (blocked after a high-risk drift), across all profiles.
+#[tauri::command]
+fn list_quarantined() -> Vec<serde_json::Value> {
+    integrity::all_quarantined()
+}
+
+/// Re-approve a quarantined tool so the gateway re-exposes it. Re-saving the registry
+/// nudges the gateway (which watches it) to rebuild and re-read the smaller set.
+#[tauri::command]
+fn release_quarantine(
+    state: State<RegistryState>,
+    profile: String,
+    tool: String,
+) -> Result<(), String> {
+    let prof = if profile.is_empty() {
+        None
+    } else {
+        Some(profile.as_str())
+    };
+    integrity::release(prof, &tool);
+    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry::save(&reg)?;
+    Ok(())
+}
+
 /// Set lazy discovery globally. The gateway reads this from the registry, so it
 /// takes effect for every client (including ones that don't forward env vars).
 /// Clients pick it up the next time they (re)spawn the gateway.
@@ -1593,6 +1629,9 @@ pub fn run() {
             set_tool_enabled,
             set_deny_destructive,
             set_confirm_destructive,
+            set_quarantine_on_drift,
+            list_quarantined,
+            release_quarantine,
             set_lazy_discovery,
             set_allow_agent_control,
             team_connect,

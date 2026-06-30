@@ -1741,6 +1741,13 @@ fn build_router(
     let policy = ToolPolicy {
         disabled,
         deny_destructive: reg.deny_destructive,
+        // Hide already-quarantined tools from the first build (the set persists across
+        // restarts); newly detected drift is added during the integrity check below.
+        quarantined: if reg.quarantine_on_drift {
+            integrity::quarantined(profile)
+        } else {
+            Default::default()
+        },
     };
 
     // Connect concurrently so total time is the slowest server, not the sum.
@@ -1837,15 +1844,24 @@ fn notify_tools_changed(stdout: &Arc<Mutex<std::io::Stdout>>) {
 /// the registry's `integrity_check`, on by default). Any drift is recorded to the
 /// security log inside `integrity::check`; here we also surface it in the gateway
 /// log so it's visible in "Copy diagnostics". Detection only, never blocks.
-fn maybe_check_integrity(registry: &Arc<Mutex<Registry>>, tools: &[Value], profile: Option<&str>) {
-    let enabled = registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .integrity_check;
+/// Returns true if a high-risk drift was just quarantined (so the caller should
+/// re-filter the router this cycle).
+fn maybe_check_integrity(
+    registry: &Arc<Mutex<Registry>>,
+    tools: &[Value],
+    profile: Option<&str>,
+) -> bool {
+    let (enabled, quarantine_on) = {
+        let r = registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (r.integrity_check, r.quarantine_on_drift)
+    };
     if !enabled {
-        return;
+        return false;
     }
-    for d in integrity::check(profile, tools) {
+    let events = integrity::check(profile, tools);
+    for d in &events {
         let server = d.get("server").and_then(Value::as_str).unwrap_or("?");
         let tool = d.get("tool").and_then(Value::as_str).unwrap_or("?");
         let change = d.get("change").and_then(Value::as_str).unwrap_or("?");
@@ -1853,6 +1869,28 @@ fn maybe_check_integrity(registry: &Arc<Mutex<Registry>>, tools: &[Value], profi
             "SECURITY: tool definition {change} on already-approved server \"{server}\": {tool}"
         ));
         eprintln!("conduit: SECURITY tool drift ({change}) {tool}");
+    }
+    // Block high-risk drift (poisoned / destructive) until re-approved, when enabled.
+    quarantine_on && integrity::apply_quarantine(profile, tools, &events)
+}
+
+/// Run integrity detection on a freshly built catalog; if a high-risk drift was just
+/// quarantined, re-filter the live router so the blocked tools are hidden this cycle
+/// (not one rebuild later) and return the re-filtered catalog. Otherwise unchanged.
+fn requarantine_if_needed(
+    registry: &Arc<Mutex<Registry>>,
+    router: &Arc<Mutex<Router>>,
+    tools: Vec<Value>,
+    profile: Option<&str>,
+) -> Vec<Value> {
+    if maybe_check_integrity(registry, &tools, profile) {
+        let mut r = router
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        r.requarantine(integrity::quarantined(profile));
+        r.aggregated_tools()
+    } else {
+        tools
     }
 }
 
@@ -2020,7 +2058,7 @@ fn watch_registry(
             *router
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = new_router;
-            maybe_check_integrity(&registry, &tools, profile.as_deref());
+            let tools = requarantine_if_needed(&registry, &router, tools, profile.as_deref());
             persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
             eprintln!("conduit: registry changed, sent tools/list_changed");
         } else {
@@ -2035,7 +2073,7 @@ fn watch_registry(
                 r.refresh_tools();
                 r.aggregated_tools()
             };
-            maybe_check_integrity(&registry, &tools, profile.as_deref());
+            let tools = requarantine_if_needed(&registry, &router, tools, profile.as_deref());
             persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
             eprintln!("conduit: downstream tools/list_changed, refreshed + sent");
         }

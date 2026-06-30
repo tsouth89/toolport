@@ -1,17 +1,21 @@
 import { useEffect, useState } from "react";
-import { Bot, Check, Copy, Globe, Layers, ShieldAlert, ShieldCheck, Trash2, X } from "lucide-react";
+import { Bot, Check, Copy, Globe, Layers, ShieldAlert, ShieldCheck, ShieldX, Trash2, X } from "lucide-react";
 import { toastError } from "@/lib/toast";
 import {
   addHttpClient,
   httpBridgeStatus,
+  listQuarantined,
+  releaseQuarantine,
   removeHttpClient,
   setAllowAgentControl,
   setConfirmDestructive,
   setDenyDestructive,
   setLazyDiscovery,
+  setQuarantineOnDrift,
   startHttpBridge,
   stopHttpBridge,
   type HttpBridgeStatus,
+  type QuarantinedTool,
 } from "@/lib/api";
 import type { Registry } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
@@ -35,7 +39,9 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const denyDestructive = registry?.denyDestructive ?? false;
   const confirmDestructive = registry?.confirmDestructive ?? false;
   const allowAgentControl = registry?.allowAgentControl ?? false;
+  const quarantineOnDrift = registry?.quarantineOnDrift ?? false;
   const [busy, setBusy] = useState(false);
+  const [quarantined, setQuarantined] = useState<QuarantinedTool[]>([]);
   const [bridge, setBridge] = useState<HttpBridgeStatus | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
@@ -75,6 +81,23 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
       .then(setBridge)
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const load = () => listQuarantined().then(setQuarantined).catch(() => {});
+    load();
+    // Quarantine happens asynchronously in the gateway, so poll to keep the list fresh.
+    const id = setInterval(load, 15000);
+    return () => clearInterval(id);
+  }, []);
+
+  const reapprove = async (q: QuarantinedTool) => {
+    try {
+      await releaseQuarantine(q.profile, q.tool);
+      setQuarantined(await listQuarantined());
+    } catch (e) {
+      toastError(`Couldn't re-approve: ${e}`);
+    }
+  };
 
   const toggleBridge = async (on: boolean) => {
     setBridgeBusy(true);
@@ -163,12 +186,49 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           apply(setConfirmDestructive),
         )}
         {toggle(
+          ShieldX,
+          quarantineOnDrift,
+          "text-destructive",
+          "Quarantine changed high-risk tools",
+          "Block a destructive or poisoned tool that changes from its approved version, until you re-approve it",
+          apply(setQuarantineOnDrift),
+        )}
+        {toggle(
           Bot,
           allowAgentControl,
           "text-success",
           "Allow agent control",
           "Let an agent turn servers on/off (the block above stays yours)",
           apply(setAllowAgentControl),
+        )}
+        {quarantined.length > 0 && (
+          <div className="flex flex-col gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <ShieldX className="size-4 shrink-0 text-destructive" />
+              <span className="text-sm font-medium">Quarantined tools</span>
+              <span className="text-xs text-muted-foreground">
+                blocked until you re-approve
+              </span>
+            </div>
+            <ul className="flex flex-col gap-1.5">
+              {quarantined.map((q) => (
+                <li
+                  key={`${q.profile}:${q.tool}`}
+                  className="flex items-center gap-2 text-xs"
+                >
+                  <span className="min-w-0 truncate font-mono">{q.tool}</span>
+                  <span className="shrink-0 text-muted-foreground">{q.reason}</span>
+                  <button
+                    type="button"
+                    onClick={() => reapprove(q)}
+                    className="ml-auto shrink-0 rounded-md border bg-background px-2 py-0.5 text-[11px] font-medium hover:bg-accent"
+                  >
+                    Re-approve
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
       </section>
       <section className="flex flex-col gap-2">

@@ -139,6 +139,12 @@ pub struct Registry {
     /// of every call first.
     #[serde(default)]
     pub confirm_destructive: bool,
+    /// Quarantine-on-drift: when true, a high-risk tool (poisoned definition, or a
+    /// destructive tool whose definition changed/appeared) that drifts from its pinned
+    /// baseline is hidden and blocked from every client until the user re-approves it.
+    /// Opt-in, since blocking a tool is more disruptive than just flagging the drift.
+    #[serde(default)]
+    pub quarantine_on_drift: bool,
     /// Lazy discovery: the gateway exposes 3 meta-tools (status/search/call)
     /// instead of every downstream tool, so clients with tool-count limits don't
     /// drop tools. The gateway reads this from the registry file it already
@@ -257,6 +263,7 @@ impl Default for Registry {
             active_profile_id: Some(DEFAULT_PROFILE_ID.to_string()),
             deny_destructive: false,
             confirm_destructive: false,
+            quarantine_on_drift: false,
             lazy_discovery: true,
             allow_agent_control: false,
             integrity_check: true,

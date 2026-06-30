@@ -163,6 +163,30 @@ export function setConfirmDestructive(confirm: boolean): Promise<Registry> {
   return invoke<Registry>("set_confirm_destructive", { confirm });
 }
 
+/** Toggle quarantine-on-drift: block a high-risk tool that drifted until re-approved. */
+export function setQuarantineOnDrift(on: boolean): Promise<Registry> {
+  return invoke<Registry>("set_quarantine_on_drift", { on });
+}
+
+/** A tool blocked after a high-risk drift, awaiting re-approval. */
+export interface QuarantinedTool {
+  server: string;
+  tool: string;
+  reason: string;
+  ts: number;
+  profile: string;
+}
+
+/** Tools currently quarantined (blocked after a high-risk drift), across profiles. */
+export function listQuarantined(): Promise<QuarantinedTool[]> {
+  return invoke<QuarantinedTool[]>("list_quarantined");
+}
+
+/** Re-approve a quarantined tool so the gateway re-exposes it on its next rebuild. */
+export function releaseQuarantine(profile: string, tool: string): Promise<void> {
+  return invoke<void>("release_quarantine", { profile, tool });
+}
+
 /** Toggle global lazy discovery (meta-tools vs full catalog) for all clients. */
 export function setLazyDiscovery(lazy: boolean): Promise<Registry> {
   return invoke<Registry>("set_lazy_discovery", { lazy });

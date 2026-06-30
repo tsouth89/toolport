@@ -84,6 +84,16 @@ fn server_of(namespaced: &str) -> &str {
 }
 
 fn pins_path(profile: Option<&str>) -> Option<PathBuf> {
+    profile_file(profile, "tool-pins-", "tool-pins.json")
+}
+
+fn quarantine_path(profile: Option<&str>) -> Option<PathBuf> {
+    profile_file(profile, "quarantine-", "quarantine.json")
+}
+
+/// Per-profile store file in the conduit dir. The profile name is slugged to
+/// `[a-z0-9-]` so it can't escape the directory; the no-profile case uses `fallback`.
+fn profile_file(profile: Option<&str>, prefix: &str, fallback: &str) -> Option<PathBuf> {
     let dir = crate::registry::conduit_dir()?;
     let file = match profile {
         Some(p) if !p.is_empty() => {
@@ -91,9 +101,9 @@ fn pins_path(profile: Option<&str>) -> Option<PathBuf> {
                 .chars()
                 .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
                 .collect();
-            format!("tool-pins-{slug}.json")
+            format!("{prefix}{slug}.json")
         }
-        _ => "tool-pins.json".to_string(),
+        _ => fallback.to_string(),
     };
     Some(dir.join(file))
 }
@@ -208,6 +218,140 @@ pub fn check(profile: Option<&str>, current: &[Value]) -> Vec<Value> {
         record_event(e);
     }
     events
+}
+
+// ===== Quarantine: block high-risk tools after a drift until re-approved =====
+//
+// `check` is detection-only and re-baselines as it goes, so quarantine keeps its own
+// persistent set of blocked tools (per profile, beside the pin baseline). The router's
+// tool-exposure policy hides anything in this set; re-approval removes it.
+
+/// Quarantine map: namespaced tool name (`server__tool`) -> a record of why it's
+/// blocked (server, tool, reason, ts), shown in the UI and persisted across restarts.
+type Quarantine = BTreeMap<String, Value>;
+
+fn load_quarantine(profile: Option<&str>) -> Quarantine {
+    quarantine_path(profile)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_quarantine(profile: Option<&str>, q: &Quarantine) {
+    if let Some(path) = quarantine_path(profile) {
+        if let Ok(s) = serde_json::to_string(q) {
+            let _ = crate::registry::atomic_write(&path, &s);
+        }
+    }
+}
+
+/// Namespaced names of the tools currently quarantined for `profile`, for the router
+/// to hide from every client.
+pub fn quarantined(profile: Option<&str>) -> BTreeSet<String> {
+    load_quarantine(profile).into_keys().collect()
+}
+
+/// Full quarantine records for `profile` (server, tool, reason, ts) for the UI.
+pub fn quarantine_list(profile: Option<&str>) -> Vec<Value> {
+    load_quarantine(profile).into_values().collect()
+}
+
+/// Every quarantined tool across all profiles, each record tagged with its profile
+/// slug (`""` for the no-profile store), for the app UI which spans profiles. The
+/// `profile` tag is what `release` takes back to clear the right store.
+pub fn all_quarantined() -> Vec<Value> {
+    let Some(dir) = crate::registry::conduit_dir() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(name) = fname.to_str() else { continue };
+        // "quarantine.json" -> slug ""; "quarantine-<slug>.json" -> "<slug>".
+        let Some(rest) = name
+            .strip_prefix("quarantine")
+            .and_then(|r| r.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let slug = rest.strip_prefix('-').unwrap_or("");
+        if let Ok(s) = std::fs::read_to_string(entry.path()) {
+            if let Ok(q) = serde_json::from_str::<Quarantine>(&s) {
+                for mut rec in q.into_values() {
+                    rec["profile"] = json!(slug);
+                    out.push(rec);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Re-approve a quarantined tool: drop it so the gateway re-exposes it on the next
+/// rebuild. `check` has already re-baselined the current definition, so a re-approved
+/// tool won't immediately re-flag. Returns whether the tool was actually quarantined.
+pub fn release(profile: Option<&str>, tool: &str) -> bool {
+    let mut q = load_quarantine(profile);
+    if q.remove(tool).is_some() {
+        save_quarantine(profile, &q);
+        return true;
+    }
+    false
+}
+
+/// From `check`'s drift `events` and the `current` tool list, quarantine the HIGH-RISK
+/// drifts: any tool whose new definition scanned as poisoned, plus a destructive tool
+/// whose definition changed or newly appeared. A benign change to a non-destructive
+/// tool is left exposed (detection still logged it). Returns whether anything new was
+/// blocked. (High-risk-by-auth — a drift on a credential-bearing server — is a later
+/// pass; it needs server-secret context the integrity layer doesn't hold here.)
+pub fn apply_quarantine(profile: Option<&str>, current: &[Value], events: &[Value]) -> bool {
+    let mut q = load_quarantine(profile);
+    let mut added = false;
+    for e in events {
+        let (Some(tool), Some(change)) = (
+            e.get("tool").and_then(Value::as_str),
+            e.get("change").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let reason = match change {
+            "poison" => "a poisoned definition was detected",
+            "changed" if is_destructive_named(current, tool) => {
+                "a destructive tool's definition changed"
+            }
+            "added" if is_destructive_named(current, tool) => "a new destructive tool appeared",
+            _ => continue,
+        };
+        if !q.contains_key(tool) {
+            let server = e.get("server").and_then(Value::as_str).unwrap_or("?");
+            q.insert(
+                tool.to_string(),
+                json!({
+                    "ts": epoch_millis(),
+                    "server": server,
+                    "tool": tool,
+                    "reason": reason,
+                    "change": change,
+                }),
+            );
+            added = true;
+        }
+    }
+    if added {
+        save_quarantine(profile, &q);
+    }
+    added
+}
+
+/// Whether the tool named `name` in `current` is destructive (MCP annotations).
+fn is_destructive_named(current: &[Value], name: &str) -> bool {
+    current.iter().any(|t| {
+        t.get("name").and_then(Value::as_str) == Some(name) && crate::router::is_destructive(t)
+    })
 }
 
 /// Heuristic scan of a tool's description + schema for injection / poisoning, the
@@ -537,6 +681,47 @@ mod tests {
 
     fn tool(name: &str, desc: &str) -> Value {
         json!({ "name": name, "description": desc, "inputSchema": { "type": "object" } })
+    }
+
+    fn destructive_tool(name: &str, desc: &str) -> Value {
+        json!({ "name": name, "description": desc, "inputSchema": { "type": "object" },
+                "annotations": { "destructiveHint": true } })
+    }
+
+    #[test]
+    fn quarantine_blocks_poison_and_destructive_drift_then_releases() {
+        let profile = Some("quarantine-unit");
+        if let Some(p) = quarantine_path(profile) {
+            let _ = std::fs::remove_file(p);
+        }
+        let current = vec![
+            destructive_tool("srv__wipe", "Wipe everything."),
+            tool("srv__read", "Read a record."),
+        ];
+        // A benign change to a non-destructive tool must NOT quarantine; a destructive
+        // tool's change and any poison flag must.
+        let events = vec![
+            event("srv", "srv__read", "changed"),
+            event("srv", "srv__wipe", "changed"),
+            poison_event("srv", "srv__read", &["instruction-override".to_string()]),
+        ];
+        assert!(apply_quarantine(profile, &current, &events));
+        let q = quarantined(profile);
+        assert!(q.contains("srv__wipe"), "destructive change is quarantined");
+        assert!(q.contains("srv__read"), "poison flag is quarantined");
+        assert_eq!(q.len(), 2, "benign change to a safe tool is not quarantined");
+
+        // Re-detecting the same drift adds nothing new.
+        assert!(!apply_quarantine(profile, &current, &events));
+
+        // Re-approval restores the tool, and is idempotent.
+        assert!(release(profile, "srv__wipe"));
+        assert!(!quarantined(profile).contains("srv__wipe"));
+        assert!(!release(profile, "srv__wipe"), "releasing twice is a no-op");
+
+        if let Some(p) = quarantine_path(profile) {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]

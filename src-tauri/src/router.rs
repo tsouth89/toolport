@@ -12,7 +12,7 @@
 //! (and anything else out of charset) to `_` on the way out, and keep a reverse
 //! map so `tools/call` still forwards the server's real, hyphenated tool name.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
@@ -115,11 +115,21 @@ pub struct ToolPolicy {
     pub disabled: HashMap<String, HashSet<String>>,
     /// Hide and block any tool annotated `destructiveHint: true`.
     pub deny_destructive: bool,
+    /// Exposed (namespaced) tool names quarantined after a high-risk drift; hidden
+    /// until the user re-approves them. Empty unless quarantine-on-drift is enabled.
+    pub quarantined: BTreeSet<String>,
 }
 
 impl ToolPolicy {
-    /// Reason this tool is blocked, or `None` if it may be exposed.
-    fn blocked_reason(&self, server_id: &str, orig: &str, tool: &Value) -> Option<&'static str> {
+    /// Reason this tool is blocked, or `None` if it may be exposed. `exposed` is the
+    /// namespaced client-facing name (what quarantine is keyed by).
+    fn blocked_reason(
+        &self,
+        exposed: &str,
+        server_id: &str,
+        orig: &str,
+        tool: &Value,
+    ) -> Option<&'static str> {
         if self
             .disabled
             .get(server_id)
@@ -129,6 +139,9 @@ impl ToolPolicy {
         }
         if self.deny_destructive && is_destructive(tool) {
             return Some("blocked by the destructive-tool policy");
+        }
+        if self.quarantined.contains(exposed) {
+            return Some("quarantined after a high-risk change; re-approve to restore");
         }
         None
     }
@@ -202,7 +215,7 @@ impl Router {
             // Allocate the exposed name regardless of policy so toggling one tool
             // never renames its siblings (their `_2` suffixes stay put).
             let exposed = self.exposed_name(server_id, orig);
-            if let Some(reason) = self.policy.blocked_reason(server_id, orig, tool) {
+            if let Some(reason) = self.policy.blocked_reason(&exposed, server_id, orig, tool) {
                 self.blocked.insert(exposed, reason.to_string());
                 continue;
             }
@@ -290,6 +303,14 @@ impl Router {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .refresh_tools();
         }
+        self.rebuild_aggregation();
+    }
+
+    /// Replace the quarantine set and re-derive the exposed aggregation so newly
+    /// quarantined tools are hidden (or re-approved ones restored) without re-querying
+    /// downstream. Cheap: it only re-applies the policy to the cached tool lists.
+    pub fn requarantine(&mut self, quarantined: BTreeSet<String>) {
+        self.policy.quarantined = quarantined;
         self.rebuild_aggregation();
     }
 

@@ -291,6 +291,8 @@ export interface Registry {
   denyDestructive?: boolean;
   /** Per-call confirmation: intercept destructive tools with a preview + token. */
   confirmDestructive?: boolean;
+  /** Quarantine-on-drift: block a high-risk tool that changed until re-approved. */
+  quarantineOnDrift?: boolean;
   /** Global switch: expose 3 meta-tools instead of the full catalog. */
   lazyDiscovery?: boolean;
   /** Opt-in: let an agent enable/disable servers via the gateway's control tools. */
