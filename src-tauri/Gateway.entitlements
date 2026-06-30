@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Application Identifier for the standalone conduit-gateway binary. Must
+	     match its embedded provisioning profile and the keychain access group
+	     prefix (Team ID V4YZPC7T6G). -->
+	<key>com.apple.application-identifier</key>
+	<string>V4YZPC7T6G.com.tsout.conduit.gateway</string>
+
+	<!-- Same team-scoped shared keychain access group as the app
+	     (Entitlements.plist), so the gateway reads secrets the app wrote into the
+	     data-protection keychain with no prompt. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>V4YZPC7T6G.com.tsout.conduit.shared</string>
+	</array>
+</dict>
+</plist>

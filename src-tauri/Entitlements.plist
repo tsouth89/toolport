@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Tauri / WKWebView needs JIT + unsigned executable memory on macOS under
+	     the hardened runtime. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!-- Application Identifier for the Conduit app. Must match the embedded
+	     provisioning profile and the keychain access group prefix (Team ID
+	     V4YZPC7T6G). -->
+	<key>com.apple.application-identifier</key>
+	<string>V4YZPC7T6G.com.tsout.conduit</string>
+
+	<!-- Team-scoped shared keychain access group. The gateway declares the SAME
+	     group (Gateway.entitlements) so both binaries read each other's
+	     data-protection-keychain items with no prompt. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>V4YZPC7T6G.com.tsout.conduit.shared</string>
+	</array>
+</dict>
+</plist>
