@@ -616,20 +616,57 @@ pub fn gateway_log_path() -> Option<PathBuf> {
     Some(conduit_dir()?.join("gateway.log"))
 }
 
+/// Sibling `<registry>.bak` path holding the last-known-good registry.
+fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".bak");
+    PathBuf::from(name)
+}
+
+/// Recover the registry from the `.bak` sibling that `save_to` maintains. Returns
+/// the parsed backup (and best-effort rewrites the primary from it so a later read
+/// self-heals), or None when there's no usable backup.
+fn restore_from_backup(path: &Path) -> Option<Registry> {
+    let content = std::fs::read_to_string(backup_path(path)).ok()?;
+    if content.trim().is_empty() {
+        return None;
+    }
+    let registry: Registry = serde_json::from_str(&content).ok()?;
+    // Best-effort: restore the primary so we don't keep reading the .bak. Recovery
+    // still succeeds if this write fails.
+    let _ = atomic_write(path, &content);
+    Some(registry)
+}
+
 pub fn load_from(path: &Path) -> Result<Registry, String> {
     if !path.exists() {
-        return Ok(Registry::default());
+        // registry.json is gone; recover the last-known-good from the .bak sibling
+        // if one survived (e.g. the primary was deleted but the backup intact).
+        return Ok(restore_from_backup(path).unwrap_or_default());
     }
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     if content.trim().is_empty() {
-        return Ok(Registry::default());
+        return Ok(restore_from_backup(path).unwrap_or_default());
     }
-    serde_json::from_str(&content).map_err(|e| format!("Corrupt registry: {e}"))
+    match serde_json::from_str(&content) {
+        Ok(reg) => Ok(reg),
+        // Corrupt registry.json: recover from the backup before surfacing the
+        // error, so a bad file doesn't wipe the user's server list.
+        Err(e) => restore_from_backup(path).ok_or_else(|| format!("Corrupt registry: {e}")),
+    }
 }
 
 pub fn save_to(path: &Path, registry: &Registry) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    // Snapshot the current on-disk registry to a `.bak` sibling before overwriting,
+    // but only if it still parses, so a bad write or an accidental deletion of
+    // registry.json has a last-known-good to recover from (see load_from).
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        if !existing.trim().is_empty() && serde_json::from_str::<Registry>(&existing).is_ok() {
+            let _ = atomic_write(&backup_path(path), &existing);
+        }
     }
     let json = serde_json::to_string_pretty(registry).map_err(|e| e.to_string())?;
     // The registry is the single source of truth for every server, so a crash,
@@ -934,5 +971,48 @@ mod tests {
             .any(|e| e.file_name().to_string_lossy().starts_with(&prefix));
         assert!(!leftover, "temp file left behind after a successful write");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn save_keeps_backup_and_load_recovers_from_it() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-reg-bak-{}.json", std::process::id()));
+        let bak = backup_path(&path);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&bak).ok();
+
+        // First save: one server. No prior file, so nothing to snapshot yet.
+        let mut reg = Registry::default();
+        reg.add_server(sample_server("alpha"));
+        save_to(&path, &reg).unwrap();
+        assert!(!bak.exists(), "no backup on the first save");
+
+        // Second save snapshots the one-server registry into .bak before overwriting
+        // it with an empty one.
+        save_to(&path, &Registry::default()).unwrap();
+        assert_eq!(
+            load_from(&bak).unwrap().servers.len(),
+            1,
+            ".bak holds the pre-overwrite registry"
+        );
+
+        // A corrupt primary recovers its server list from the backup.
+        std::fs::write(&path, "{ not valid json").unwrap();
+        assert_eq!(
+            load_from(&path).unwrap().servers.len(),
+            1,
+            "recovered from .bak when the primary is corrupt"
+        );
+
+        // A missing primary also recovers from the backup.
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            load_from(&path).unwrap().servers.len(),
+            1,
+            "recovered from .bak when the primary is missing"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&bak).ok();
     }
 }
