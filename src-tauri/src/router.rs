@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use crate::downstream::DownstreamServer;
+use crate::downstream::{backoff_delay, DownstreamServer, TransportError, HTTP_MAX_RETRIES};
 
 /// Rewrite a name segment to the function-name charset clients accept
 /// (`[A-Za-z0-9_]`); every other character becomes `_`.
@@ -354,6 +354,32 @@ impl Router {
             .ok_or_else(|| format!("no connected server '{server_id}'"))
     }
 
+    /// Retry wrapper that releases the per-server Mutex during the backoff sleep
+    /// so concurrent calls to the same server aren't blocked while one call waits
+    /// for a rate-limit or connection-retry delay.
+    fn call_with_retry<T, F>(&self, slot: &Arc<ServerSlot>, mut f: F) -> Result<T, String>
+    where
+        F: FnMut(&mut DownstreamServer) -> Result<T, TransportError>,
+    {
+        let mut attempt = 0u32;
+        loop {
+            let result = {
+                let mut server = slot.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                f(&mut server)
+            };
+            match result {
+                Ok(v) => return Ok(v),
+                Err(TransportError::Retry { retry_after, message }) if attempt < HTTP_MAX_RETRIES => {
+                    let wait = retry_after.unwrap_or_else(|| backoff_delay(attempt));
+                    eprintln!("conduit: retrying downstream call after {wait:?}: {message}");
+                    std::thread::sleep(wait);
+                    attempt += 1;
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    }
+
     /// Forward an exposed tool call to its owning downstream server, using that
     /// server's original tool name. Takes `&self`: it locks only the target
     /// server, so concurrent calls to different servers run in parallel while
@@ -368,11 +394,7 @@ impl Router {
             .cloned()
             .ok_or_else(|| format!("no route for tool '{exposed_name}'"))?;
         let slot = self.slot_for(&server_id)?;
-        let mut server = slot
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        server.call(&tool, arguments)
+        self.call_with_retry(&slot, |server| server.call(&tool, arguments.clone()))
     }
 
     /// Every downstream resource, uris unchanged.
@@ -394,11 +416,7 @@ impl Router {
             .cloned()
             .ok_or_else(|| format!("no server owns resource '{uri}'"))?;
         let slot = self.slot_for(&server_id)?;
-        let mut server = slot
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        server.read_resource(uri)
+        self.call_with_retry(&slot, |server| server.read_resource(uri))
     }
 
     /// Get a prompt by its exposed name, forwarding the server's real name.
@@ -410,17 +428,16 @@ impl Router {
             .cloned()
             .ok_or_else(|| format!("no route for prompt '{exposed_name}'"))?;
         let slot = self.slot_for(&server_id)?;
-        let mut server = slot
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        server.get_prompt(&name, arguments)
+        self.call_with_retry(&slot, |server| server.get_prompt(&name, arguments.clone()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn inline_refs_resolves_defs() {
@@ -490,7 +507,7 @@ mod tests {
     }
 
     impl Transport for MockTransport {
-        fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        fn request(&mut self, method: &str, params: Value) -> Result<Value, TransportError> {
             match method {
                 "initialize" => Ok(json!({
                     "protocolVersion": "2025-06-18",
@@ -525,10 +542,10 @@ mod tests {
                     let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
                     Ok(json!({ "messages": [{ "role": "user", "content": format!("{}:{}", self.label, name) }] }))
                 }
-                other => Err(format!("unexpected method {other}")),
+                other => Err(TransportError::Fatal(format!("unexpected method {other}"))),
             }
         }
-        fn notify(&mut self, _method: &str, _params: Value) -> Result<(), String> {
+        fn notify(&mut self, _method: &str, _params: Value) -> Result<(), TransportError> {
             Ok(())
         }
     }
@@ -615,7 +632,7 @@ mod tests {
     /// A server whose single tool is annotated destructive.
     struct DestructiveMock;
     impl Transport for DestructiveMock {
-        fn request(&mut self, method: &str, _params: Value) -> Result<Value, String> {
+        fn request(&mut self, method: &str, _params: Value) -> Result<Value, TransportError> {
             match method {
                 "initialize" => Ok(json!({ "protocolVersion": "2025-06-18" })),
                 "tools/list" => Ok(json!({
@@ -629,10 +646,10 @@ mod tests {
                 "tools/call" => Ok(json!({
                     "content": [{ "type": "text", "text": "ok" }], "isError": false
                 })),
-                other => Err(format!("unexpected method {other}")),
+                other => Err(TransportError::Fatal(format!("unexpected method {other}"))),
             }
         }
-        fn notify(&mut self, _method: &str, _params: Value) -> Result<(), String> {
+        fn notify(&mut self, _method: &str, _params: Value) -> Result<(), TransportError> {
             Ok(())
         }
     }
@@ -737,17 +754,17 @@ mod tests {
         // mid-session and break in-flight calls.
         struct DupMock;
         impl Transport for DupMock {
-            fn request(&mut self, method: &str, _params: Value) -> Result<Value, String> {
+            fn request(&mut self, method: &str, _params: Value) -> Result<Value, TransportError> {
                 match method {
                     "initialize" => Ok(json!({ "protocolVersion": "2025-06-18" })),
                     "tools/list" => Ok(json!({ "tools": [
                         { "name": "a-b", "description": "one" },
                         { "name": "a_b", "description": "two" }
                     ] })),
-                    other => Err(format!("unexpected {other}")),
+                    other => Err(TransportError::Fatal(format!("unexpected {other}"))),
                 }
             }
-            fn notify(&mut self, _m: &str, _p: Value) -> Result<(), String> {
+            fn notify(&mut self, _m: &str, _p: Value) -> Result<(), TransportError> {
                 Ok(())
             }
         }
@@ -763,5 +780,225 @@ mod tests {
         assert_eq!(before, vec!["s__a_b", "s__a_b_2"]);
         router.refresh_tools();
         assert_eq!(names(&router), before, "refresh shuffled the collision suffixes");
+    }
+
+    /// Shared retry-capable mock used to exercise the Router helper.
+    struct RetryMock {
+        tool_failures: Arc<AtomicU32>,
+        resource_failures: Arc<AtomicU32>,
+        prompt_failures: Arc<AtomicU32>,
+        tool_call_entries: Arc<AtomicU32>,
+    }
+
+    impl Transport for RetryMock {
+        fn request(&mut self, method: &str, params: Value) -> Result<Value, TransportError> {
+            match method {
+                "initialize" => Ok(json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": { "resources": {}, "prompts": {} }
+                })),
+                "tools/list" => Ok(json!({
+                    "tools": [
+                        { "name": "flaky", "description": "flaky tool" },
+                        { "name": "stable", "description": "always succeeds" }
+                    ]
+                })),
+                "resources/list" => Ok(json!({
+                    "resources": [{ "uri": "retry://res", "name": "res" }]
+                })),
+                "prompts/list" => Ok(json!({
+                    "prompts": [{ "name": "greet", "description": "greeting" }]
+                })),
+                "tools/call" => {
+                    self.tool_call_entries.fetch_add(1, Ordering::SeqCst);
+                    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    if name == "stable" {
+                        return Ok(json!({
+                            "content": [{ "type": "text", "text": "stable-ok" }],
+                            "isError": false
+                        }));
+                    }
+                    let prev = self.tool_failures.load(Ordering::SeqCst);
+                    if prev > 0 {
+                        self.tool_failures.store(prev - 1, Ordering::SeqCst);
+                        Err(TransportError::Retry {
+                            retry_after: Some(Duration::from_millis(50)),
+                            message: "simulated 429".to_string(),
+                        })
+                    } else {
+                        Ok(json!({
+                            "content": [{ "type": "text", "text": "ok-after-retry" }],
+                            "isError": false
+                        }))
+                    }
+                }
+                "resources/read" => {
+                    let prev = self.resource_failures.load(Ordering::SeqCst);
+                    if prev > 0 {
+                        self.resource_failures.store(prev - 1, Ordering::SeqCst);
+                        Err(TransportError::Retry {
+                            retry_after: Some(Duration::from_millis(1)),
+                            message: "retry resource".to_string(),
+                        })
+                    } else {
+                        let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+                        Ok(json!({ "contents": [{ "uri": uri, "text": "resource-ok" }] }))
+                    }
+                }
+                "prompts/get" => {
+                    let prev = self.prompt_failures.load(Ordering::SeqCst);
+                    if prev > 0 {
+                        self.prompt_failures.store(prev - 1, Ordering::SeqCst);
+                        Err(TransportError::Retry {
+                            retry_after: Some(Duration::from_millis(1)),
+                            message: "retry prompt".to_string(),
+                        })
+                    } else {
+                        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        Ok(json!({ "messages": [{ "role": "user", "content": format!("gp:{name}") }] }))
+                    }
+                }
+                other => Err(TransportError::Fatal(format!("unexpected method {other}"))),
+            }
+        }
+        fn notify(&mut self, _method: &str, _params: Value) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    struct FatalMock;
+    impl Transport for FatalMock {
+        fn request(&mut self, method: &str, _params: Value) -> Result<Value, TransportError> {
+            match method {
+                "initialize" => Ok(json!({ "protocolVersion": "2025-06-18" })),
+                "tools/list" => Ok(json!({ "tools": [{ "name": "boom", "description": "always fails" }] })),
+                "tools/call" => Err(TransportError::Fatal("HTTP 500: server error".to_string())),
+                other => Err(TransportError::Fatal(format!("unexpected method {other}"))),
+            }
+        }
+        fn notify(&mut self, _method: &str, _params: Value) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    fn retry_server(id: &str, tool_failures: u32, resource_failures: u32, prompt_failures: u32) -> DownstreamServer {
+        let mut ds = DownstreamServer::connect(
+            id.to_string(),
+            Box::new(RetryMock {
+                tool_failures: Arc::new(AtomicU32::new(tool_failures)),
+                resource_failures: Arc::new(AtomicU32::new(resource_failures)),
+                prompt_failures: Arc::new(AtomicU32::new(prompt_failures)),
+                tool_call_entries: Arc::new(AtomicU32::new(0)),
+            }),
+        )
+        .unwrap();
+        ds.load_resources_prompts();
+        ds
+    }
+
+    fn retry_server_inspectable(
+        id: &str,
+        tool_failures: u32,
+    ) -> (DownstreamServer, Arc<AtomicU32>) {
+        let entries = Arc::new(AtomicU32::new(0));
+        let mut ds = DownstreamServer::connect(
+            id.to_string(),
+            Box::new(RetryMock {
+                tool_failures: Arc::new(AtomicU32::new(tool_failures)),
+                resource_failures: Arc::new(AtomicU32::new(0)),
+                prompt_failures: Arc::new(AtomicU32::new(0)),
+                tool_call_entries: Arc::clone(&entries),
+            }),
+        )
+        .unwrap();
+        ds.load_resources_prompts();
+        (ds, entries)
+    }
+
+    #[test]
+    fn retry_succeeds_after_transient_failure() {
+        let mut router = Router::new();
+        router.add(retry_server("flaky", 1, 0, 0));
+        let result = router.route_call("flaky__flaky", json!({})).unwrap();
+        assert_eq!(result["content"][0]["text"], "ok-after-retry");
+    }
+
+    #[test]
+    fn fatal_error_does_not_retry() {
+        let mut router = Router::new();
+        router.add(DownstreamServer::connect("fatal".to_string(), Box::new(FatalMock)).unwrap());
+        let err = router.route_call("fatal__boom", json!({})).unwrap_err();
+        assert!(err.contains("500"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn get_prompt_also_retries() {
+        let mut router = Router::new();
+        router.add(retry_server("gp", 0, 0, 1));
+        let result = router.get_prompt("gp__greet", json!({})).unwrap();
+        assert_eq!(result["messages"][0]["content"], "gp:greet");
+    }
+
+    #[test]
+    fn read_resource_also_retries() {
+        let mut router = Router::new();
+        router.add(retry_server("rr", 0, 1, 0));
+        let result = router.read_resource("retry://res").unwrap();
+        assert_eq!(result["contents"][0]["text"], "resource-ok");
+    }
+
+    #[test]
+    fn retry_does_not_block_unrelated_server() {
+        let slow = retry_server("slow", 1, 0, 0);
+        let fast = mock_server("fast");
+        let mut router = Router::new();
+        router.add(slow);
+        router.add(fast);
+
+        let router = Arc::new(router);
+        let router_a = Arc::clone(&router);
+        let handle = std::thread::spawn(move || router_a.route_call("slow__flaky", json!({})));
+
+        std::thread::sleep(Duration::from_millis(10));
+        let fast_result = router.route_call("fast__echo", json!({}));
+        assert!(fast_result.is_ok(), "fast server should not block behind slow retry");
+
+        let slow_result = handle.join().unwrap();
+        assert!(slow_result.is_ok(), "slow server should eventually succeed");
+    }
+
+    /// THE critical test: proves the per-server Mutex is RELEASED during the
+    /// backoff sleep. Without the fix, call A would hold the lock while sleeping,
+    /// and call B to the SAME server would block until A's retry completed.
+    #[test]
+    fn same_server_lock_released_during_backoff_sleep() {
+        let (server, entries) = retry_server_inspectable("srv", 1);
+        let mut router = Router::new();
+        router.add(server);
+        let router = Arc::new(router);
+
+        let router1 = Arc::clone(&router);
+        let handle = std::thread::spawn(move || router1.route_call("srv__flaky", json!({})));
+
+        // Wait long enough for thread 1 to acquire the lock, get the 429, and
+        // enter the backoff sleep — but NOT long enough for the 50ms retry.
+        std::thread::sleep(Duration::from_millis(15));
+
+        // Call the stable tool on the SAME server. If the fix is correct, the
+        // lock was released during the backoff sleep, so this succeeds immediately.
+        let result_b = router.route_call("srv__stable", json!({}));
+        assert!(result_b.is_ok(), "same-server call should succeed during backoff sleep");
+        let result = result_b.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert_eq!(text, "stable-ok");
+
+        let result_a = handle.join().unwrap();
+        assert!(result_a.is_ok(), "flaky call should succeed after retry");
+
+        // At least 3 lock acquisitions: flaky 429, stable ok, flaky retry ok.
+        assert!(
+            entries.load(Ordering::SeqCst) >= 3,
+            "expected >=3 tool/call lock acquisitions"
+        );
     }
 }

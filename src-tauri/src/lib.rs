@@ -690,7 +690,7 @@ async fn call_tool(
     tauri::async_runtime::spawn_blocking(move || {
         let mut ds = connect_server(&server)?;
         let started = std::time::Instant::now();
-        let result = ds.call(&tool, arguments);
+        let result = ds.call(&tool, arguments).map_err(|e| e.to_string());
         let ms = started.elapsed().as_millis() as u64;
         // Mirror the gateway's success accounting: a result with isError=true is
         // a failed call even though the transport round-tripped fine.
@@ -700,7 +700,7 @@ async fn call_tool(
             .unwrap_or(false);
         // A transport error carries its own message; capture it so Activity can
         // show why a playground call failed, not just that it did.
-        let err = result.as_ref().err().cloned();
+        let err = result.as_ref().err().map(|e| e.to_string());
         audit::record_timed(&server.id, &tool, ok, Some(ms), err.as_deref());
         result
     })
@@ -757,7 +757,7 @@ async fn read_resource(
     let server = server_by_id(state.inner(), &server_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut ds = connect_server(&server)?;
-        ds.read_resource(&uri)
+        ds.read_resource(&uri).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -775,7 +775,7 @@ async fn get_prompt(
     let server = server_by_id(state.inner(), &server_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut ds = connect_server(&server)?;
-        ds.get_prompt(&name, arguments)
+        ds.get_prompt(&name, arguments).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

@@ -40,10 +40,42 @@ const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 /// do NOT retry 5xx or post-send I/O errors, because an MCP `tools/call` is not
 /// guaranteed idempotent and may already have executed server-side, so a blind
 /// retry could double-execute it (send the email twice, charge the card twice).
-const HTTP_MAX_RETRIES: u32 = 2;
+pub(crate) const HTTP_MAX_RETRIES: u32 = 2;
 /// Base backoff between retries; doubles each attempt, capped at HTTP_RETRY_CAP.
-const HTTP_RETRY_BASE: Duration = Duration::from_millis(250);
-const HTTP_RETRY_CAP: Duration = Duration::from_secs(10);
+pub(crate) const HTTP_RETRY_BASE: Duration = Duration::from_millis(250);
+pub(crate) const HTTP_RETRY_CAP: Duration = Duration::from_secs(10);
+
+
+/// Error from a single transport request attempt. The caller (Router) owns the
+/// retry loop so it can release the per-server Mutex during the backoff sleep,
+/// instead of blocking every other agent queued on the same server.
+#[derive(Debug, Clone)]
+pub enum TransportError {
+    /// Non-retryable: the request was processed (or is structurally invalid).
+    Fatal(String),
+    /// Retryable: a 429 rate-limit or a connection that never reached the server.
+    /// `retry_after` carries the server-advertised delay (Retry-After) if present;
+    /// the caller falls back to its own exponential backoff when `None`.
+    Retry {
+        retry_after: Option<Duration>,
+        message: String,
+    },
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportError::Fatal(msg) => write!(f, "{msg}"),
+            TransportError::Retry { message, .. } => write!(f, "{message}"),
+        }
+    }
+}
+
+impl From<String> for TransportError {
+    fn from(s: String) -> Self {
+        TransportError::Fatal(s)
+    }
+}
 
 /// Read up to `max` bytes of a ureq response body, lossily as text, never more than
 /// the cap even if the server keeps streaming.
@@ -55,7 +87,7 @@ fn read_capped(resp: ureq::Response, max: u64) -> String {
 }
 
 /// Exponential backoff for retry `attempt` (0-based): base * 2^attempt, capped.
-fn backoff_delay(attempt: u32) -> Duration {
+pub(crate) fn backoff_delay(attempt: u32) -> Duration {
     let mult = 1u32 << attempt.min(6);
     HTTP_RETRY_BASE.saturating_mul(mult).min(HTTP_RETRY_CAP)
 }
@@ -175,8 +207,8 @@ pub fn resolve_command(command: &str) -> String {
 
 /// A bidirectional JSON-RPC channel to one downstream server.
 pub trait Transport: Send {
-    fn request(&mut self, method: &str, params: Value) -> Result<Value, String>;
-    fn notify(&mut self, method: &str, params: Value) -> Result<(), String>;
+    fn request(&mut self, method: &str, params: Value) -> Result<Value, TransportError>;
+    fn notify(&mut self, method: &str, params: Value) -> Result<(), TransportError>;
     /// Bound how long a single `request` waits for its response. Used to fail the
     /// connect handshake fast. Default no-op: transports with their own fixed
     /// request timeout (e.g. HTTP) ignore it.
@@ -381,12 +413,12 @@ impl StdioTransport {
 }
 
 impl Transport for StdioTransport {
-    fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+    fn request(&mut self, method: &str, params: Value) -> Result<Value, TransportError> {
         let id = self.next_id;
         self.next_id += 1;
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        writeln!(self.stdin, "{msg}").map_err(|e| e.to_string())?;
-        self.stdin.flush().map_err(|e| e.to_string())?;
+        writeln!(self.stdin, "{msg}").map_err(|e| TransportError::Fatal(e.to_string()))?;
+        self.stdin.flush().map_err(|e| TransportError::Fatal(e.to_string()))?;
 
         // Read until the response with our id arrives, skipping notifications.
         // The deadline bounds the whole wait so an unresponsive server fails fast
@@ -399,10 +431,10 @@ impl Transport for StdioTransport {
             let line = match self.rx.recv_timeout(remaining) {
                 Ok(l) => l,
                 Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!("timed out waiting for '{method}' response"))
+                    return Err(TransportError::Fatal(format!("timed out waiting for '{method}' response")))
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(self.closed_error())
+                    return Err(TransportError::Fatal(self.closed_error()))
                 }
             };
             let trimmed = line.trim();
@@ -415,17 +447,17 @@ impl Transport for StdioTransport {
             };
             if value.get("id").and_then(|i| i.as_i64()) == Some(id) {
                 if let Some(err) = value.get("error") {
-                    return Err(err.to_string());
+                    return Err(TransportError::Fatal(err.to_string()));
                 }
                 return Ok(value.get("result").cloned().unwrap_or(Value::Null));
             }
         }
     }
 
-    fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
+    fn notify(&mut self, method: &str, params: Value) -> Result<(), TransportError> {
         let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        writeln!(self.stdin, "{msg}").map_err(|e| e.to_string())?;
-        self.stdin.flush().map_err(|e| e.to_string())
+        writeln!(self.stdin, "{msg}").map_err(|e| TransportError::Fatal(e.to_string()))?;
+        self.stdin.flush().map_err(|e| TransportError::Fatal(e.to_string()))
     }
 
     fn set_read_timeout(&mut self, timeout: Duration) {
@@ -517,13 +549,13 @@ impl HttpTransport {
         }
     }
 
-    fn post(&mut self, body: &Value, expect_response: bool) -> Result<Option<Value>, String> {
+    fn post(&mut self, body: &Value, expect_response: bool) -> Result<Option<Value>, TransportError> {
         let payload = body.to_string();
-        let mut attempt = 0u32;
+
+        // Token refresh is handled internally (it doesn't sleep, so no lock
+        // contention). Only 429 and transport-retry signals bubble up as
+        // TransportError::Retry so the Router can sleep *outside* the lock.
         let mut refreshed = false;
-        // Retry only the genuinely-safe transient failures (429 and
-        // connection-never-reached). Each attempt rebuilds the request (ureq
-        // consumes it on send).
         let resp = loop {
             let mut req = self
                 .agent
@@ -540,17 +572,15 @@ impl HttpTransport {
 
             match req.send_string(&payload) {
                 Ok(r) => break r,
-                // Rate limited: the server rejected the request before processing
-                // it, so retrying after the advertised delay is safe for any method.
-                Err(ureq::Error::Status(429, r)) if attempt < HTTP_MAX_RETRIES => {
-                    let wait = r
-                        .header("retry-after")
-                        .and_then(retry_after_delay)
-                        .unwrap_or_else(|| backoff_delay(attempt));
-                    // Drain the body so the connection can be reused.
+                // Rate limited: return a Retry signal so the Router sleeps
+                // *outside* the per-server Mutex.
+                Err(ureq::Error::Status(429, r)) => {
+                    let retry_after = r.header("retry-after").and_then(retry_after_delay);
                     let _ = read_capped(r, 8 * 1024);
-                    std::thread::sleep(wait);
-                    attempt += 1;
+                    return Err(TransportError::Retry {
+                        retry_after,
+                        message: "HTTP 429: rate limited".to_string(),
+                    });
                 }
                 // The access token likely expired: refresh it once and retry with
                 // the new token, so a long-running session self-heals instead of
@@ -558,14 +588,17 @@ impl HttpTransport {
                 Err(ureq::Error::Status(code, r))
                     if (code == 401 || code == 403) && !refreshed && self.refresh.is_some() =>
                 {
-                    let _ = read_capped(r, 8 * 1024); // drain so the connection can be reused
+                    let _ = read_capped(r, 8 * 1024);
                     refreshed = true;
                     match self.refresh.as_ref().and_then(|f| f()) {
-                        Some(tok) => self.auth = Some(tok),
+                        Some(tok) => {
+                            self.auth = Some(tok);
+                            continue;
+                        }
                         None => {
-                            return Err(format!(
+                            return Err(TransportError::Fatal(format!(
                                 "HTTP {code} (needs authentication): token refresh failed"
-                            ))
+                            )))
                         }
                     }
                 }
@@ -576,17 +609,17 @@ impl HttpTransport {
                     } else {
                         ""
                     };
-                    return Err(format!("HTTP {code}{hint}: {detail}"));
+                    return Err(TransportError::Fatal(format!("HTTP {code}{hint}: {detail}")));
                 }
-                // The connection never reached the server, so the request did not
-                // execute: safe to retry even a non-idempotent tools/call.
-                Err(ureq::Error::Transport(t))
-                    if attempt < HTTP_MAX_RETRIES && is_retryable_transport(&t) =>
-                {
-                    std::thread::sleep(backoff_delay(attempt));
-                    attempt += 1;
+                // Transport error (DNS / connection failure): retryable, but
+                // the Router owns the backoff sleep so the Mutex is released.
+                Err(ureq::Error::Transport(t)) if is_retryable_transport(&t) => {
+                    return Err(TransportError::Retry {
+                        retry_after: None,
+                        message: format!("transport error (retryable): {t}"),
+                    });
                 }
-                Err(e) => return Err(e.to_string()),
+                Err(e) => return Err(TransportError::Fatal(e.to_string())),
             }
         };
 
@@ -619,28 +652,28 @@ impl HttpTransport {
                     }
                 }
             }
-            Err("no matching message in SSE stream".to_string())
+            Err(TransportError::Fatal("no matching message in SSE stream".to_string()))
         } else {
             serde_json::from_str(&text)
                 .map(Some)
-                .map_err(|e| format!("bad JSON response: {e}"))
+                .map_err(|e| TransportError::Fatal(format!("bad JSON response: {e}")))
         }
     }
 }
 
 impl Transport for HttpTransport {
-    fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+    fn request(&mut self, method: &str, params: Value) -> Result<Value, TransportError> {
         let id = self.next_id;
         self.next_id += 1;
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let resp = self.post(&body, true)?.ok_or("empty response")?;
+        let resp = self.post(&body, true)?.ok_or_else(|| TransportError::Fatal("empty response".to_string()))?;
         if let Some(err) = resp.get("error") {
-            return Err(err.to_string());
+            return Err(TransportError::Fatal(err.to_string()));
         }
         Ok(resp.get("result").cloned().unwrap_or(Value::Null))
     }
 
-    fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
+    fn notify(&mut self, method: &str, params: Value) -> Result<(), TransportError> {
         let body = json!({ "jsonrpc": "2.0", "method": method, "params": params });
         self.post(&body, false)?;
         Ok(())
@@ -678,13 +711,13 @@ impl DownstreamServer {
                 "capabilities": {},
                 "clientInfo": { "name": "conduit-gateway", "version": env!("CARGO_PKG_VERSION") }
             }),
-        )?;
+        ).map_err(|e| e.to_string())?;
         let caps = init.get("capabilities");
         let caps_resources = caps.and_then(|c| c.get("resources")).is_some();
         let caps_prompts = caps.and_then(|c| c.get("prompts")).is_some();
-        transport.notify("notifications/initialized", json!({}))?;
+        transport.notify("notifications/initialized", json!({})).map_err(|e| e.to_string())?;
 
-        let result = transport.request("tools/list", json!({}))?;
+        let result = transport.request("tools/list", json!({})).map_err(|e| e.to_string())?;
         let tools = extract_array(&result, "tools");
 
         // Restore the longer timeout: actual tool calls can legitimately be slow.
@@ -731,19 +764,19 @@ impl DownstreamServer {
         }
     }
 
-    pub fn call(&mut self, tool: &str, arguments: Value) -> Result<Value, String> {
+    pub fn call(&mut self, tool: &str, arguments: Value) -> Result<Value, TransportError> {
         self.transport
             .request("tools/call", json!({ "name": tool, "arguments": arguments }))
     }
 
     /// Read one resource by its (original, downstream) uri.
-    pub fn read_resource(&mut self, uri: &str) -> Result<Value, String> {
+    pub fn read_resource(&mut self, uri: &str) -> Result<Value, TransportError> {
         self.transport
             .request("resources/read", json!({ "uri": uri }))
     }
 
     /// Get one prompt by its (original, downstream) name.
-    pub fn get_prompt(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
+    pub fn get_prompt(&mut self, name: &str, arguments: Value) -> Result<Value, TransportError> {
         self.transport
             .request("prompts/get", json!({ "name": name, "arguments": arguments }))
     }
@@ -928,5 +961,78 @@ mod tests {
         assert!(res.is_some(), "got the 200 result after refreshing");
         assert_eq!(hits.load(Ordering::SeqCst), 2, "exactly one 401 then one retry");
         assert_eq!(*retry_auth.lock().unwrap(), "Bearer fresh", "retry used the new token");
+    }
+
+    #[test]
+    fn post_returns_retry_on_429_with_retry_after() {
+        use super::{HttpTransport, TransportError};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        // Mock MCP server: 429 with Retry-After: 2 on the first request,
+        // 200 JSON-RPC on the second.
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hc = Arc::clone(&hits);
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let req = match server.recv() {
+                    Ok(r) => r,
+                    Err(_) => return,
+                };
+                if hc.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let ra = tiny_http::Header::from_bytes(&b"Retry-After"[..], &b"2"[..]).unwrap();
+                    let _ = req.respond(
+                        tiny_http::Response::from_string("rate limited")
+                            .with_status_code(429)
+                            .with_header(ra),
+                    );
+                } else {
+                    let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+                    let body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+                    let _ = req.respond(tiny_http::Response::from_string(body).with_header(ct));
+                }
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{port}/");
+        let mut t = HttpTransport::new(&url);
+
+        // First call: should get a Retry signal, NOT an Ok or Fatal.
+        let result = t.post(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), true);
+        match &result {
+            Err(TransportError::Retry { retry_after, .. }) => {
+                assert_eq!(*retry_after, Some(Duration::from_secs(2)));
+            }
+            other => panic!("expected TransportError::Retry, got {other:?}"),
+        }
+
+        // Second call: the server now responds 200.
+        let result2 = t.post(&serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }), true);
+        assert!(result2.is_ok(), "second call should succeed: {result2:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn post_returns_retry_on_transport_error() {
+        use super::{HttpTransport, TransportError};
+
+        // A dead port: connection refused, which is a retryable transport error.
+        let mut t = HttpTransport::new("http://127.0.0.1:1/");
+        let result = t.post(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), true);
+        match &result {
+            Err(TransportError::Retry { retry_after, .. }) => {
+                assert!(retry_after.is_none());
+            }
+            Err(TransportError::Fatal(msg)) => {
+                // On some systems port 1 may produce a different error class.
+                eprintln!("got Fatal instead of Retry (OS-dependent): {msg}");
+            }
+            other => panic!("expected Retry or Fatal, got {other:?}"),
+        }
     }
 }
