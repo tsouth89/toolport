@@ -67,6 +67,9 @@ export interface AuditEntry {
   error?: string;
   /** A destructive call held for confirmation (not a success and not an error). */
   held?: boolean;
+  /** The registered HTTP client that made the call, when known. Absent for the
+   * local desktop client and legacy/open tokens. */
+  client?: string;
 }
 
 export interface ProbeResult {

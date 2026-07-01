@@ -1172,6 +1172,19 @@ fn resolve_http_scope(
     None
 }
 
+/// The audit label for a registered HTTP client's bearer: its `label`, or its `id`
+/// when the label is blank. `None` when the token isn't a registered client (legacy
+/// single-token, open loopback, or the local stdio app), so those calls stay
+/// unattributed in the audit log rather than mislabeled. Pure, so it's unit-testable.
+fn http_client_label(reg: &Registry, provided: Option<&str>) -> Option<String> {
+    let client = reg.http_client_for_token(provided?)?;
+    Some(if client.label.trim().is_empty() {
+        client.id.clone()
+    } else {
+        client.label.clone()
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_request(
     req: &Value,
@@ -1591,7 +1604,7 @@ fn handle_request(
                     );
                     // Held for confirmation, not a failure: record as held (ok), so the
                     // confirm-destructive feature doesn't inflate the error rate.
-                    audit::record_held(srv, tool);
+                    audit::record_held(srv, tool, router.current_client());
                     return Some(success(
                         id,
                         json!({
@@ -1617,7 +1630,7 @@ fn handle_request(
                     } else {
                         Some(content_text(&result))
                     };
-                    audit::record_timed(srv, tool, ok, Some(ms), err.as_deref());
+                    audit::record_timed(srv, tool, ok, Some(ms), err.as_deref(), router.current_client());
                     // Content defense: scan this untrusted tool output for injection
                     // and label any flagged text as data before it reaches the agent.
                     if reg.content_defense {
@@ -1650,7 +1663,7 @@ fn handle_request(
                 }
                 Err(e) => {
                     let ms = started.elapsed().as_millis() as u64;
-                    audit::record_timed(srv, tool, false, Some(ms), Some(&e));
+                    audit::record_timed(srv, tool, false, Some(ms), Some(&e), router.current_client());
                     let recovery = recovery_hint(cached, srv);
                     Some(success(
                         id,
@@ -2115,6 +2128,7 @@ fn process_request(
     guard: &mut SearchGuard,
     confirm: &mut ConfirmGuard,
     allowed: Option<&std::collections::HashSet<String>>,
+    client: Option<&str>,
 ) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -2195,6 +2209,9 @@ fn process_request(
         .router
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Attribute this request to its client (set under the router lock, so concurrent
+    // HTTP requests can't cross-contaminate) for the audit log.
+    r.set_current_client(client);
     handle_request(
         req,
         &reg,
@@ -2434,6 +2451,7 @@ fn handle_http(
     path: &str,
     body: &str,
     allowed: Option<&std::collections::HashSet<String>>,
+    client: Option<&str>,
 ) -> (u16, &'static str, String) {
     match (method, path) {
         // CORS preflight: browsers (Open WebUI fetches tool specs client-side)
@@ -2477,7 +2495,7 @@ fn handle_http(
                 "method": "tools/call",
                 "params": { "name": name, "arguments": args }
             });
-            match process_request(state, &req, guard, confirm, allowed) {
+            match process_request(state, &req, guard, confirm, allowed, client) {
                 Some(resp) => {
                     if let Some(err) = resp.get("error") {
                         let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("error");
@@ -2646,6 +2664,7 @@ fn serve_http_loop(server: tiny_http::Server, state: GatewayState, token: Option
             .find(|h| h.field.equiv("Authorization"))
             .map(|h| h.value.as_str().to_string());
         let provided_tok = provided.as_deref().and_then(parse_bearer);
+        let mut client_label: Option<String> = None;
         let scope: Option<Option<std::collections::HashSet<String>>> = if method == "OPTIONS" {
             Some(None)
         } else {
@@ -2653,6 +2672,9 @@ fn serve_http_loop(server: tiny_http::Server, state: GatewayState, token: Option
                 .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Resolve the client's audit label from the same token, so every call it
+            // makes can be attributed to it in the audit log.
+            client_label = http_client_label(&reg, provided_tok);
             resolve_http_scope(&reg, token.as_deref(), provided_tok)
         };
 
@@ -2687,6 +2709,7 @@ fn serve_http_loop(server: tiny_http::Server, state: GatewayState, token: Option
                             &path,
                             &body,
                             allowed.as_ref(),
+                            client_label.as_deref(),
                         )
                     }))
                     .unwrap_or((
@@ -2946,7 +2969,8 @@ fn main() {
             "request: {}",
             req.get("method").and_then(|m| m.as_str()).unwrap_or("")
         ));
-        let response = process_request(&state, &req, &mut search_guard, &mut confirm_guard, None);
+        let response =
+            process_request(&state, &req, &mut search_guard, &mut confirm_guard, None, None);
         if let Some(resp) = response {
             let mut out = state
                 .stdout
@@ -3164,6 +3188,33 @@ mod tests {
     }
 
     #[test]
+    fn http_client_label_attributes_registered_clients() {
+        let mut reg = Registry::default();
+        // Unknown / absent bearer -> unattributed (stays out of the audit log).
+        assert_eq!(http_client_label(&reg, None), None);
+        assert_eq!(http_client_label(&reg, Some("nope")), None);
+        // A registered client resolves to its human-readable label.
+        reg.http_clients.push(registry::HttpClient {
+            id: "c1".into(),
+            label: "Cursor".into(),
+            token_sha256: registry::sha256_hex("tok1"),
+            profile: String::new(),
+        });
+        assert_eq!(
+            http_client_label(&reg, Some("tok1")).as_deref(),
+            Some("Cursor")
+        );
+        // A blank label falls back to the id, so attribution is never an empty string.
+        reg.http_clients.push(registry::HttpClient {
+            id: "c2".into(),
+            label: "   ".into(),
+            token_sha256: registry::sha256_hex("tok2"),
+            profile: String::new(),
+        });
+        assert_eq!(http_client_label(&reg, Some("tok2")).as_deref(), Some("c2"));
+    }
+
+    #[test]
     fn status_summary_scopes_to_allowed_servers() {
         use std::collections::HashSet;
         let mut reg = Registry::default();
@@ -3313,6 +3364,7 @@ mod tests {
             "OPTIONS",
             "/conduit_search_tools",
             "",
+            None,
             None,
         );
         assert_eq!(status, 204);

@@ -42,6 +42,7 @@ pub fn record_timed(
     ok: bool,
     duration_ms: Option<u64>,
     error: Option<&str>,
+    client: Option<&str>,
 ) {
     let mut entry = json!({
         "ts": epoch_millis() as u64,
@@ -51,6 +52,11 @@ pub fn record_timed(
     });
     if let Some(ms) = duration_ms {
         entry["durationMs"] = json!(ms);
+    }
+    // Which client made the call (a registered HTTP client's label), so the audit
+    // log answers "who invoked this?". Absent for the local stdio client / open tokens.
+    if let Some(c) = client.filter(|c| !c.is_empty()) {
+        entry["client"] = json!(c);
     }
     if !ok {
         if let Some(err) = error {
@@ -67,14 +73,18 @@ pub fn record_timed(
 /// confirm-destructive feature working, not a failure, so `ok: true` keeps it out of
 /// the error rate; the `held` flag lets the UI mark it as held rather than as a
 /// (misleading) successful destructive call.
-pub fn record_held(server: &str, tool: &str) {
-    write_line(&json!({
+pub fn record_held(server: &str, tool: &str, client: Option<&str>) {
+    let mut entry = json!({
         "ts": epoch_millis() as u64,
         "server": server,
         "tool": tool,
         "ok": true,
         "held": true,
-    }));
+    });
+    if let Some(c) = client.filter(|c| !c.is_empty()) {
+        entry["client"] = json!(c);
+    }
+    write_line(&entry);
 }
 
 /// Append one entry as a single JSON line. A single `write_all` (not `writeln!`, which

@@ -452,6 +452,14 @@ function CallRow({ e }: { e: AuditEntry }) {
         <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
           {e.tool}
         </span>
+        {e.client && (
+          <span
+            className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
+            title="Client that made this call"
+          >
+            {e.client}
+          </span>
+        )}
         <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
           {fmtMs(e.durationMs ?? null)}
         </span>

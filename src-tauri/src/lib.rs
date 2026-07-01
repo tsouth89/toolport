@@ -701,7 +701,9 @@ async fn call_tool(
         // A transport error carries its own message; capture it so Activity can
         // show why a playground call failed, not just that it did.
         let err = result.as_ref().err().map(|e| e.to_string());
-        audit::record_timed(&server.id, &tool, ok, Some(ms), err.as_deref());
+        // The in-app tool playground: a local action by the desktop user, so it's
+        // unattributed (client identity is only meaningful for registered HTTP clients).
+        audit::record_timed(&server.id, &tool, ok, Some(ms), err.as_deref(), None);
         result
     })
     .await
