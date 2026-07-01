@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -617,14 +618,70 @@ pub fn gateway_log_path() -> Option<PathBuf> {
 }
 
 pub fn load_from(path: &Path) -> Result<Registry, String> {
+    // A missing or empty primary may still have a recoverable backup (e.g. the
+    // data dir was wiped but the .bak survived, or a half-written empty file).
     if !path.exists() {
-        return Ok(Registry::default());
+        return restore_from_backup(path).unwrap_or_else(|| Ok(Registry::default()));
     }
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     if content.trim().is_empty() {
-        return Ok(Registry::default());
+        return restore_from_backup(path).unwrap_or_else(|| Ok(Registry::default()));
     }
-    serde_json::from_str(&content).map_err(|e| format!("Corrupt registry: {e}"))
+    match serde_json::from_str(&content) {
+        Ok(registry) => Ok(registry),
+        // The primary is corrupt; fall back to the last-known-good backup if it
+        // parses, rather than losing the entire server list.
+        Err(parse_err) => restore_from_backup(path).unwrap_or_else(|| {
+            Err(format!("Corrupt registry: {parse_err}"))
+        }),
+    }
+}
+
+/// If `<path>.bak` exists and parses, return it. Returns `None` when there is no
+/// usable backup so the caller can fall back to its own default/error path.
+/// `Some(Ok(_))` means the backup was recovered; the on-disk primary is left as
+/// is and will be rewritten (and re-backed-up) on the next save.
+fn restore_from_backup(path: &Path) -> Option<Result<Registry, String>> {
+    let bak = backup_path(path);
+    if !bak.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&bak).ok()?;
+    match serde_json::from_str(&content) {
+        Ok(registry) => {
+            eprintln!("conduit: recovered registry from {}", bak.display());
+            Some(Ok(registry))
+        }
+        Err(_) => None,
+    }
+}
+
+/// Sibling backup path for a registry file: `<path>.bak`.
+pub fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".bak");
+    PathBuf::from(name)
+}
+
+/// Copy the current `registry.json` to `registry.json.bak` so a `rm -rf`, a
+/// corrupt write, or a botched edit always leaves one prior good version to
+/// recover from. Best-effort: the backup must never be able to fail the save
+/// it's protecting, so any error here is logged and swallowed.
+fn write_backup(path: &Path) {
+    if !path.exists() {
+        return; // Nothing to back up on first save.
+    }
+    match std::fs::read_to_string(path) {
+        // Only preserve a backup of content that actually parses - copying a
+        // corrupt registry over a good .bak would defeat the recovery path.
+        Ok(content) if serde_json::from_str::<Registry>(&content).is_ok() => {
+            if let Err(e) = atomic_write(&backup_path(path), &content) {
+                eprintln!("conduit: registry backup skipped ({e})");
+            }
+        }
+        Ok(_) => eprintln!("conduit: registry backup skipped (current file does not parse)"),
+        Err(e) => eprintln!("conduit: registry backup skipped, read failed ({e})"),
+    }
 }
 
 pub fn save_to(path: &Path, registry: &Registry) -> Result<(), String> {
@@ -632,9 +689,111 @@ pub fn save_to(path: &Path, registry: &Registry) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(registry).map_err(|e| e.to_string())?;
+    // Preserve the last-known-good registry before we replace it, so a later
+    // corrupt write or an accidental delete can be recovered from the .bak.
+    write_backup(path);
     // The registry is the single source of truth for every server, so a crash,
     // power loss, or full disk mid-write must not be able to truncate it.
     atomic_write(path, &json)
+}
+
+/// How many timestamped copies the external backup ring keeps.
+const MAX_EXTERNAL_BACKUPS: usize = 5;
+const EXTERNAL_BACKUP_PREFIX: &str = "registry-";
+const EXTERNAL_BACKUP_SUFFIX: &str = ".json.bak";
+
+/// A backup location that survives wiping the Conduit data dir itself. The
+/// sibling `.bak` next to `registry.json` protects against corrupt writes, but
+/// a `rm -rf <conduit_dir>` - the exact failure that motivated this - takes the
+/// sibling with it. These copies are anchored to the user home (not the
+/// platform data dir, which is what gets wiped) so at least one survives.
+///
+/// Overridable via `CONDUIT_BACKUP_DIR` (used by tests for hermeticity; also
+/// lets a user point backups at e.g. a synced folder).
+pub fn external_backup_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("CONDUIT_BACKUP_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    Some(dirs::home_dir()?.join(".conduit").join("backups"))
+}
+
+fn is_external_backup(p: &Path) -> bool {
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.starts_with(EXTERNAL_BACKUP_PREFIX) && n.ends_with(EXTERNAL_BACKUP_SUFFIX))
+        .unwrap_or(false)
+}
+
+/// Sorted (oldest -> newest) list of external backup files. The names embed a
+/// zero-padded millisecond timestamp + write sequence, so a lexicographic sort
+/// is chronological.
+fn external_backups(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| is_external_backup(p))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    files.sort();
+    files
+}
+
+/// Copy the just-saved registry into the external ring. Best-effort: a backup
+/// failure must never fail the save it's protecting, so errors are logged and
+/// swallowed. `path` is the live registry that was just written successfully,
+/// so its bytes are known-good.
+fn write_external_backup(path: &Path) {
+    let Some(dir) = external_backup_dir() else {
+        return;
+    };
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("conduit: external registry backup skipped, read failed ({e})");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("conduit: external registry backup skipped ({e})");
+        return;
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let file = dir.join(format!(
+        "{EXTERNAL_BACKUP_PREFIX}{stamp:020}-{seq:020}{EXTERNAL_BACKUP_SUFFIX}"
+    ));
+    if let Err(e) = atomic_write(&file, &content) {
+        eprintln!("conduit: external registry backup skipped ({e})");
+        return;
+    }
+    // Prune oldest beyond the ring size.
+    let files = external_backups(&dir);
+    if let Some(excess) = files.len().checked_sub(MAX_EXTERNAL_BACKUPS).filter(|&n| n > 0) {
+        for old in files.into_iter().take(excess) {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+}
+
+/// Newest external backup that parses, if any. Used as a last resort when both
+/// the primary registry and its sibling `.bak` are gone (e.g. the data dir was
+/// wiped) or unreadable.
+fn restore_from_external_backup() -> Option<Registry> {
+    let dir = external_backup_dir()?;
+    for file in external_backups(&dir).into_iter().rev() {
+        if let Ok(content) = std::fs::read_to_string(&file) {
+            if let Ok(reg) = serde_json::from_str::<Registry>(&content) {
+                eprintln!("conduit: recovered registry from {}", file.display());
+                return Some(reg);
+            }
+        }
+    }
+    None
 }
 
 pub fn load() -> Result<Registry, String> {
@@ -643,7 +802,11 @@ pub fn load() -> Result<Registry, String> {
 
 pub fn save(registry: &Registry) -> Result<(), String> {
     let path = resolved_path().ok_or("Could not resolve registry path")?;
-    save_to(&path, registry)
+    save_to(&path, registry)?;
+    // Mirror the just-saved registry outside the data dir so a `rm -rf
+    // <conduit_dir>` can't take the only copy with it. Best-effort.
+    write_external_backup(&path);
+    Ok(())
 }
 
 /// The path the registry actually resolves to, honoring `CONDUIT_REGISTRY`.
@@ -657,9 +820,20 @@ pub fn resolved_path() -> Option<PathBuf> {
 /// Load honoring the `CONDUIT_REGISTRY` env override (used by the gateway and
 /// tests), falling back to the default path.
 pub fn load_resolved() -> Result<Registry, String> {
-    match resolved_path() {
-        Some(path) => load_from(&path),
-        None => Ok(Registry::default()),
+    let Some(path) = resolved_path() else {
+        return Ok(Registry::default());
+    };
+    // If neither the primary nor its sibling `.bak` survive, the data dir may
+    // have been wiped - `load_from` would silently hand back an empty default
+    // and the server list would be gone. Try the external ring first in that
+    // case so a wipe is recoverable rather than silent loss.
+    let local_present = path.exists() || backup_path(&path).exists();
+    match load_from(&path) {
+        Ok(reg) if !local_present => Ok(restore_from_external_backup().unwrap_or(reg)),
+        Ok(reg) => Ok(reg),
+        // Primary present but corrupt and the sibling `.bak` unusable: external
+        // ring is the last resort before surfacing the error.
+        Err(e) => restore_from_external_backup().map(Ok).unwrap_or(Err(e)),
     }
 }
 
@@ -678,6 +852,32 @@ mod tests {
             url: None,
             source: Some("manual".to_string()),
             disabled_tools: vec![],
+        }
+    }
+
+    /// Serializes tests that mutate process-global env (CONDUIT_REGISTRY,
+    /// CONDUIT_BACKUP_DIR) so they don't race each other.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Sets an env var for the guard's lifetime and restores the prior value on
+    /// drop, so a test can't leak overrides into the rest of the suite.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            EnvGuard { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
         }
     }
 
@@ -879,23 +1079,15 @@ mod tests {
 
     #[test]
     fn load_and_save_resolved_honor_registry_override() {
-        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        let _guard = ENV_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap();
 
         let mut path = std::env::temp_dir();
         path.push(format!("conduit-registry-override-{}.json", std::process::id()));
-        let previous = std::env::var_os("CONDUIT_REGISTRY");
-        struct RestoreEnv(Option<std::ffi::OsString>);
-        impl Drop for RestoreEnv {
-            fn drop(&mut self) {
-                match &self.0 {
-                    Some(value) => std::env::set_var("CONDUIT_REGISTRY", value),
-                    None => std::env::remove_var("CONDUIT_REGISTRY"),
-                }
-            }
-        }
-        let _restore = RestoreEnv(previous);
-        std::env::set_var("CONDUIT_REGISTRY", &path);
+        let bak_dir = std::env::temp_dir().join(format!("conduit-bakdir-{}", std::process::id()));
+        std::fs::remove_dir_all(&bak_dir).ok();
+        let _reg = EnvGuard::set("CONDUIT_REGISTRY", &path);
+        // Keep external backups out of the real home dir during the test.
+        let _bak = EnvGuard::set("CONDUIT_BACKUP_DIR", &bak_dir);
 
         let mut r = Registry::default();
         let id = r.add_server(sample_server("oauth"));
@@ -904,6 +1096,8 @@ mod tests {
 
         let loaded = load().unwrap();
         std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+        std::fs::remove_dir_all(&bak_dir).ok();
 
         assert_eq!(loaded.servers, r.servers);
         assert_eq!(loaded.profiles, r.profiles);
@@ -934,5 +1128,118 @@ mod tests {
             .any(|e| e.file_name().to_string_lossy().starts_with(&prefix));
         assert!(!leftover, "temp file left behind after a successful write");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn save_preserves_prior_version_in_backup() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-bak-{}.json", std::process::id()));
+        let bak = backup_path(&path);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&bak).ok();
+
+        // First save: nothing to back up yet, so no .bak is created.
+        let mut first = Registry::default();
+        first.add_server(sample_server("Alpha"));
+        save_to(&path, &first).unwrap();
+        assert!(!bak.exists(), "first save should not create a backup");
+
+        // Second save: the prior version is preserved in the .bak.
+        let mut second = first.clone();
+        second.add_server(sample_server("Beta"));
+        save_to(&path, &second).unwrap();
+
+        let restored = load_from(&bak).unwrap();
+        assert_eq!(
+            restored.servers.len(),
+            1,
+            "backup should hold the single-server version saved first"
+        );
+        assert_eq!(restored.servers[0].name, "Alpha");
+        // The live file holds the latest version.
+        assert_eq!(load_from(&path).unwrap().servers.len(), 2);
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&bak).ok();
+    }
+
+    #[test]
+    fn load_recovers_from_backup_when_primary_corrupt() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-recover-{}.json", std::process::id()));
+        let bak = backup_path(&path);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&bak).ok();
+
+        // Seed a good backup, then corrupt (and then wipe) the primary.
+        let mut good = Registry::default();
+        good.add_server(sample_server("Gamma"));
+        save_to(&bak, &good).unwrap(); // writes <path>.bak directly
+
+        // Corrupt primary -> recovered from backup.
+        std::fs::write(&path, "{ not json").unwrap();
+        let recovered = load_from(&path).unwrap();
+        assert_eq!(recovered.servers.len(), 1);
+        assert_eq!(recovered.servers[0].name, "Gamma");
+
+        // Missing primary -> also recovered from backup.
+        std::fs::remove_file(&path).ok();
+        assert_eq!(load_from(&path).unwrap().servers[0].name, "Gamma");
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&bak).ok();
+        // save_to(&bak, ...) above would have tried to back up <path>.bak.bak;
+        // clean that up too if it slipped through.
+        std::fs::remove_file(backup_path(&bak)).ok();
+    }
+
+    #[test]
+    fn wipe_recovers_from_external_backup_and_ring_is_bounded() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let id = std::process::id();
+        let path = std::env::temp_dir().join(format!("conduit-ext-{id}.json"));
+        let bak_dir = std::env::temp_dir().join(format!("conduit-extbak-{id}"));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+        std::fs::remove_dir_all(&bak_dir).ok();
+        let _reg = EnvGuard::set("CONDUIT_REGISTRY", &path);
+        let _bak = EnvGuard::set("CONDUIT_BACKUP_DIR", &bak_dir);
+
+        // A fresh install (no primary, no backups) loads an empty default.
+        assert!(load().unwrap().servers.is_empty());
+
+        // Save through the resolved layer; this mirrors to the external ring.
+        let mut r = Registry::default();
+        r.add_server(sample_server("Delta"));
+        save(&r).unwrap();
+        assert_eq!(external_backups(&bak_dir).len(), 1, "save should mirror externally");
+
+        // Simulate the motivating disaster: the whole data dir is wiped, taking
+        // the primary registry.json AND its sibling .bak with it. The external
+        // ring lives elsewhere and survives.
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+        assert!(!path.exists());
+
+        let recovered = load().unwrap();
+        assert_eq!(recovered.servers.len(), 1, "wipe should be recoverable, not silent loss");
+        assert_eq!(recovered.servers[0].name, "Delta");
+
+        // The ring is bounded: many saves keep only the newest MAX_EXTERNAL_BACKUPS.
+        for n in 0..(MAX_EXTERNAL_BACKUPS + 4) {
+            let mut more = Registry::default();
+            more.add_server(sample_server(&format!("srv{n}")));
+            save(&more).unwrap();
+        }
+        assert_eq!(
+            external_backups(&bak_dir).len(),
+            MAX_EXTERNAL_BACKUPS,
+            "external backup ring must be pruned to its bound"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+        std::fs::remove_dir_all(&bak_dir).ok();
     }
 }
