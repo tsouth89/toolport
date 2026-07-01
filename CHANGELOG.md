@@ -5,6 +5,62 @@ All notable changes to Conduit are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- **Security: confidence scoring + new injection categories.** The tool-poisoning /
+  content-defense scanner now combines signals into a weighted confidence score
+  (surfaced on security events) and adds three detection categories (role-jailbreak,
+  system-prompt exfiltration, chat-template delimiter injection). Existing signatures
+  and behavior are unchanged.
+
+## [0.9.4] - 2026-07-01
+
+### Added
+- **Registry backup and recovery.** A `registry.json.bak` sibling keeps the
+  last-known-good server list; Conduit recovers from it if `registry.json` is deleted
+  or corrupted, so a bad write or an accidental wipe no longer loses your servers.
+
+### Fixed
+- **Per-server head-of-line blocking.** The gateway releases the per-server lock during
+  a downstream backoff, so one server's 429 rate-limit no longer stalls other concurrent
+  calls to that same server.
+- **Retry-After clamp.** A downstream's `Retry-After` header is capped to the backoff
+  cap (10s), so a misconfigured or hostile server can't park a call for minutes.
+
+### Docs
+- Codex setup walkthrough in the README.
+
+## [0.9.3] - 2026-07-01
+
+### Security
+- **macOS: no more keychain prompts on update.** Secrets now live in the macOS
+  data-protection keychain under a team-scoped shared access group, and the gateway
+  ships as a nested notarized helper that shares that group. The gateway reads the
+  secrets the app saved with no password prompt, even across app updates (the repeated
+  "Conduit wants to use your confidential information" dialog is gone). Secrets still
+  never touch disk.
+
+### Added
+- **Quarantine-on-drift.** High-risk tool-definition changes (a poisoned definition, or
+  a destructive tool that changed or newly appeared) are blocked until you re-approve.
+- **Headless encrypted-file secret backend** (`CONDUIT_SECRET_KEY`) for server/self-host
+  use where no OS keychain is available.
+
+### Changed
+- Teams pricing is $12/seat (was $20). Smaller initial bundle via code-splitting.
+
+## [0.9.2] - 2026-06-30
+
+### Added
+- **Catalog: configure-on-add** (enter keys while adding a server), **self-hosted
+  servers** (n8n, Langfuse), and more entries (DataForSEO, Chrome DevTools, Railway,
+  Twilio, Postiz).
+- **Per-call confirmation for destructive tools.**
+- **Paste a config snippet** to auto-fill the Add Server dialog.
+
+### Fixed
+- Remote servers refresh an expired OAuth token on a mid-session 401 and retry, no manual
+  reconnect.
+- Teams only soft-syncs servers the member opts into (no silent RCE from team config).
+
 ## [0.9.1] - 2026-06-29
 
 ### Added

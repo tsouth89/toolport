@@ -136,7 +136,7 @@ and refreshes too.
 
 ## Supported clients
 
-Conduit auto-detects these **19 AI clients**, installs the gateway into each with one
+Conduit auto-detects these **20 AI clients**, installs the gateway into each with one
 click, and can import a client's existing servers. It writes the config file shown
 below for you, so you never have to edit these by hand.
 
@@ -148,6 +148,7 @@ below for you, so you never have to edit these by hand.
 | VS Code | `<config>/Code/User/mcp.json` | JSON (`servers`) |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | JSON (`mcpServers`) |
 | Codex | `~/.codex/config.toml` | TOML (`mcp_servers`) |
+| Continue | `~/.continue/config.yaml` | YAML (`mcpServers`) |
 | Antigravity | `~/.gemini/config/mcp_config.json` | JSON (`mcpServers`) |
 | Gemini CLI | `~/.gemini/settings.json` | JSON (`mcpServers`) |
 | Cline | `<config>/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` | JSON (`mcpServers`) |
@@ -294,18 +295,18 @@ The frontend is typechecked with `npx tsc --noEmit`.
   releases bundle it, so installed users never hit this.
 - **Repeated macOS keychain prompts / "could not read secret from the keychain"
   in dev.** An unsigned dev build gets an unstable code-signing identity, so the
-  keychain re-prompts or denies reads. A signed release fixes this; it is a
-  dev-only artifact.
+  keychain re-prompts or denies reads. Signed release builds (v0.9.3+) don't: they
+  store secrets in the macOS data-protection keychain under a shared access group,
+  so the gateway reads them with no prompt. This is a dev-only artifact.
 - **"could not read/store secret" on Linux.** Secret storage uses the freedesktop
   Secret Service (libsecret), provided by GNOME Keyring, KWallet, or similar. A
   headless box or a session without a running keyring daemon has nowhere to store
   secrets. Run Conduit in a desktop session, or install and unlock a keyring
   (e.g. `gnome-keyring`).
-- **macOS keychain prompt the first time the gateway runs.** When a client spawns
-  the gateway and it reads a saved key, macOS asks for keychain access ("Conduit
-  wants to use ..."). Click **Always Allow** once and it won't ask again. (The app
-  and the gateway are separate signed binaries today; a future release will share
-  keychain access so this prompt goes away.)
+- **macOS keychain and the gateway (v0.9.3+).** The app and the separately-signed
+  gateway share a team-scoped keychain access group, so the gateway reads the
+  secrets the app saved with no prompt, even across app updates. (Earlier releases
+  showed a one-time "Always Allow" prompt; on current signed builds it's gone.)
 - **VS Code: the conduit server doesn't start automatically.** VS Code may require
   you to click **Start Server** on the conduit MCP entry the first time, that's VS
   Code's own MCP handling, not Conduit. After that it reconnects on its own.

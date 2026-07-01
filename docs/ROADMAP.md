@@ -7,9 +7,10 @@ that exposes 3 meta-tools the agent searches on demand, so context stays flat:
 measured ~90% fewer tokens at the same task success. This document is the working
 spec, capturing the architecture decision and the build order.
 
-**Status (2026-06-28):** v0.7.0 published. Signed/notarized macOS (Apple Silicon +
-Intel), Windows (Azure Trusted Signing), Linux (deb/AppImage) via a tag-triggered
-pipeline + in-app auto-updater. 19 clients. Shipping: lazy discovery, OAuth/key auth
+**Status (2026-07-01):** v0.9.4 published. Signed/notarized macOS (Apple Silicon +
+Intel, data-protection keychain + nested gateway, no keychain prompts on update),
+Windows (Azure Trusted Signing), Linux (deb/AppImage) via a tag-triggered pipeline +
+in-app auto-updater. 20 clients. Shipping: lazy discovery, OAuth/key auth
 with live propagation, catalog, import/migrate, per-tool + destructive-tool
 governance, audit log, resources/prompts proxying, tool playground, semantic search,
 rug-pull + injection + agentjacking detection, result-shaping Tier 1. **v0.7.0 made
