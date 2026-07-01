@@ -17,7 +17,20 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use crate::downstream::{backoff_delay, DownstreamServer, TransportError, HTTP_MAX_RETRIES};
+use crate::downstream::{
+    backoff_delay, DownstreamServer, TransportError, HTTP_MAX_RETRIES, HTTP_RETRY_CAP,
+};
+
+/// The delay before a retry attempt. Prefers a server-advertised `Retry-After`,
+/// else our exponential backoff, but never longer than `HTTP_RETRY_CAP` so a
+/// downstream advertising `Retry-After: 3600` can't pin the calling agent's
+/// thread. Retries are bounded, so if the server is still limiting past the cap
+/// the loop exhausts and surfaces the error to the caller.
+fn retry_wait(retry_after: Option<std::time::Duration>, attempt: u32) -> std::time::Duration {
+    retry_after
+        .unwrap_or_else(|| backoff_delay(attempt))
+        .min(HTTP_RETRY_CAP)
+}
 
 /// Rewrite a name segment to the function-name charset clients accept
 /// (`[A-Za-z0-9_]`); every other character becomes `_`.
@@ -370,7 +383,7 @@ impl Router {
             match result {
                 Ok(v) => return Ok(v),
                 Err(TransportError::Retry { retry_after, message }) if attempt < HTTP_MAX_RETRIES => {
-                    let wait = retry_after.unwrap_or_else(|| backoff_delay(attempt));
+                    let wait = retry_wait(retry_after, attempt);
                     eprintln!("conduit: retrying downstream call after {wait:?}: {message}");
                     std::thread::sleep(wait);
                     attempt += 1;
@@ -438,6 +451,21 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn retry_wait_clamps_large_retry_after() {
+        // A downstream advertising a huge Retry-After is clamped to our cap so it
+        // can't pin the calling thread.
+        assert_eq!(retry_wait(Some(Duration::from_secs(3600)), 0), HTTP_RETRY_CAP);
+        // A reasonable Retry-After under the cap is honored as-is.
+        assert_eq!(
+            retry_wait(Some(Duration::from_secs(2)), 0),
+            Duration::from_secs(2)
+        );
+        // With no Retry-After, it falls back to the exponential backoff schedule.
+        assert_eq!(retry_wait(None, 0), backoff_delay(0));
+        assert_eq!(retry_wait(None, 1), backoff_delay(1));
+    }
 
     #[test]
     fn inline_refs_resolves_defs() {
