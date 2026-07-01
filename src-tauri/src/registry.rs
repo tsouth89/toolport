@@ -171,6 +171,14 @@ pub struct Registry {
     /// Detection + labeling, never blocks. On by default.
     #[serde(default = "default_true")]
     pub content_defense: bool,
+    /// Live request/response inspection: when true, the gateway captures each tool
+    /// call's arguments and result into a small, separate, ephemeral local ring
+    /// (`inspect.jsonl`, last 50 calls, each body size-capped) so the Activity view
+    /// can show them. OFF by default and never touches the governance audit log,
+    /// which stays free of args/results. This is the ONE place args/results are
+    /// captured, and only on the user's machine.
+    #[serde(default)]
+    pub live_inspect: bool,
     /// Optional semantic re-ranking for tool search (blends embedding similarity
     /// into the lexical ranking). Off by default; when off or unconfigured, search
     /// is pure lexical exactly as before.
@@ -268,6 +276,7 @@ impl Default for Registry {
             allow_agent_control: false,
             integrity_check: true,
             content_defense: true,
+            live_inspect: false,
             semantic_search: SemanticSettings::default(),
             team: None,
             result_budgets: HashMap::new(),
@@ -450,6 +459,13 @@ impl Registry {
     /// Set lazy discovery mode (gateway exposes meta-tools vs the full catalog).
     pub fn set_lazy_discovery(&mut self, lazy: bool) {
         self.lazy_discovery = lazy;
+    }
+
+    /// Turn live request/response inspection on or off. When on, the gateway
+    /// captures each tool call's args + result into the ephemeral `inspect.jsonl`
+    /// ring; when off, nothing is captured and no inspect file is written.
+    pub fn set_live_inspect(&mut self, on: bool) {
+        self.live_inspect = on;
     }
 
     pub fn add_profile(&mut self, name: &str) -> String {

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Bot, Check, Copy, Globe, Layers, ShieldAlert, ShieldCheck, ShieldX, Trash2, X } from "lucide-react";
+import { Activity, Bot, Check, Copy, Globe, Layers, ShieldAlert, ShieldCheck, ShieldX, Trash2, X } from "lucide-react";
 import { toastError } from "@/lib/toast";
 import {
   addHttpClient,
+  clearInspectLog,
   httpBridgeStatus,
   listQuarantined,
   releaseQuarantine,
@@ -11,6 +12,7 @@ import {
   setConfirmDestructive,
   setDenyDestructive,
   setLazyDiscovery,
+  setLiveInspect,
   setQuarantineOnDrift,
   startHttpBridge,
   stopHttpBridge,
@@ -40,6 +42,7 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const confirmDestructive = registry?.confirmDestructive ?? false;
   const allowAgentControl = registry?.allowAgentControl ?? false;
   const quarantineOnDrift = registry?.quarantineOnDrift ?? false;
+  const liveInspect = registry?.liveInspect ?? false;
   const [busy, setBusy] = useState(false);
   const [quarantined, setQuarantined] = useState<QuarantinedTool[]>([]);
   const [bridge, setBridge] = useState<HttpBridgeStatus | null>(null);
@@ -132,6 +135,21 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
       }
     };
 
+  // Live inspection needs a step the plain `apply` helper doesn't: when turned OFF,
+  // clear the ephemeral capture ring so nothing lingers on disk.
+  const applyLiveInspect = async (on: boolean) => {
+    setBusy(true);
+    try {
+      const reg = await setLiveInspect(on);
+      if (!on) await clearInspectLog();
+      onRegistryChange(reg);
+    } catch (e) {
+      toastError(`Couldn't update the setting: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggle = (
     Icon: typeof Layers,
     on: boolean,
@@ -200,6 +218,14 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           "Allow agent control",
           "Let an agent turn servers on/off (the block above stays yours)",
           apply(setAllowAgentControl),
+        )}
+        {toggle(
+          Activity,
+          liveInspect,
+          "text-info",
+          "Live request/response inspection",
+          "Off by default. While on, Conduit captures each tool call's arguments and results to a small local, ephemeral buffer (the last 50 calls) so you can inspect them in Activity. This is separate from the audit log, never leaves your machine, and is cleared when you turn it off or restart the gateway.",
+          applyLiveInspect,
         )}
         {quarantined.length > 0 && (
           <div className="flex flex-col gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5">

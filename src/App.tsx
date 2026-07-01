@@ -512,7 +512,7 @@ function App() {
                 }
               >
               {view === "activity" ? (
-                <ActivityView refreshKey={activityKey} />
+                <ActivityView refreshKey={activityKey} registry={registry} />
               ) : view === "catalog" ? (
                 <CatalogView registry={registry} onAdded={setRegistry} />
               ) : view === "playground" ? (

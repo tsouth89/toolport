@@ -6,6 +6,7 @@ pub mod audit;
 pub mod catalog;
 pub mod clients;
 pub mod downstream;
+pub mod inspect;
 pub mod integrity;
 pub mod oauth;
 pub mod registry;
@@ -821,6 +822,34 @@ fn set_confirm_destructive(state: State<RegistryState>, confirm: bool) -> Result
     Ok(reg.clone())
 }
 
+/// Toggle live request/response inspection. When enabled, the gateway captures each
+/// tool call's args + result into a small, separate, ephemeral local ring
+/// (`inspect.jsonl`, last 50 calls, each body size-capped) that the Activity view can
+/// show. Off by default; the governance audit log is never touched by this. Turning
+/// it off in the UI should also clear the ring (see `clear_inspect_log`).
+#[tauri::command]
+fn set_live_inspect(state: State<RegistryState>, enabled: bool) -> Result<Registry, String> {
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.set_live_inspect(enabled);
+    registry::save(&reg)?;
+    Ok(reg.clone())
+}
+
+/// The most recent live-inspection captures (newest first): each tool call's args and
+/// result, only present while live inspection has been on. Empty when off/unused.
+#[tauri::command]
+fn get_inspect_log(limit: usize) -> Vec<serde_json::Value> {
+    inspect::read_recent(limit)
+}
+
+/// Clear the live-inspection ring (delete `inspect.jsonl`), so no captured args/results
+/// linger. Called when the user turns live inspection off.
+#[tauri::command]
+fn clear_inspect_log() -> Result<(), String> {
+    inspect::clear();
+    Ok(())
+}
+
 /// Toggle quarantine-on-drift. When enabled, the gateway hides and blocks a high-risk
 /// tool (poisoned definition, or a destructive tool whose definition changed/appeared)
 /// that drifts from its pinned baseline, until the user re-approves it.
@@ -1633,6 +1662,9 @@ pub fn run() {
             set_tool_enabled,
             set_deny_destructive,
             set_confirm_destructive,
+            set_live_inspect,
+            get_inspect_log,
+            clear_inspect_log,
             set_quarantine_on_drift,
             list_quarantined,
             release_quarantine,

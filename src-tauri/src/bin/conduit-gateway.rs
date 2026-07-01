@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 use conduit_lib::audit;
 use conduit_lib::clients;
 use conduit_lib::downstream::{DownstreamServer, StdioTransport, PROTOCOL_VERSION};
+use conduit_lib::inspect;
 use conduit_lib::integrity;
 use conduit_lib::registry::{self, Registry, ServerEntry};
 use conduit_lib::remote;
@@ -1615,6 +1616,15 @@ fn handle_request(
                 }
             }
 
+            // Live inspection (opt-in, off by default): capture the raw request
+            // args now, only when enabled, so the response can be paired with them
+            // below. When off, nothing is cloned and nothing is ever captured.
+            let inspect_args = if reg.live_inspect {
+                Some(arguments.clone())
+            } else {
+                None
+            };
+
             let started = Instant::now();
             match router.route_call(name, arguments) {
                 Ok(mut result) => {
@@ -1631,6 +1641,14 @@ fn handle_request(
                         Some(content_text(&result))
                     };
                     audit::record_timed(srv, tool, ok, Some(ms), err.as_deref(), router.current_client());
+                    // Live inspection: capture the RAW result here, before content
+                    // defense and shaping rewrite it, so the inspector shows exactly
+                    // what the server returned. Only runs when live_inspect is on
+                    // (inspect_args is Some only then). Attributed to the same client
+                    // as the audit line.
+                    if let Some(req) = &inspect_args {
+                        inspect::record(router.current_client(), srv, tool, req, &result, ok, ms);
+                    }
                     // Content defense: scan this untrusted tool output for injection
                     // and label any flagged text as data before it reaches the agent.
                     if reg.content_defense {
@@ -1664,6 +1682,11 @@ fn handle_request(
                 Err(e) => {
                     let ms = started.elapsed().as_millis() as u64;
                     audit::record_timed(srv, tool, false, Some(ms), Some(&e), router.current_client());
+                    // Live inspection: capture the failed call too, with the error
+                    // as the response body. Only when live_inspect is on.
+                    if let Some(req) = &inspect_args {
+                        inspect::record(router.current_client(), srv, tool, req, &json!({ "error": e }), false, ms);
+                    }
                     let recovery = recovery_hint(cached, srv);
                     Some(success(
                         id,

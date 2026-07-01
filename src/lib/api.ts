@@ -6,6 +6,7 @@ import type {
   CatalogEntry,
   DetectedClient,
   ImportItem,
+  InspectEntry,
   McpPrompt,
   McpResource,
   McpTool,
@@ -161,6 +162,23 @@ export function setDenyDestructive(deny: boolean): Promise<Registry> {
 /** Toggle per-call confirmation for destructive tools (intercept + preview + token). */
 export function setConfirmDestructive(confirm: boolean): Promise<Registry> {
   return invoke<Registry>("set_confirm_destructive", { confirm });
+}
+
+/** Toggle live request/response inspection (opt-in, off by default). When on, the
+ * gateway captures each tool call's args + result into a small ephemeral local ring. */
+export function setLiveInspect(enabled: boolean): Promise<Registry> {
+  return invoke<Registry>("set_live_inspect", { enabled });
+}
+
+/** Recent live-inspection captures (newest first): each call's args + result. Empty
+ * unless live inspection has been on. */
+export function getInspectLog(limit = 50): Promise<InspectEntry[]> {
+  return invoke<InspectEntry[]>("get_inspect_log", { limit });
+}
+
+/** Clear the live-inspection ring so no captured args/results linger. */
+export function clearInspectLog(): Promise<void> {
+  return invoke<void>("clear_inspect_log");
 }
 
 /** Toggle quarantine-on-drift: block a high-risk tool that drifted until re-approved. */

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Activity,
   AlertTriangle,
   CheckCircle2,
   ChevronRight,
@@ -16,6 +17,7 @@ import { toastError } from "@/lib/toast";
 import {
   getAuditLog,
   getAuditStats,
+  getInspectLog,
   getSavingsSummary,
   getSecurityEvents,
   type SecurityEvent,
@@ -23,6 +25,8 @@ import {
 import type {
   AuditEntry,
   AuditStats,
+  InspectEntry,
+  Registry,
   SavingsSummary,
   ServerStat,
 } from "@/lib/types";
@@ -531,7 +535,142 @@ function StatsPanel({ stats }: { stats: AuditStats }) {
   );
 }
 
-export function ActivityView({ refreshKey }: { refreshKey: number }) {
+/** Pretty-print a captured body. A truncation marker (a plain string like
+ * "<truncated N bytes>") is shown as-is; everything else is JSON-formatted. */
+function fmtBody(v: unknown): string {
+  if (typeof v === "string") return v;
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+
+/** One captured call. Expands to show the pretty-printed request + response JSON. */
+function InspectRow({ e }: { e: InspectEntry }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-md border border-border/50 text-sm">
+      <div
+        className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/30"
+        onClick={() => setOpen((o) => !o)}
+        role="button"
+        aria-expanded={open}
+        tabIndex={0}
+      >
+        <ChevronRight
+          className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${
+            open ? "rotate-90" : ""
+          }`}
+        />
+        {e.ok ? (
+          <CheckCircle2 className="size-4 shrink-0 text-success" />
+        ) : (
+          <XCircle className="size-4 shrink-0 text-destructive" />
+        )}
+        <span className="min-w-0 truncate font-medium">{e.server}</span>
+        <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+          {e.tool}
+        </span>
+        {e.client && (
+          <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+            {e.client}
+          </span>
+        )}
+        <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
+          {fmtMs(e.durationMs ?? null)}
+        </span>
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {new Date(e.ts).toLocaleTimeString()}
+        </span>
+      </div>
+      {open && (
+        <div className="border-t border-border/50 bg-muted/20 px-3 py-2 pl-9">
+          <div className="mb-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+            Request
+          </div>
+          <pre className="mb-3 overflow-x-auto rounded bg-background/60 p-2 font-mono text-xs whitespace-pre-wrap break-words">
+            {fmtBody(e.request)}
+          </pre>
+          <div className="mb-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+            Response
+          </div>
+          <pre className="overflow-x-auto rounded bg-background/60 p-2 font-mono text-xs whitespace-pre-wrap break-words">
+            {fmtBody(e.response)}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Collapsible live inspector: a local "network tab" for MCP. Only rendered while
+ * live inspection is on. Lists recent captured calls, each expandable to its raw
+ * request + response JSON. Ephemeral, local, opt-in. */
+function LiveInspector({ refreshKey }: { refreshKey: number }) {
+  const [entries, setEntries] = useState<InspectEntry[]>([]);
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    getInspectLog(50)
+      .then((e) => alive && setEntries(e))
+      .catch(() => alive && setEntries([]));
+    return () => {
+      alive = false;
+    };
+  }, [refreshKey]);
+
+  return (
+    <div className="mb-6 rounded-lg border border-info/30 bg-info/[0.04] p-4">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <Activity className="size-4 shrink-0 text-info" />
+        <h3 className="text-sm font-medium">Live inspector</h3>
+        <span className="rounded-full bg-info/15 px-1.5 py-0.5 text-xs font-medium text-info">
+          {entries.length}
+        </span>
+        <ChevronRight
+          className={`ml-auto size-4 text-muted-foreground transition-transform ${
+            open ? "rotate-90" : ""
+          }`}
+        />
+      </button>
+      {open && (
+        <>
+          <p className="mt-2 mb-3 max-w-2xl text-xs text-muted-foreground">
+            Ephemeral, local, opt-in. While live inspection is on, Conduit keeps the
+            last 50 tool calls' arguments and results here so you can inspect them.
+            This buffer is separate from the audit log, never leaves your machine, and
+            clears when you turn inspection off or restart the gateway.
+          </p>
+          {entries.length === 0 ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              No calls captured yet. Run a tool through Conduit and it'll show here.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {entries.map((e, i) => (
+                <InspectRow key={`${e.ts}-${e.server}-${e.tool}-${i}`} e={e} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+export function ActivityView({
+  refreshKey,
+  registry,
+}: {
+  refreshKey: number;
+  registry: Registry | null;
+}) {
   const [entries, setEntries] = useState<AuditEntry[] | null>(null);
   const [stats, setStats] = useState<AuditStats | null>(null);
   const [savings, setSavings] = useState<SavingsSummary | null>(null);
@@ -594,6 +733,7 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
       ) : (
         <SecurityResting />
       )}
+      {registry?.liveInspect ? <LiveInspector refreshKey={refreshKey} /> : null}
       {savings && savings.tokensSaved > 0 ? (
         <SavingsBanner savings={savings} />
       ) : null}

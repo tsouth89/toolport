@@ -72,6 +72,20 @@ export interface AuditEntry {
   client?: string;
 }
 
+/** One live-inspection capture: a tool call's request args and response, plus timing.
+ * Only present while live inspection is on. `request`/`response` are the raw captured
+ * bodies (or a "<truncated N bytes>" marker string when the body exceeded the size cap). */
+export interface InspectEntry {
+  ts: number;
+  client?: string;
+  server: string;
+  tool: string;
+  request: unknown;
+  response: unknown;
+  ok: boolean;
+  durationMs?: number;
+}
+
 export interface ProbeResult {
   serverId: string;
   ok: boolean;
@@ -294,6 +308,10 @@ export interface Registry {
   denyDestructive?: boolean;
   /** Per-call confirmation: intercept destructive tools with a preview + token. */
   confirmDestructive?: boolean;
+  /** Live request/response inspection: capture each tool call's args + result into a
+   * small, separate, ephemeral local ring (last 50 calls) for the Activity inspector.
+   * Off by default; never touches the audit log. */
+  liveInspect?: boolean;
   /** Quarantine-on-drift: block a high-risk tool that changed until re-approved. */
   quarantineOnDrift?: boolean;
   /** Global switch: expose 3 meta-tools instead of the full catalog. */
