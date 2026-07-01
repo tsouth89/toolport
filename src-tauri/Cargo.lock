@@ -596,6 +596,7 @@ dependencies = [
  "getrandom 0.2.17",
  "json5",
  "keyring",
+ "regex",
  "security-framework 3.7.0",
  "security-framework-sys",
  "serde",
