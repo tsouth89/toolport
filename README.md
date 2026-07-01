@@ -164,6 +164,17 @@ below for you, so you never have to edit these by hand.
 
 `<config>` is your OS application-config dir (`%APPDATA%` on Windows, `~/Library/Application Support` on macOS, `~/.config` on Linux); `<data>` is the data dir (`~/.local/share` on Linux, the same as `<config>` elsewhere). Zed and Goose paths vary slightly by OS; Conduit resolves the right one automatically.
 
+### Codex setup walkthrough
+
+Use this when Codex has already created its `~/.codex/` directory.
+
+1. In Conduit, add or enable the MCP servers you want Codex to use.
+2. Open **Clients**, select **Codex**, optionally choose a profile, and click **Connect to Conduit**.
+3. Conduit updates `~/.codex/config.toml` with a single `[mcp_servers.conduit]` entry. That entry runs the resolved `conduit-gateway` binary; existing Codex TOML keys and other MCP servers are preserved, and an existing config is backed up before the write.
+4. Start a new Codex session so it re-reads the config. In Conduit, the Codex row changes to **connected to Conduit**; in Codex, Conduit-managed tools are served through the one `conduit` MCP server. With lazy discovery enabled, Codex gets Conduit's compact search tools instead of every downstream tool up front.
+
+Gotcha: when running Conduit from source, build the gateway first with `npm run build:gateway`. The desktop dev server does not build the separate binary that Codex spawns, so Codex will report the gateway as missing until that binary exists.
+
 ### Open WebUI and other HTTP/OpenAPI consumers
 
 The gateway speaks HTTP/OpenAPI natively, so Open WebUI (and any OpenAPI tool
