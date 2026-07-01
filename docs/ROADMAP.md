@@ -20,10 +20,57 @@ token (closing a browser drive-by CSRF), and self-resolving multi-step tool call
 (an invented-ID guard that points the model at the right list/get tool). Live
 priorities are below.
 
-## What's next (live priorities, 2026-06-28)
+## Near-term priorities (2026-07-01)
+
+A competitive review reset the near-term order toward widening the two structural
+moats (zero-infra local-first + tool-supply-chain security) and reaching parity on
+a few governance/observability items other gateways have. (Detailed competitive
+notes live in the internal `docs/COMPETITIVE.md`.)
+
+**In flight**
+- Teams **org screening policy** (security-governance Phase 1): tighten-only
+  `forceContentDefense` / `forceQuarantineOnDrift` pushed from the org config.
+  Plan in `docs/drafts/parry-teams-plan.md`.
+
+**Tier 1 - security + cheap parity (do first)**
+- [x] **Stdio spawn hardening.** Refuse code-smuggling / container-escape args
+      (interpreter inline-eval + module-preload, docker `--privileged` / host-mount /
+      `--cap-add` / host-namespace) before spawning a stdio server, so a
+      booby-trapped (team- or registry-sourced) config can't turn a benign-looking
+      launcher into arbitrary code execution. `screen_spawn_command` in
+      `downstream.rs`, on every spawn path. (S)
+- [ ] **Identity attribution in the audit line.** The gateway already resolves the
+      calling client/profile (and the HTTP bearer client); stamp it into `audit.rs`
+      records + a per-caller filter in Activity. (S-M)
+- [ ] **Tool overrides (rename / re-describe / param-pin).** Rewrite/append a tool
+      description and pin/override a param default per server. High user value, and
+      it lets a user neutralize a poisoned description in place (reinforces content
+      defense). (M)
+
+**Tier 2 - parity on real gaps**
+- [ ] Tool Groups (cross-server reusable collections) + allow/block ACL with an
+      explicit `default-allow`/`default-block` posture per client, generalizing
+      profiles. (M)
+- [ ] **Opt-in** OTel/Prometheus exporter (`/metrics` or OTLP push), OFF by default
+      so zero-infra stays the default experience; keep the in-app dashboard primary. (M)
+- [ ] Finish native **streamable-HTTP** upstream transport (OpenAPI HTTP mode already
+      ships) so remote/network clients connect natively. (M)
+
+**Strategic**
+- [ ] **Human-in-the-loop approval queue.** Pause a high-stakes / destructive call
+      for an in-app approve/deny, vs today's binary deny-destructive. Fits
+      local-first (gateway blocks, app prompts). (S-M)
+- [ ] **Named retention / data-handling statement** (docs + in-app one-liner):
+      payloads never leave the machine; we log metadata, not bodies. Structurally
+      true today, just never stated. (S)
+- Teams enterprise (SSO/IdP, central catalog, approval workflows) stays
+  **Teams-only** and selective; not in the local app.
+
+## What's next (backlog, from the 2026-06-28 audit)
 
 Prioritized after v0.7.0 and a fresh-eyes audit (code/tech-debt, first-run UX,
 HTTP/security surface). Ordered by impact within each track. (S/M/L = effort.)
+The 2026-07-01 block above supersedes the ordering; these remain the detailed backlog.
 
 ### Security (most shipped in v0.7.0; residuals)
 - [x] HTTP bridge **bearer token** (required, OPTIONS preflight exempt), fail-closed

