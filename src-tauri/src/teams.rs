@@ -212,7 +212,8 @@ pub fn push_current() -> Result<i64, String> {
 }
 
 /// Build the config an admin pushes: the user's own servers (not team-sourced), with
-/// env keys but no secret values, plus the destructive-tool policy flag.
+/// env keys but no secret values, plus the destructive-tool policy flag and the
+/// org screening policy.
 fn team_export(reg: &Registry) -> Value {
     let servers: Vec<Value> = reg
         .servers
@@ -231,7 +232,19 @@ fn team_export(reg: &Registry) -> Value {
             })
         })
         .collect();
-    serde_json::json!({ "servers": servers, "denyDestructive": reg.deny_destructive })
+    serde_json::json!({
+        "servers": servers,
+        "denyDestructive": reg.deny_destructive,
+        // Org screening policy. Emitted on every push so a desktop push never silently
+        // wipes a dashboard-set policy. Each flag is tighten-only on the member side:
+        // `true` forces the corresponding local safety toggle on, `false`/absent is a
+        // no-op that can never turn a member's toggle off. Shape is intentionally
+        // extensible (e.g. a future `sensitivity` field) without a breaking change.
+        "screeningPolicy": {
+            "forceContentDefense": reg.content_defense,
+            "forceQuarantineOnDrift": reg.quarantine_on_drift,
+        },
+    })
 }
 
 // --- merge (pure, testable) ---
@@ -244,13 +257,14 @@ fn is_team_server(s: &ServerEntry, tag: &str) -> bool {
     s.source.as_deref() == Some(tag)
 }
 
-/// Merge a team config (registry-format JSON `{ servers, denyDestructive? }`) into the
-/// local registry. Team servers are tagged `source = "team:<id>"`, their ids prefixed
+/// Merge a team config (registry-format JSON `{ servers, denyDestructive?, screeningPolicy? }`)
+/// into the local registry. Team servers are tagged `source = "team:<id>"`, their ids prefixed
 /// `team_`, and enabled in the active profile so they're actually exposed. Re-running
 /// REPLACES this team's servers (a removed team server disappears) while leaving the
-/// member's own servers and profiles untouched. A team `denyDestructive: true` is
-/// adopted: policy can only tighten safety, never loosen it. Returns how many servers
-/// were merged and how many were skipped for safety (local/stdio or private-URL entries).
+/// member's own servers and profiles untouched. A team `denyDestructive: true` and any
+/// `screeningPolicy` force-flags are adopted tighten-only: policy can only raise safety,
+/// never loosen it. Returns how many servers were merged and how many were skipped for
+/// safety (local/stdio or private-URL entries).
 /// Outcome of merging a team config: `applied` = ready remote servers (auto-enabled),
 /// `review` = local-command or LAN servers added but left OFF until the member opts in,
 /// `blocked` = link-local / cloud-metadata URLs refused outright.
@@ -348,6 +362,19 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
     // 4. Policy can only tighten safety.
     if team_cfg.get("denyDestructive").and_then(Value::as_bool) == Some(true) {
         reg.deny_destructive = true;
+    }
+
+    // 5. Screening policy is tighten-only as well: the org can force content defense and
+    //    drift-quarantine ON, but a member can never be loosened by a team config. A
+    //    missing policy or a `false` flag is a no-op (it does not turn a member's own
+    //    toggle off), so this only ever raises the member's safety posture.
+    if let Some(sp) = team_cfg.get("screeningPolicy") {
+        if sp.get("forceContentDefense").and_then(Value::as_bool) == Some(true) {
+            reg.content_defense = true;
+        }
+        if sp.get("forceQuarantineOnDrift").and_then(Value::as_bool) == Some(true) {
+            reg.quarantine_on_drift = true;
+        }
     }
 
     outcome
@@ -553,6 +580,55 @@ mod tests {
         assert!(r.deny_destructive, "team policy tightened safety");
         apply_team_config(&mut r, "t1", &json!({ "servers": [] }));
         assert!(r.deny_destructive, "absence of the flag never loosens an existing lock");
+    }
+
+    #[test]
+    fn screening_policy_can_tighten_but_never_loosen() {
+        let mut r = base_registry();
+        // Member starts with content defense off and drift-quarantine off.
+        r.content_defense = false;
+        r.quarantine_on_drift = false;
+
+        // Org policy forces both on: the member's posture is raised.
+        apply_team_config(
+            &mut r,
+            "t1",
+            &json!({ "servers": [], "screeningPolicy": {
+                "forceContentDefense": true,
+                "forceQuarantineOnDrift": true,
+            }}),
+        );
+        assert!(r.content_defense, "org policy forced content defense on");
+        assert!(r.quarantine_on_drift, "org policy forced drift-quarantine on");
+
+        // A policy with the flags false, or absent entirely, never turns them back off.
+        apply_team_config(
+            &mut r,
+            "t1",
+            &json!({ "servers": [], "screeningPolicy": {
+                "forceContentDefense": false,
+                "forceQuarantineOnDrift": false,
+            }}),
+        );
+        assert!(r.content_defense, "false flag never loosens an existing lock");
+        assert!(r.quarantine_on_drift, "false flag never loosens an existing lock");
+
+        apply_team_config(&mut r, "t1", &json!({ "servers": [] }));
+        assert!(r.content_defense, "absent policy never loosens an existing lock");
+        assert!(r.quarantine_on_drift, "absent policy never loosens an existing lock");
+    }
+
+    #[test]
+    fn team_export_round_trips_screening_policy() {
+        // The pushed config must carry the policy so a desktop push never wipes it, and
+        // it must reflect the admin's own toggles.
+        let mut r = base_registry();
+        r.content_defense = true;
+        r.quarantine_on_drift = true;
+        let cfg = team_export(&r);
+        let sp = cfg.get("screeningPolicy").expect("policy is emitted");
+        assert_eq!(sp.get("forceContentDefense").and_then(Value::as_bool), Some(true));
+        assert_eq!(sp.get("forceQuarantineOnDrift").and_then(Value::as_bool), Some(true));
     }
 
     #[test]
