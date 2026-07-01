@@ -299,13 +299,20 @@ pub fn screen_spawn_command(command: &str, args: &[String]) -> Result<(), String
     }
 }
 
-/// Lowercased file stem of a command path: `C:\\tools\\Node.EXE` -> `node`.
+/// Lowercased final path segment without its extension, splitting on BOTH `/` and
+/// `\` on every OS. `std::path` only treats `\` as a separator on Windows, so a
+/// Windows-style path would slip this check on Linux/macOS; doing it by hand keeps
+/// the guard (and its tests) platform-independent. `C:\\tools\\Node.EXE` and
+/// `/usr/bin/node` both -> `node`.
 fn command_basename(command: &str) -> String {
-    std::path::Path::new(command)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(command)
-        .to_ascii_lowercase()
+    let last = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    // Strip a trailing extension (`.exe`, `.js`, ...) but keep dotless names intact.
+    let stem = last
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(last);
+    stem.to_ascii_lowercase()
 }
 
 /// The first arg (returned verbatim for the error) that case-insensitively equals
