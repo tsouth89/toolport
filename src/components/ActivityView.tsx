@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronRight,
   ScrollText,
@@ -531,12 +532,25 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
   const [security, setSecurity] = useState<SecurityEvent[]>([]);
   const [dismissed, setDismissed] = useState<Set<string>>(loadDismissed);
   const [logOpen, setLogOpen] = useState(false);
+  // Distinguish a load FAILURE (gateway unreachable / audit log unreadable) from a
+  // genuinely empty log: both leave `entries` empty, but only one is an error. Without
+  // this, a first-run backend failure renders the friendly "No tool calls yet" state
+  // and hides that anything is wrong.
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     let alive = true;
     getAuditLog(200)
-      .then((e) => alive && setEntries(e))
-      .catch(() => alive && setEntries([]));
+      .then((e) => {
+        if (!alive) return;
+        setEntries(e);
+        setLoadError(false);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setEntries([]);
+        setLoadError(true);
+      });
     getAuditStats(2000)
       .then((s) => alive && setStats(s))
       .catch(() => alive && setStats(null));
@@ -594,6 +608,25 @@ export function ActivityView({ refreshKey }: { refreshKey: number }) {
         {banner}
         <div className="flex items-center justify-center py-24 text-sm text-muted-foreground">
           Loading activity…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError && entries.length === 0) {
+    return (
+      <div>
+        {banner}
+        <div className="flex flex-col items-center justify-center gap-3 py-24 text-center">
+          <AlertTriangle className="size-10 text-destructive/70" />
+          <div>
+            <p className="font-medium">Couldn't load activity</p>
+            <p className="max-w-md text-sm text-muted-foreground">
+              Conduit couldn't reach the gateway or read the audit log. This is
+              not an empty log, if the gateway isn't running, start it and
+              refresh.
+            </p>
+          </div>
         </div>
       </div>
     );
