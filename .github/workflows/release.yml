@@ -123,7 +123,7 @@ jobs:
           $account  = "${{ vars.AZURE_SIGNING_ACCOUNT }}";  if (-not $account)  { $account  = "southforgesigning" }
           $certProfile = "${{ vars.AZURE_SIGNING_PROFILE }}"
           if (-not $certProfile) { Write-Error "AZURE_SIGNING_PROFILE repo variable is not set (the certificate profile name)"; exit 1 }
-          $cmd = "trusted-signing-cli -e $endpoint -a $account -c $certProfile -d Conduit %1"
+          $cmd = "trusted-signing-cli -e $endpoint -a $account -c $certProfile -d Toolport %1"
           $conf = @{ bundle = @{ windows = @{ signCommand = $cmd } } } | ConvertTo-Json -Depth 5
           Set-Content -Path "src-tauri/tauri.signing.conf.json" -Value $conf -Encoding utf8
           "config_arg=--config src-tauri/tauri.signing.conf.json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -150,7 +150,7 @@ jobs:
       # macOS signing + packaging. Tauri built the app UNSIGNED above; this step
       # nests the gateway in its own .app, embeds the app + gateway provisioning
       # profiles, signs inside-out, notarizes + staples, builds + notarizes the
-      # dmg, and regenerates the updater artifact (`Conduit_<target>.app.tar.gz`
+      # dmg, and regenerates the updater artifact (`Toolport_<target>.app.tar.gz`
       # + .sig) over the re-signed app so auto-update keeps working. Each arch is
       # named by its target so latest.json can point at the right one.
       #
@@ -162,7 +162,7 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: bash scripts/macos-package-ci.sh
         env:
-          APP: src-tauri/target/${{ matrix.target }}/release/bundle/macos/Conduit.app
+          APP: src-tauri/target/${{ matrix.target }}/release/bundle/macos/Toolport.app
           TARGET: ${{ matrix.target }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -185,8 +185,8 @@ jobs:
             src-tauri/target/release/bundle/nsis/*-setup.exe.sig
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/*/release/bundle/macos/Conduit_*-apple-darwin.app.tar.gz
-            src-tauri/target/*/release/bundle/macos/Conduit_*-apple-darwin.app.tar.gz.sig
+            src-tauri/target/*/release/bundle/macos/Toolport_*-apple-darwin.app.tar.gz
+            src-tauri/target/*/release/bundle/macos/Toolport_*-apple-darwin.app.tar.gz.sig
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/appimage/*.AppImage.sig

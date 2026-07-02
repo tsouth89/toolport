@@ -4,7 +4,7 @@
 #
 # CI macOS sign + notarize + package for the keychain-access-group nested-gateway
 # build. Runs on a GitHub macOS runner AFTER `tauri build` has produced an
-# (unsigned) Conduit.app. It does everything Tauri's built-in macOS signing
+# (unsigned) Toolport.app. It does everything Tauri's built-in macOS signing
 # cannot: nest the gateway in its own .app, embed provisioning profiles, sign
 # inside-out, notarize, and regenerate the .dmg + updater artifact over the
 # re-signed app.
@@ -16,7 +16,7 @@
 # with Tauri and own the whole sign/notarize/package tail here.
 #
 # Required env:
-#   APP                         path to the built Conduit.app
+#   APP                         path to the built Toolport.app
 #   TARGET                      rust target triple (e.g. x86_64-apple-darwin); used for artifact names
 #   APPLE_CERTIFICATE           base64 of the "Developer ID Application" .p12
 #   APPLE_CERTIFICATE_PASSWORD  password for that .p12
@@ -40,7 +40,7 @@ die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 [[ "$(uname -s)" == "Darwin" ]] || die "macos-package-ci.sh must run on macOS"
 
-: "${APP:?APP (path to Conduit.app) is required}"
+: "${APP:?APP (path to Toolport.app) is required}"
 : "${TARGET:?TARGET (rust target triple) is required}"
 : "${APPLE_CERTIFICATE:?APPLE_CERTIFICATE is required}"
 : "${APPLE_CERTIFICATE_PASSWORD:?APPLE_CERTIFICATE_PASSWORD is required}"
@@ -116,7 +116,7 @@ APP="$APP" IDENTITY="$APPLE_SIGNING_IDENTITY" APP_PROFILE="$APP_PROFILE" GW_PROF
 #    zip; ditto --keepParent preserves the .app structure.
 # ---------------------------------------------------------------------------
 log "Notarizing the app"
-APP_ZIP="$WORK/Conduit-notarize.zip"
+APP_ZIP="$WORK/Toolport-notarize.zip"
 ditto -c -k --keepParent "$APP" "$APP_ZIP"
 xcrun notarytool submit "$APP_ZIP" \
   --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
@@ -132,9 +132,9 @@ xcrun stapler validate "$APP" || die "stapler validate failed on the app"
 log "Building + notarizing the dmg"
 DMG_DIR="$REPO_ROOT/src-tauri/target/$TARGET/release/bundle/dmg"
 mkdir -p "$DMG_DIR"
-DMG="$DMG_DIR/Conduit_${TARGET}.dmg"
+DMG="$DMG_DIR/Toolport_${TARGET}.dmg"
 rm -f "$DMG"
-hdiutil create -volname "Conduit" -srcfolder "$APP" -ov -format UDZO "$DMG"
+hdiutil create -volname "Toolport" -srcfolder "$APP" -ov -format UDZO "$DMG"
 codesign --force --timestamp -s "$APPLE_SIGNING_IDENTITY" "$DMG"
 xcrun notarytool submit "$DMG" \
   --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
@@ -149,8 +149,8 @@ xcrun stapler staple "$DMG"
 # ---------------------------------------------------------------------------
 log "Regenerating the updater artifact"
 MACOS_DIR="$REPO_ROOT/src-tauri/target/$TARGET/release/bundle/macos"
-TARBALL="$MACOS_DIR/Conduit_${TARGET}.app.tar.gz"
-rm -f "$MACOS_DIR/Conduit.app.tar.gz" "$MACOS_DIR/Conduit.app.tar.gz.sig" "$TARBALL" "$TARBALL.sig"
+TARBALL="$MACOS_DIR/Toolport_${TARGET}.app.tar.gz"
+rm -f "$MACOS_DIR/Toolport.app.tar.gz" "$MACOS_DIR/Toolport.app.tar.gz.sig" "$TARBALL" "$TARBALL.sig"
 ( cd "$MACOS_DIR" && tar -czf "$TARBALL" "$(basename "$APP")" )
 # `tauri signer sign` reads the key + password from the same env vars `tauri build`
 # uses; pass them explicitly so it never prompts.
