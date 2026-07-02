@@ -13,7 +13,7 @@
 //! - Watches the registry file and emits `notifications/tools/list_changed` on
 //!   change, so enabling/disabling a server applies live without a client restart
 //!   (on clients that honor it).
-//! - Lazy discovery: in lazy mode it advertises only a handful of meta-tools (`toolport_status`,
+//! - Lazy discovery: in lazy mode it advertises only 4 meta-tools (`toolport_status`,
 //!   `toolport_search_tools`, `toolport_call_tool`, `toolport_fetch_result`) instead of the full catalog; the
 //!   model searches and calls on demand, keeping context flat.
 //! - Records every tool call to a local audit log.
@@ -1318,7 +1318,7 @@ fn handle_request(
                 }
                 // Record what lazy discovery kept out of the client's context: the
                 // full catalog we'd otherwise serve (status + every downstream tool)
-                // minus these meta-tools. Estimating over the cached slice avoids
+                // minus these 4 meta-tools. Estimating over the cached slice avoids
                 // cloning the whole catalog on a serve.
                 let agg;
                 let catalog: &[Value] = if cached.is_empty() {
