@@ -11,4 +11,14 @@ ignore = [
     # Tracked in README "Known issues". Remove when Tauri's Linux stack adopts a
     # glib-0.20 base.
     "RUSTSEC-2024-0429",
+    # quick-xml DoS advisories (quadratic parse / unbounded namespace allocation on
+    # malicious XML input). quick-xml 0.39.4 is pulled in transitively by `plist`
+    # (via tauri-utils/tauri) and is used ONLY to parse the app's own bundle
+    # Info.plist at build/bundle time - trusted, first-party input, never
+    # attacker-controlled network data - so the denial-of-service vectors are not
+    # reachable in our usage. The fix needs quick-xml >=0.41, which the pinned
+    # `plist`/tauri-utils stack does not allow without moving the whole Tauri stack.
+    # Remove when that stack adopts quick-xml 0.41+.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
