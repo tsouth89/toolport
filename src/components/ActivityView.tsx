@@ -155,8 +155,10 @@ function renderKey(e: SecurityEvent): string {
 
 /** Each connected client runs its own gateway process, so a single server tool change
  * is flagged once PER client against the shared baseline, producing identical notices.
- * Collapse those: keep only the newest of any (type, server, tool, change) seen within a
- * short window, so genuinely-separate changes over time are preserved. */
+ * Collapse those: keep only the newest of any (type, server, tool, change, severity) seen
+ * within a short window, so genuinely-separate changes over time are preserved. Severity
+ * is part of the identity so a benign `info` revision can never collapse (and hide) a
+ * later `high` one on the same tool - that loud signal must survive the dedupe. */
 function dedupeSecurity(events: SecurityEvent[]): SecurityEvent[] {
   const WINDOW_MS = 10 * 60 * 1000;
   const newestFirst = [...events].sort((a, b) => b.ts - a.ts);
@@ -168,6 +170,7 @@ function dedupeSecurity(events: SecurityEvent[]): SecurityEvent[] {
         k.server === e.server &&
         k.tool === e.tool &&
         k.change === e.change &&
+        eventSeverity(k) === eventSeverity(e) &&
         Math.abs(k.ts - e.ts) <= WINDOW_MS,
     );
     if (!dupe) kept.push(e);

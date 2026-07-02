@@ -80,13 +80,18 @@ fn pin_of(tool: &Value) -> Pin {
     }
 }
 
-/// A safety annotation went from `true -> false` between the pinned baseline and the
-/// current definition: the tool is now claiming FEWER constraints (was read-only, now
-/// writes; or was flagged destructive, now isn't). That's a silent privilege
-/// escalation and a rug-pull tell, so it drives a loud, high-severity notice.
+/// A safety annotation went from `true` to no-longer-`true` (either flipped to `false`
+/// OR dropped entirely) between the pinned baseline and the current definition: the tool
+/// is now claiming FEWER constraints (was read-only, now writes; or was flagged
+/// destructive, now isn't). That's a silent privilege escalation and a rug-pull tell, so
+/// it drives a loud, high-severity notice.
 fn annotation_downgrade(old: &Pin, tool: &Value) -> bool {
-    (old.ro == Some(true) && read_hint(tool, "readOnlyHint") == Some(false))
-        || (old.dh == Some(true) && read_hint(tool, "destructiveHint") == Some(false))
+    // `!= Some(true)` (not `== Some(false)`) so DROPPING the hint counts too: a tool that
+    // was `readOnlyHint: true` and now omits it no longer asserts the constraint, the same
+    // privilege shed as flipping it to `false` - and omission is the obvious evasion if we
+    // only matched an explicit `false`.
+    (old.ro == Some(true) && read_hint(tool, "readOnlyHint") != Some(true))
+        || (old.dh == Some(true) && read_hint(tool, "destructiveHint") != Some(true))
 }
 
 /// Severity of a drift, splitting loud/actionable signal from benign churn:
@@ -823,13 +828,19 @@ pub fn security_path() -> Option<PathBuf> {
 /// source. Matches the frontend's collapse window so the two agree.
 const DEDUP_WINDOW_MS: u64 = 10 * 60 * 1000;
 
-/// Whether an event with the same `(type, server, tool, change)` was already recorded
-/// within `DEDUP_WINDOW_MS`. Best-effort cross-gateway suppression: every connected
-/// client spawns its own gateway, and they all run `check` against the SHARED baseline,
-/// so one benign server-side revision can be flagged ~6 times at once. Left unchecked
-/// that floods `security.jsonl` and buries the rare real signal (the whole point of this
-/// surface). Racy by nature (no lock across processes), but it collapses the common
-/// concurrent burst; the frontend dedupes again for anything that slips through.
+/// Whether an event with the same `(type, server, tool, change, severity)` was already
+/// recorded within `DEDUP_WINDOW_MS`. Best-effort cross-gateway suppression: every
+/// connected client spawns its own gateway, and they all run `check` against the SHARED
+/// baseline, so one benign server-side revision can be flagged ~6 times at once. Left
+/// unchecked that floods `security.jsonl` and buries the rare real signal (the whole
+/// point of this surface). Racy by nature (no lock across processes), but it collapses
+/// the common concurrent burst; the frontend dedupes again for anything that slips
+/// through.
+///
+/// `severity` is part of the identity ON PURPOSE: a benign `info` revision must NEVER
+/// suppress a later `high` one on the same tool (a tool that first churns benignly, then
+/// sheds a safety annotation or turns destructive). Collapsing across severities would
+/// swallow exactly the loud signal this surface exists to raise.
 fn recently_recorded(event: &Value, path: &Path) -> bool {
     let ty = match event.get("type").and_then(Value::as_str) {
         Some(t) => t,
@@ -842,6 +853,7 @@ fn recently_recorded(event: &Value, path: &Path) -> bool {
     let server = event.get("server").and_then(Value::as_str);
     let tool = event.get("tool").and_then(Value::as_str);
     let change = event.get("change").and_then(Value::as_str);
+    let severity = event.get("severity").and_then(Value::as_str);
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return false,
@@ -858,6 +870,7 @@ fn recently_recorded(event: &Value, path: &Path) -> bool {
             && prev.get("server").and_then(Value::as_str) == server
             && prev.get("tool").and_then(Value::as_str) == tool
             && prev.get("change").and_then(Value::as_str) == change
+            && prev.get("severity").and_then(Value::as_str) == severity
         {
             let prev_ts = prev.get("ts").and_then(Value::as_u64).unwrap_or(0);
             return now_ts.saturating_sub(prev_ts) <= DEDUP_WINDOW_MS;
@@ -1232,6 +1245,16 @@ mod tests {
         let pins: Pins = [("db__query".to_string(), pin(&dh_true))].into_iter().collect();
         let d = diff(&pins, &[dh_false]);
         assert_eq!(d[0]["severity"], SEV_HIGH, "destructiveHint downgrade must be high");
+
+        // Dropping the hint ENTIRELY (true -> absent) is also a downgrade: the tool no
+        // longer asserts the constraint. Must be high, so the check can't be evaded by
+        // omitting the annotation instead of flipping it to false.
+        let ro_absent = json!({ "name": "db__query", "description": "Query.",
+            "inputSchema": {"type":"object"} });
+        let pins: Pins = [("db__query".to_string(), pin(&ro_true))].into_iter().collect();
+        let d = diff(&pins, std::slice::from_ref(&ro_absent));
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0]["severity"], SEV_HIGH, "dropping readOnlyHint (true->absent) must be high");
     }
 
     #[test]
@@ -1283,6 +1306,17 @@ mod tests {
         // A different tool (or change kind) is never a duplicate.
         assert!(!recently_recorded(&event("rc", "rc__y", "changed", SEV_INFO), &path));
         assert!(!recently_recorded(&event("rc", "rc__x", "added", SEV_INFO), &path));
+
+        // Severity is part of the identity: a HIGH change on the same tool moments after
+        // the benign INFO one must NOT be suppressed (else a real escalation - the tool
+        // shedding a safety annotation right after a benign revision - gets swallowed by
+        // the earlier info line, defeating the whole surface).
+        let mut escalation = event("rc", "rc__x", "changed", SEV_HIGH);
+        escalation["ts"] = json!(base_ts + 5);
+        assert!(
+            !recently_recorded(&escalation, &path),
+            "a high event must not be deduped against a preceding info event"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
