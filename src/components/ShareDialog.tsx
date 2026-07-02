@@ -138,7 +138,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
     try {
       const path = await save({
         title: "Save Toolport setup",
-        defaultPath: `${slug(name) || "conduit-setup"}.json`,
+        defaultPath: `${slug(name) || "toolport-setup"}.json`,
         filters: [{ name: "Toolport setup", extensions: ["json"] }],
       });
       if (!path) return;

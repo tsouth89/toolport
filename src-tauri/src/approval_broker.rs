@@ -20,7 +20,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 
 use crate::approval::{
     ApprovalDecision, ApprovalReason, ApprovalRequest, EndpointDescriptor, DEFAULT_TIMEOUT_SECS,
@@ -212,6 +213,10 @@ fn handle_conn(stream: TcpStream, broker: ApprovalBroker, app: AppHandle) {
 
     // Surface it to the UI (best-effort; the poll-based list() is the source of truth).
     let _ = app.emit("approval-pending", &view);
+    // The call BLOCKS and auto-denies on timeout, so a person who isn't looking at the
+    // (often backgrounded) app would silently miss it. Raise an OS notification and flash
+    // the taskbar so the pending decision is noticed while there's still time to make it.
+    notify_pending(&app, &view);
 
     // Block for the human decision or the fail-closed timeout.
     let decision = rx
@@ -232,6 +237,23 @@ fn handle_conn(stream: TcpStream, broker: ApprovalBroker, app: AppHandle) {
         "{}",
         serde_json::to_string(&decision).unwrap_or_else(|_| "\"timeout\"".into())
     );
+}
+
+/// Notify the human that a call is held: an OS notification plus a taskbar-attention
+/// flash on the main window. Best-effort and non-blocking - if either fails (permission
+/// off, no window) the in-app overlay is still the source of truth. We flash rather than
+/// force-focus so we don't yank the user out of what they're doing.
+fn notify_pending(app: &AppHandle, view: &PendingView) {
+    let who = view.client.as_deref().map(|c| format!("{c} wants to run ")).unwrap_or_default();
+    let _ = app
+        .notification()
+        .builder()
+        .title("Toolport: approval required")
+        .body(format!("{who}{}/{} - approve or deny it in Toolport.", view.server, view.tool))
+        .show();
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.request_user_attention(Some(tauri::UserAttentionType::Critical));
+    }
 }
 
 #[cfg(test)]

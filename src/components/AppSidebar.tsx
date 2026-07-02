@@ -123,7 +123,7 @@ function VersionFooter({
         action: {
           label: "Open",
           onClick: () =>
-            openUrl("https://github.com/tsouth89/conduit/releases/latest"),
+            openUrl("https://github.com/tsouth89/toolport/releases/latest"),
         },
       });
     }

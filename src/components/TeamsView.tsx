@@ -10,6 +10,10 @@ import { teamConnect, teamSync, teamDisconnect, teamPush, setServerEnabled } fro
 import { isEnabled, activeProfile } from "@/lib/types";
 import type { Registry } from "@/lib/types";
 
+/** The hosted Toolport Teams instance, prefilled as the default. Self-hosters replace
+ * it with their own server URL. */
+const HOSTED_TEAMS_URL = "https://teams.toolport.app";
+
 /**
  * Toolport Teams: join a team and have its shared MCP server set appear locally. The
  * team server holds only the server set + non-secret config, never a key, so after
@@ -27,7 +31,7 @@ export function TeamsView({
   const isAdmin = team?.role === "admin";
   const teamServers = (registry?.servers ?? []).filter((s) => s.source?.startsWith("team:"));
 
-  const [serverUrl, setServerUrl] = useState("");
+  const [serverUrl, setServerUrl] = useState(HOSTED_TEAMS_URL);
   const [inviteCode, setInviteCode] = useState("");
   const [memberName, setMemberName] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -145,10 +149,14 @@ export function TeamsView({
             <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Team server URL</span>
               <Input
-                placeholder="https://conduit.yourcompany.com"
+                placeholder="https://toolport.yourcompany.com"
                 value={serverUrl}
                 onChange={(e) => setServerUrl(e.target.value)}
               />
+              <span className="text-xs text-muted-foreground">
+                Defaults to hosted Toolport Teams. Self-hosting? Replace it with your own
+                server URL.
+              </span>
             </label>
             <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Invite code</span>
