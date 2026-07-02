@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "conduit"
-version = "0.9.4"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
