@@ -13,8 +13,8 @@
 //! - Watches the registry file and emits `notifications/tools/list_changed` on
 //!   change, so enabling/disabling a server applies live without a client restart
 //!   (on clients that honor it).
-//! - Lazy discovery: in lazy mode it advertises only 3 meta-tools (`conduit_status`,
-//!   `conduit_search_tools`, `conduit_call_tool`) instead of the full catalog; the
+//! - Lazy discovery: in lazy mode it advertises only 3 meta-tools (`toolport_status`,
+//!   `toolport_search_tools`, `toolport_call_tool`) instead of the full catalog; the
 //!   model searches and calls on demand, keeping context flat.
 //! - Records every tool call to a local audit log.
 
@@ -49,16 +49,16 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 
 fn status_tool_def() -> Value {
     json!({
-        "name": "conduit_status",
+        "name": "toolport_status",
         "description": "Report Toolport's status: the MCP servers enabled in the active profile, each server's tool count, and how many tokens (and dollars) lazy discovery has saved you so far.",
         "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     })
 }
 
 /// The two meta-tools that power lazy discovery: search then call. In lazy mode
-/// these (plus conduit_status) are the ONLY tools advertised, so the client's
+/// these (plus toolport_status) are the ONLY tools advertised, so the client's
 /// context holds a handful of tool defs instead of hundreds - the model discovers
-/// the real tool on demand and dispatches through `conduit_call_tool`.
+/// the real tool on demand and dispatches through `toolport_call_tool`.
 ///
 /// The description leads with a directive plus GENERIC capability examples (email,
 /// payments, deployments, ...) so the model treats Toolport as the front door for any
@@ -66,24 +66,24 @@ fn status_tool_def() -> Value {
 /// up. We intentionally do NOT list the user's specific connected servers here: that
 /// would scale the description with server count, go stale, and leak the user's stack
 /// into a (possibly remote) model's context on every request. The generic examples
-/// carry the routing without any of that; `conduit_status` names the actual servers
+/// carry the routing without any of that; `toolport_status` names the actual servers
 /// on demand if the model needs them.
 fn search_tool_def() -> Value {
     json!({
-        "name": "conduit_search_tools",
+        "name": "toolport_search_tools",
         "description": "Your single gateway to every connected MCP server and ALL their tools. \
             Try this FIRST for ANY external action or data the user asks for - sending or listing \
             email, deployments, payments, databases, repos, issues, files, web search, etc. Do NOT \
             reach for an unrelated tool or tell the user a capability is unavailable until you have \
             searched here; if the service is connected, its tool is here. Returns matching tools with \
-            their exact name, description, and input schema; call one with conduit_call_tool. Once a \
+            their exact name, description, and input schema; call one with toolport_call_tool. Once a \
             result matches what you need, call it - do NOT keep searching for a better one (the first \
             result includes its full schema and is ready to call). Pass `server` (a name/prefix like \
             \"resend\") to scope to one server, and pass an EMPTY `query` with `server` to list ALL of \
             that server's tools. If the result says more tools matched than were shown, narrow with \
             `server` or raise `limit` before concluding a capability is missing - many servers expose \
             a generic API bridge (a single write/create tool), so search by capability, not just an \
-            exact operation name. conduit_status lists every server prefix and its tool count. Large \
+            exact operation name. toolport_status lists every server prefix and its tool count. Large \
             input schemas may be omitted from broad results (flagged schemaOmitted) to keep responses \
             small - search a tool's exact name to get its full schema.",
         "inputSchema": {
@@ -101,8 +101,8 @@ fn search_tool_def() -> Value {
 
 fn call_tool_def() -> Value {
     json!({
-        "name": "conduit_call_tool",
-        "description": "Invoke a tool discovered via conduit_search_tools. Pass the tool's exact \
+        "name": "toolport_call_tool",
+        "description": "Invoke a tool discovered via toolport_search_tools. Pass the tool's exact \
             `name` (as returned by the search) and put ALL of that tool's parameters INSIDE the \
             `arguments` object (matching its input schema) - not at the top level next to `name`. \
             Never invent or guess an identifier (teamId, accountId, projectId, etc.): if a required \
@@ -111,7 +111,7 @@ fn call_tool_def() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": { "type": "string", "description": "Exact tool name from conduit_search_tools." },
+                "name": { "type": "string", "description": "Exact tool name from toolport_search_tools." },
                 // additionalProperties:true is REQUIRED: clients that constrain
                 // generation to the JSON schema (e.g. local runtimes like Jan) would
                 // otherwise only ever emit an empty `{}` here - an object with no
@@ -131,7 +131,7 @@ fn call_tool_def() -> Value {
 
 fn confirm_tool_def() -> Value {
     json!({
-        "name": "conduit_confirm",
+        "name": "toolport_confirm",
         "description": "Confirm and execute a destructive tool call that was intercepted for review. \
             When Toolport blocks a destructive call, it returns a preview with a `token`. \
             Call this with that token to proceed. The original arguments are replayed exactly \
@@ -149,7 +149,7 @@ fn confirm_tool_def() -> Value {
 
 fn fetch_result_tool_def() -> Value {
     json!({
-        "name": "conduit_fetch_result",
+        "name": "toolport_fetch_result",
         "description": "Read more of a large tool result that Toolport truncated. When a \
             result is too big for context, Toolport returns the head plus a cursor in a \
             `[Toolport shaped this result]` marker; call this with that `cursor` and the \
@@ -168,9 +168,9 @@ fn fetch_result_tool_def() -> Value {
 
 fn enable_server_tool_def() -> Value {
     json!({
-        "name": "conduit_enable_server",
+        "name": "toolport_enable_server",
         "description": "Turn ON an MCP server in Toolport so its tools become available to you. \
-            Pass the server's id or name (run conduit_status to see the list). Takes effect within \
+            Pass the server's id or name (run toolport_status to see the list). Takes effect within \
             about a second. Only works when the user has allowed agent control in Toolport; the \
             global block on destructive tools stays under the user's control and cannot be changed here.",
         "inputSchema": {
@@ -186,9 +186,9 @@ fn enable_server_tool_def() -> Value {
 
 fn disable_server_tool_def() -> Value {
     json!({
-        "name": "conduit_disable_server",
+        "name": "toolport_disable_server",
         "description": "Turn OFF an MCP server in Toolport so its tools are no longer loaded. Pass the \
-            server's id or name (run conduit_status to see the list). Takes effect within about a \
+            server's id or name (run toolport_status to see the list). Takes effect within about a \
             second. Only works when the user has allowed agent control in Toolport.",
         "inputSchema": {
             "type": "object",
@@ -223,7 +223,7 @@ fn set_server_enabled_via_agent(
     let target = target.trim();
     if target.is_empty() {
         return Err(
-            "Toolport: pass the `server` id or name to change (run conduit_status for the list)."
+            "Toolport: pass the `server` id or name to change (run toolport_status for the list)."
                 .to_string(),
         );
     }
@@ -272,7 +272,25 @@ fn set_server_enabled_via_agent(
     ))
 }
 
-/// Unwrap a `conduit_call_tool` payload into (inner tool name, inner arguments).
+/// Map a legacy `conduit_*` meta-tool name to its renamed `toolport_*` form, so the
+/// old names keep working as aliases after the Conduit -> Toolport rebrand. Returns
+/// `None` for anything that isn't one of the 7 legacy meta-tool names, so renamed
+/// `toolport_*` names and downstream `server__tool` names pass through unchanged at
+/// the call site.
+fn canonical_meta(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "conduit_status" => "toolport_status",
+        "conduit_search_tools" => "toolport_search_tools",
+        "conduit_call_tool" => "toolport_call_tool",
+        "conduit_fetch_result" => "toolport_fetch_result",
+        "conduit_confirm" => "toolport_confirm",
+        "conduit_enable_server" => "toolport_enable_server",
+        "conduit_disable_server" => "toolport_disable_server",
+        _ => return None,
+    })
+}
+
+/// Unwrap a `toolport_call_tool` payload into (inner tool name, inner arguments).
 /// The tool's params normally nest under `arguments`, but models frequently flatten
 /// this double-nested shape and put them at the top level next to `name` instead -
 /// which otherwise drops a required param (e.g. Vercel's `teamId`) so it arrives
@@ -844,7 +862,7 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
-/// One line summarizing what lazy discovery has saved, for conduit_status, so an
+/// One line summarizing what lazy discovery has saved, for toolport_status, so an
 /// agent can answer "what is Toolport saving me?". Empty until something is saved
 /// (a fresh install, or non-lazy mode where nothing is recorded).
 fn savings_line() -> String {
@@ -874,7 +892,7 @@ fn savings_line() -> String {
 
 /// Dispatch one JSON-RPC message. Returns `None` for notifications (no reply).
 /// Per-session guard against search-thrash. Weak local models (e.g. small-active
-/// MoEs) will call conduit_search_tools many times in a row for the SAME need
+/// MoEs) will call toolport_search_tools many times in a row for the SAME need
 /// instead of committing, which is slow and burns context. We escalate only on
 /// that specific pattern (the same top tool surfacing across consecutive searches,
 /// not on a raw search count). A capable model that searches once and calls, or
@@ -892,7 +910,7 @@ struct SearchGuard {
 
 /// Per-call confirmation state for destructive tools. When `confirm_destructive`
 /// is on, the first call to a destructive tool returns a preview with a token;
-/// `conduit_confirm { token }` replays the stored call. Entries expire after 60s.
+/// `toolport_confirm { token }` replays the stored call. Entries expire after 60s.
 struct ConfirmGuard {
     /// Pending confirmations: token → the exact call to replay.
     pending: std::collections::HashMap<String, PendingCall>,
@@ -1113,7 +1131,7 @@ fn server_of_tool(name: &str) -> &str {
 
 /// Keep only tools whose server prefix is in `allowed`. `None` = no scoping
 /// (every tool passes). A meta-tool (no `server__` namespace, e.g.
-/// `conduit_search_tools`) is always kept, since it isn't owned by any
+/// `toolport_search_tools`) is always kept, since it isn't owned by any
 /// downstream server. Scopes a registered HTTP client's view to its servers.
 fn scope_tools(tools: &[Value], allowed: Option<&std::collections::HashSet<String>>) -> Vec<Value> {
     match allowed {
@@ -1228,7 +1246,7 @@ fn handle_request(
         "tools/list" => {
             // Lazy mode: advertise only the meta-tools, so the client's context
             // holds a handful of tool defs instead of the whole catalog. The model
-            // finds real tools via conduit_search_tools and runs conduit_call_tool.
+            // finds real tools via toolport_search_tools and runs toolport_call_tool.
             if lazy {
                 let mut tools = vec![
                     status_tool_def(),
@@ -1295,7 +1313,7 @@ fn handle_request(
         }
         "tools/call" => {
             let params = req.get("params");
-            // `name`/`arguments` are mutable so the conduit_confirm handler
+            // `name`/`arguments` are mutable so the toolport_confirm handler
             // below can swap in the stored (confirmed) call and fall through to
             // the normal routing code instead of returning early.
             let mut name = params
@@ -1303,22 +1321,29 @@ fn handle_request(
                 .and_then(|n| n.as_str())
                 .unwrap_or("")
                 .to_string();
+            // Accept the legacy conduit_* meta-tool names as aliases for the renamed
+            // toolport_* names, so a client/model still using the old names keeps
+            // working. Only the 7 known meta names are rewritten; downstream
+            // `server__tool` names and the new toolport_* names pass through.
+            if let Some(canon) = canonical_meta(&name) {
+                name = canon.to_string();
+            }
             let mut arguments = params
                 .and_then(|p| p.get("arguments"))
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            // True when this call arrived via conduit_confirm (the stored call
+            // True when this call arrived via toolport_confirm (the stored call
             // was already reviewed). Skips the destructive-interception check
             // below so the confirmed call isn't re-intercepted in a loop.
             let mut confirmed = false;
 
             // Anything other than a search breaks the search-thrash streak.
-            if name != "conduit_search_tools" {
+            if name != "toolport_search_tools" {
                 guard.last_top = None;
                 guard.repeats = 0;
             }
 
-            if name == "conduit_fetch_result" {
+            if name == "toolport_fetch_result" {
                 let cursor = arguments
                     .get("cursor")
                     .and_then(|v| v.as_str())
@@ -1331,10 +1356,10 @@ fn handle_request(
                 return Some(success(id, shaping::fetch_result(cursor, offset, len)));
             }
 
-            // conduit_confirm: replay a previously-intercepted destructive call.
+            // toolport_confirm: replay a previously-intercepted destructive call.
             // On a valid token, overwrite `name`/`arguments` with the stored call
             // and fall through to the normal routing below (no early return).
-            if name == "conduit_confirm" {
+            if name == "toolport_confirm" {
                 let token = arguments
                     .get("token")
                     .and_then(|v| v.as_str())
@@ -1366,7 +1391,7 @@ fn handle_request(
                 }
             }
 
-            if name == "conduit_status" {
+            if name == "toolport_status" {
                 return Some(success(
                     id,
                     json!({
@@ -1376,7 +1401,7 @@ fn handle_request(
                 ));
             }
 
-            if name == "conduit_search_tools" {
+            if name == "toolport_search_tools" {
                 let query = arguments
                     .get("query")
                     .and_then(|v| v.as_str())
@@ -1463,7 +1488,7 @@ fn handle_request(
                 };
                 let lead = if matches.is_empty() {
                     format!(
-                        "No tools matched{scope}. Try different keywords, or call conduit_status to \
+                        "No tools matched{scope}. Try different keywords, or call toolport_status to \
                          see the connected servers and their tool counts."
                     )
                 } else if escalate {
@@ -1473,9 +1498,9 @@ fn handle_request(
                     // so a model exploring different needs is never cut off.)
                     format!(
                         "You have searched {} times and keep getting the same top tool, `{top}`. It \
-                         is the best match and its full input schema is below - call conduit_call_tool \
+                         is the best match and its full input schema is below - call toolport_call_tool \
                          now with name \"{top}\". Searching again will keep returning this. Only if \
-                         `{top}` genuinely cannot do the task, call conduit_status to see other servers.",
+                         `{top}` genuinely cannot do the task, call toolport_status to see other servers.",
                         guard.repeats
                     )
                 } else {
@@ -1484,7 +1509,7 @@ fn handle_request(
                     // overcorrected and made compliant models thrash).
                     format!(
                         "Found {total} matching tool(s){scope}. Top match: `{top}` - its full input \
-                         schema is included below, so call it now with conduit_call_tool (name: \
+                         schema is included below, so call it now with toolport_call_tool (name: \
                          \"{top}\") if it fits. Only search again if none of these match.{more}{schema_note}"
                     )
                 };
@@ -1498,8 +1523,8 @@ fn handle_request(
                 ));
             }
 
-            if name == "conduit_enable_server" || name == "conduit_disable_server" {
-                let enable = name == "conduit_enable_server";
+            if name == "toolport_enable_server" || name == "toolport_disable_server" {
+                let enable = name == "toolport_enable_server";
                 let target = arguments
                     .get("server")
                     .and_then(|v| v.as_str())
@@ -1518,9 +1543,9 @@ fn handle_request(
                 ));
             }
 
-            // conduit_call_tool dispatches a discovered tool: unwrap to its real
+            // toolport_call_tool dispatches a discovered tool: unwrap to its real
             // name + arguments and fall through to the normal routing below.
-            let (name, arguments) = if name == "conduit_call_tool" {
+            let (name, arguments) = if name == "toolport_call_tool" {
                 unwrap_call_tool(&arguments)
             } else {
                 (name, arguments)
@@ -1573,11 +1598,11 @@ fn handle_request(
 
             // Per-call confirmation for destructive tools: intercept the first
             // call with these arguments, store it, and return a preview. The
-            // agent calls conduit_confirm { token } to replay the stored call.
+            // agent calls toolport_confirm { token } to replay the stored call.
             // This runs AFTER the placeholder guard (so a placeholder never
             // gets a token) and BEFORE the actual route_call (so a destructive
             // call never reaches the downstream server unconfirmed).
-            // Skip when `confirmed` is true: the call arrived via conduit_confirm
+            // Skip when `confirmed` is true: the call arrived via toolport_confirm
             // and was already reviewed (prevents re-interception loop).
             if reg.confirm_destructive && !confirmed {
                 // Look up the tool in the catalog to check destructiveHint.
@@ -1598,7 +1623,7 @@ fn handle_request(
                     let args_pretty = serde_json::to_string_pretty(&arguments).unwrap_or_default();
                     let msg = format!(
                         "⚠️ Destructive action intercepted.\n\nTool: {name}\nArguments:\n{args_pretty}\n\n\
-                         Review the arguments above carefully. If correct, call conduit_confirm \
+                         Review the arguments above carefully. If correct, call toolport_confirm \
                          with token: {token}\n\
                          The token expires in 60 seconds. The original arguments will be replayed \
                          exactly."
@@ -1655,7 +1680,7 @@ fn handle_request(
                         integrity::inspect_result(srv, tool, &mut result);
                     }
                     // Result-shaping: cap an oversized result, cache the full body, and
-                    // hand the model a head + a conduit_fetch_result cursor (lossless).
+                    // hand the model a head + a toolport_fetch_result cursor (lossless).
                     // Per-server fidelity policy: a server's `resultBudget` overrides the
                     // global default (Some(0) = never shape, for full-fidelity servers).
                     let budget = reg
@@ -1874,7 +1899,7 @@ fn notify_tools_changed(stdout: &Arc<Mutex<std::io::Stdout>>) {
 /// Persist a freshly built or refreshed catalog and tell the client it changed.
 /// Never persists an empty catalog over a good one (a transient empty build or a
 /// momentarily unreachable server would otherwise wipe the cache and leave the
-/// client showing only conduit_status); the emit still fires so the client
+/// client showing only toolport_status); the emit still fires so the client
 /// re-fetches from cache.
 /// Run tool-definition integrity detection on a freshly built catalog (gated by
 /// the registry's `integrity_check`, on by default). Any drift is recorded to the
@@ -2395,7 +2420,7 @@ fn openapi_spec(
         "openapi": "3.1.0",
         "info": {
             "title": "Toolport gateway",
-            "description": "Toolport MCP gateway as OpenAPI for HTTP tool clients (Open WebUI and any OpenAPI consumer). Search with conduit_search_tools, then call by name with conduit_call_tool.",
+            "description": "Toolport MCP gateway as OpenAPI for HTTP tool clients (Open WebUI and any OpenAPI consumer). Search with toolport_search_tools, then call by name with toolport_call_tool.",
             "version": env!("CARGO_PKG_VERSION")
         },
         // Relative base URL: resolves against the origin the spec was fetched
@@ -2486,7 +2511,7 @@ fn handle_http(
         ("GET", "/") | ("GET", "/docs") => (
             200,
             "text/plain; charset=utf-8",
-            "Toolport gateway (HTTP/OpenAPI mode). OpenAPI at /openapi.json. POST a tool name with a JSON body, e.g. POST /conduit_search_tools {\"query\":\"...\"}."
+            "Toolport gateway (HTTP/OpenAPI mode). OpenAPI at /openapi.json. POST a tool name with a JSON body, e.g. POST /toolport_search_tools {\"query\":\"...\"}."
                 .to_string(),
         ),
         ("POST", p) => {
@@ -2916,7 +2941,7 @@ fn main() {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = built;
             // Don't let a transient empty build (registry caught mid-write, or
             // every downstream momentarily unreachable) clobber a good catalog -
-            // that's what leaves a client showing only conduit_status.
+            // that's what leaves a client showing only toolport_status.
             if !tools.is_empty() {
                 *cached_tools
                     .lock()
@@ -3048,14 +3073,14 @@ mod tests {
         let spec = openapi_spec(&http_state(true), None);
         let paths = spec.get("paths").unwrap().as_object().unwrap();
         // The lazy meta-tools are each a POST path.
-        assert!(paths.contains_key("/conduit_search_tools"));
-        assert!(paths.contains_key("/conduit_call_tool"));
-        assert!(paths.contains_key("/conduit_status"));
+        assert!(paths.contains_key("/toolport_search_tools"));
+        assert!(paths.contains_key("/toolport_call_tool"));
+        assert!(paths.contains_key("/toolport_status"));
         let op = paths
-            .get("/conduit_search_tools")
+            .get("/toolport_search_tools")
             .and_then(|p| p.get("post"))
             .unwrap();
-        assert_eq!(op.get("operationId").unwrap(), "conduit_search_tools");
+        assert_eq!(op.get("operationId").unwrap(), "toolport_search_tools");
         assert!(op.get("requestBody").is_some());
         // Error responses are declared so a client can model failures.
         let responses = op.get("responses").unwrap().as_object().unwrap();
@@ -3063,7 +3088,7 @@ mod tests {
             assert!(responses.contains_key(code), "missing response {code}");
         }
         // Agent-control tools stay hidden unless the registry opts in.
-        assert!(!paths.contains_key("/conduit_enable_server"));
+        assert!(!paths.contains_key("/toolport_enable_server"));
         assert_eq!(spec.get("openapi").unwrap(), "3.1.0");
         // A relative servers entry so clients can resolve the base URL.
         assert_eq!(spec.pointer("/servers/0/url").unwrap(), "/");
@@ -3150,7 +3175,7 @@ mod tests {
         assert_eq!(server_of_tool("vercel__deploy"), "vercel");
         assert_eq!(server_of_tool("resend__send_email"), "resend");
         // A meta-tool has no namespace; the whole name is returned.
-        assert_eq!(server_of_tool("conduit_status"), "conduit_status");
+        assert_eq!(server_of_tool("toolport_status"), "toolport_status");
     }
 
     #[test]
@@ -3158,7 +3183,7 @@ mod tests {
         let tools = vec![
             json!({ "name": "vercel__deploy" }),
             json!({ "name": "resend__send" }),
-            json!({ "name": "conduit_search_tools" }),
+            json!({ "name": "toolport_search_tools" }),
         ];
         // Unscoped: everything passes.
         assert_eq!(scope_tools(&tools, None).len(), 3);
@@ -3169,7 +3194,7 @@ mod tests {
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
             .collect();
         assert!(names.contains(&"vercel__deploy".to_string()));
-        assert!(names.contains(&"conduit_search_tools".to_string()));
+        assert!(names.contains(&"toolport_search_tools".to_string()));
         assert!(!names.contains(&"resend__send".to_string()));
     }
 
@@ -3385,7 +3410,7 @@ mod tests {
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
             "OPTIONS",
-            "/conduit_search_tools",
+            "/toolport_search_tools",
             "",
             None,
             None,
@@ -3495,7 +3520,7 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str())
             .collect();
-        assert!(names.contains(&"conduit_status"));
+        assert!(names.contains(&"toolport_status"));
     }
 
     #[test]
@@ -3519,7 +3544,7 @@ mod tests {
 
         let req = json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": { "name": "conduit_status", "arguments": {} }
+            "params": { "name": "toolport_status", "arguments": {} }
         });
         let resp = handle_request(
             &req,
@@ -3591,11 +3616,60 @@ mod tests {
         // Default registry has agent control off, so it's the four core
         // meta-tools: status, search, call, fetch_result (no downstream tools).
         assert_eq!(names.len(), 4);
-        assert!(names.contains(&"conduit_status"));
-        assert!(names.contains(&"conduit_search_tools"));
-        assert!(names.contains(&"conduit_call_tool"));
-        assert!(names.contains(&"conduit_fetch_result"));
+        assert!(names.contains(&"toolport_status"));
+        assert!(names.contains(&"toolport_search_tools"));
+        assert!(names.contains(&"toolport_call_tool"));
+        assert!(names.contains(&"toolport_fetch_result"));
         assert!(!names.contains(&"resend__send_email"));
+    }
+
+    #[test]
+    fn canonical_meta_aliases_legacy_names() {
+        // The 7 legacy conduit_* meta names map to their toolport_* forms.
+        assert_eq!(canonical_meta("conduit_status"), Some("toolport_status"));
+        assert_eq!(
+            canonical_meta("conduit_search_tools"),
+            Some("toolport_search_tools")
+        );
+        assert_eq!(canonical_meta("conduit_call_tool"), Some("toolport_call_tool"));
+        assert_eq!(
+            canonical_meta("conduit_fetch_result"),
+            Some("toolport_fetch_result")
+        );
+        assert_eq!(canonical_meta("conduit_confirm"), Some("toolport_confirm"));
+        // New names, downstream tools, and non-meta conduit_* pass through (None).
+        assert_eq!(canonical_meta("toolport_search_tools"), None);
+        assert_eq!(canonical_meta("resend__send_email"), None);
+        assert_eq!(canonical_meta("conduit_lib"), None);
+    }
+
+    #[test]
+    fn legacy_conduit_alias_dispatches_like_toolport() {
+        // A tools/call under the OLD conduit_* name must route identically to the
+        // renamed toolport_* name, so nothing that still uses the old names breaks.
+        let reg = Registry::default();
+        let call = |nm: &str| {
+            handle_request(
+                &json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": { "name": nm, "arguments": { "query": "email" } }
+                }),
+                &reg,
+                &mut router(),
+                &catalog(),
+                true,
+                None,
+                &mut SearchGuard::default(),
+                &mut ConfirmGuard::new(),
+                None,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            call("conduit_search_tools")["result"],
+            call("toolport_search_tools")["result"],
+            "legacy conduit_search_tools alias should dispatch identically to toolport_search_tools"
+        );
     }
 
     #[test]
@@ -3690,7 +3764,7 @@ mod tests {
         let reg = Registry::default();
         let req = json!({
             "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-            "params": { "name": "conduit_search_tools", "arguments": { "query": "charges" } }
+            "params": { "name": "toolport_search_tools", "arguments": { "query": "charges" } }
         });
         let resp = handle_request(
             &req,
@@ -3726,7 +3800,7 @@ mod tests {
         let reg = Registry::default();
         let req = json!({
             "jsonrpc": "2.0", "id": 7, "method": "tools/call",
-            "params": { "name": "conduit_search_tools", "arguments": { "query": "zzznotarealtoolzzz" } }
+            "params": { "name": "toolport_search_tools", "arguments": { "query": "zzznotarealtoolzzz" } }
         });
         let resp = handle_request(
             &req,
@@ -3751,7 +3825,7 @@ mod tests {
     fn search_req(query: &str) -> Value {
         json!({
             "jsonrpc": "2.0", "id": 9, "method": "tools/call",
-            "params": { "name": "conduit_search_tools", "arguments": { "query": query } }
+            "params": { "name": "toolport_search_tools", "arguments": { "query": query } }
         })
     }
 
@@ -3796,7 +3870,7 @@ mod tests {
         // Any non-search action resets the streak; the next search is polite again.
         let status = json!({
             "jsonrpc": "2.0", "id": 10, "method": "tools/call",
-            "params": { "name": "conduit_status", "arguments": {} }
+            "params": { "name": "toolport_status", "arguments": {} }
         });
         handle_request(
             &status,
@@ -3882,7 +3956,7 @@ mod tests {
         assert_eq!(
             def["inputSchema"]["properties"]["arguments"]["additionalProperties"],
             json!(true),
-            "conduit_call_tool's arguments must accept arbitrary properties"
+            "toolport_call_tool's arguments must accept arbitrary properties"
         );
     }
 
@@ -4015,7 +4089,7 @@ mod tests {
         );
         assert!(text.contains("stripe__delete_customer"));
         assert!(text.contains("cus_123"));
-        assert!(text.contains("conduit_confirm"));
+        assert!(text.contains("toolport_confirm"));
         assert_eq!(resp["result"]["isError"], true);
     }
 
@@ -4074,15 +4148,15 @@ mod tests {
     }
 
     #[test]
-    fn confirm_destructive_cannot_be_bypassed_via_conduit_call_tool() {
+    fn confirm_destructive_cannot_be_bypassed_via_toolport_call_tool() {
         let reg = registry_with_confirm();
-        // Agent tries to call the destructive tool via conduit_call_tool instead
+        // Agent tries to call the destructive tool via toolport_call_tool instead
         // of directly — the interceptor should still catch it because
-        // conduit_call_tool unwraps before the interception check.
+        // toolport_call_tool unwraps before the interception check.
         let req = json!({
             "jsonrpc": "2.0", "id": 4, "method": "tools/call",
             "params": {
-                "name": "conduit_call_tool",
+                "name": "toolport_call_tool",
                 "arguments": {
                     "name": "stripe__delete_customer",
                     "arguments": { "id": "cus_456" }
@@ -4104,7 +4178,7 @@ mod tests {
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
             text.contains("Destructive action intercepted"),
-            "should intercept even via conduit_call_tool"
+            "should intercept even via toolport_call_tool"
         );
         assert!(text.contains("cus_456"));
     }
@@ -4114,7 +4188,7 @@ mod tests {
         let reg = registry_with_confirm();
         let req = json!({
             "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-            "params": { "name": "conduit_confirm", "arguments": { "token": "deadbeef" } }
+            "params": { "name": "toolport_confirm", "arguments": { "token": "deadbeef" } }
         });
         let resp = handle_request(
             &req,
@@ -4141,7 +4215,7 @@ mod tests {
         let reg = registry_with_confirm();
         let req = json!({
             "jsonrpc": "2.0", "id": 6, "method": "tools/call",
-            "params": { "name": "conduit_confirm", "arguments": { "token": "" } }
+            "params": { "name": "toolport_confirm", "arguments": { "token": "" } }
         });
         let resp = handle_request(
             &req,
@@ -4163,7 +4237,7 @@ mod tests {
     }
 
     #[test]
-    fn confirm_destructive_tools_list_includes_conduit_confirm() {
+    fn confirm_destructive_tools_list_includes_toolport_confirm() {
         let reg = registry_with_confirm();
         let req = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" });
         let resp = handle_request(
@@ -4185,13 +4259,13 @@ mod tests {
             .filter_map(|t| t["name"].as_str())
             .collect();
         assert!(
-            names.contains(&"conduit_confirm"),
-            "tools/list should include conduit_confirm when feature is on"
+            names.contains(&"toolport_confirm"),
+            "tools/list should include toolport_confirm when feature is on"
         );
     }
 
     #[test]
-    fn confirm_destructive_tools_list_excludes_conduit_confirm_when_off() {
+    fn confirm_destructive_tools_list_excludes_toolport_confirm_when_off() {
         let reg = Registry::default(); // confirm_destructive = false
         let req = json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/list" });
         let resp = handle_request(
@@ -4213,8 +4287,8 @@ mod tests {
             .filter_map(|t| t["name"].as_str())
             .collect();
         assert!(
-            !names.contains(&"conduit_confirm"),
-            "should not include conduit_confirm when feature is off"
+            !names.contains(&"toolport_confirm"),
+            "should not include toolport_confirm when feature is off"
         );
     }
 
@@ -4252,7 +4326,7 @@ mod tests {
     #[test]
     fn confirm_destructive_full_flow_does_not_loop() {
         // The critical test: a destructive call is intercepted, then confirmed
-        // via conduit_confirm. The confirmed call must NOT be re-intercepted
+        // via toolport_confirm. The confirmed call must NOT be re-intercepted
         // (which would create an infinite loop).
         let reg = registry_with_confirm();
         let mut confirm = ConfirmGuard::new();
@@ -4286,7 +4360,7 @@ mod tests {
         // routing — NOT re-intercepted.
         let req2 = json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": { "name": "conduit_confirm", "arguments": { "token": token } }
+            "params": { "name": "toolport_confirm", "arguments": { "token": token } }
         });
         let resp2 = handle_request(
             &req2,
