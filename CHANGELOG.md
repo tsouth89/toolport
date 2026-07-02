@@ -4,6 +4,30 @@ All notable changes to Toolport are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the GitHub releases.
 Entries before the rename below shipped under the project's former name, Conduit.
 
+## [1.1.0] - 2026-07-02
+
+### Added
+- **Human-in-the-loop tool approval (opt-in).** With "Require human approval" on, Toolport
+  holds any destructive or untrusted-server tool call and raises a desktop notification until
+  you approve or deny it in the app. Fail-closed: if no decision is made in time, the call is
+  denied. Off by default.
+- **Runs in the tray / menu bar.** Closing the window now keeps Toolport running in the
+  background (system tray on Windows, menu bar on macOS) so it can hold tool calls for approval
+  while you work; the tray tooltip shows how many are waiting. Quit explicitly from the tray menu.
+- **Launch at login (opt-in).** Start Toolport hidden in the tray when you sign in
+  (Settings > General).
+
+### Changed
+- **Security notices are tiered by severity, so real threats aren't buried.** Risky
+  tool-definition drift (a destructive tool changing, a tool dropping a readOnly/destructive
+  safety annotation, or poisoned content) stays a loud, actionable notice; benign vendor
+  revisions move to a quiet, collapsible "Recent tool changes" history. Dismissals now stick
+  across restarts, and duplicate notices from multiple clients are collapsed.
+
+### Fixed
+- Cleaned up leftover "Conduit" references in a few spots (the Teams connect URL placeholder,
+  the "download from releases" link, and the exported setup filename).
+
 ## [1.0.1] - 2026-07-02
 
 ### Fixed
