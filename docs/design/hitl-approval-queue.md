@@ -1,6 +1,6 @@
 # Design: Human-in-the-Loop (HITL) Tool-Approval Queue
 
-Status: DRAFT for review (2026-07-02, rev 2 — best-in-class architecture). Not yet implemented.
+Status: P1 IMPLEMENTED in PR #82 (2026-07-02, rev 2 architecture). Remaining before merge: a runtime end-to-end check (needs the app running). Deferred to P2: named-pipe/uds transport hardening, an async "held, will resume" fallback, and tool+args-hash dedupe.
 
 ## Goal
 
@@ -52,13 +52,13 @@ Flow for a gated call:
    **pushes** `{ approved | denied, approver_ts }` back over the same connection.
 4. Gateway wakes: approved -> `route_call` + real result; denied/timeout -> clear error.
 
-**Why this is the best-in-class choice — it wins on every axis the two alternatives lose:**
+**Why this is the best-in-class choice, it wins on every axis the two alternatives lose:**
 
 - **Coverage:** every gateway process dials *out* to the one app broker, so stdio clients
   are covered, not just the app's own `--http` gateway.
 - **No args on disk:** arguments travel over the socket and stay in memory. The disk only
   ever holds the endpoint descriptor (no payloads). This is the decisive privacy win.
-- **Latency:** event-driven push, not poll intervals — approval feels instant.
+- **Latency:** event-driven push, not poll intervals, approval feels instant.
 - **Fail-closed by construction:** app not running -> the connect fails immediately -> deny
   with "open Toolport to approve". Timeout -> deny. Dropped connection -> deny.
 - **Integrity:** the decision arrives over an authenticated socket from the trusted UI, not
@@ -83,7 +83,7 @@ Flow for a gated call:
    the agent race ahead of a pending sensitive action); other clients are separate processes
    and unaffected.
 2. **Scope: layered, security-first default.** v1 gates (a) `destructiveHint` tools AND
-   (b) any tool from an **untrusted-provenance** server (`source` = shared/registry — the
+   (b) any tool from an **untrusted-provenance** server (`source` = shared/registry, the
    same trust signal the SSRF guard uses), with per-server / per-tool **overrides** designed
    in from day one (allowlist to skip, forcelist to always gate) and a configurable
    escalation to "all non-`readOnlyHint` tools." Reusing the provenance signal ties HITL to
@@ -92,7 +92,7 @@ Flow for a gated call:
 3. **Timeout: fail-closed, generous, notified.** Default ~120s, configurable; no decision ->
    **deny**. Because a missed approval denies the call, pending items MUST raise a prominent
    OS notification so you don't miss the window.
-4. **Args stay in memory** (resolved by the broker) — no disk trade-off to make.
+4. **Args stay in memory** (resolved by the broker), no disk trade-off to make.
 
 ## Security analysis
 
@@ -127,7 +127,7 @@ Flow for a gated call:
 
 Verify the gateway's stdio **serve loop** can park one `tools/call` on the broker read
 without stalling the process in a way that breaks liveness (it already blocks on `ureq` for
-downstream calls, so a bounded blocking read fits the same model — but confirm request
+downstream calls, so a bounded blocking read fits the same model, but confirm request
 dispatch and the ~1s registry watcher still tick while parked). If the loop is strictly
 sequential, blocking is still fine (see decision 1); this check just confirms no deadlock
 with the registry watcher / notifications.
