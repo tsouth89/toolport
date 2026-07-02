@@ -451,17 +451,28 @@ export function AppSidebar({
     <aside className="flex h-screen w-72 shrink-0 flex-col border-r bg-sidebar">
       <div className="flex items-center gap-2.5 px-4 py-4">
         <svg className="size-8" viewBox="0 0 48 48" aria-hidden="true">
-          <rect width="48" height="48" rx="12" fill="#34d399" />
-          <g
+          <rect width="48" height="48" rx="11" fill="#1E3A66" />
+          <circle
+            cx="24"
+            cy="24"
+            r="18.28"
             fill="none"
-            stroke="#06140e"
-            strokeWidth="2.9"
-            strokeLinecap="round"
-          >
-            <path d="M33.6 12.5 A 15 15 0 1 0 33.6 35.5" />
-            <path d="M30.2 16.7 A 9.4 9.4 0 1 0 30.2 31.3" />
-            <circle cx="33" cy="24" r="2.7" fill="#06140e" stroke="none" />
+            stroke="#ffffff"
+            strokeWidth="8.44"
+          />
+          <g fill="#1E3A66">
+            <polygon points="24.00,3.47 22.05,4.59 22.05,6.84 24.00,7.97 25.95,6.84 25.95,4.59" />
+            <polygon points="42.28,21.75 40.33,22.88 40.33,25.12 42.28,26.25 44.23,25.12 44.23,22.88" />
+            <polygon points="24.00,40.03 22.05,41.16 22.05,43.41 24.00,44.53 25.95,43.41 25.95,41.16" />
+            <polygon points="5.72,21.75 3.77,22.88 3.77,25.12 5.72,26.25 7.67,25.12 7.67,22.88" />
           </g>
+          <g fill="#ffffff">
+            <polygon points="24.00,4.78 23.19,5.25 23.19,6.19 24.00,6.66 24.81,6.19 24.81,5.25" />
+            <polygon points="42.28,23.06 41.47,23.53 41.47,24.47 42.28,24.94 43.09,24.47 43.09,23.53" />
+            <polygon points="24.00,41.34 23.19,41.81 23.19,42.75 24.00,43.22 24.81,42.75 24.81,41.81" />
+            <polygon points="5.72,23.06 4.91,23.53 4.91,24.47 5.72,24.94 6.53,24.47 6.53,23.53" />
+          </g>
+          <circle cx="24" cy="24" r="4.88" fill="#F97316" />
         </svg>
         <div className="leading-tight">
           <div className="font-semibold tracking-tight">Toolport</div>
