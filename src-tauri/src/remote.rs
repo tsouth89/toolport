@@ -109,6 +109,7 @@ fn authed_transport(
     url: &str,
     token: Option<String>,
     server_id: &str,
+    block_private: bool,
 ) -> Result<HttpTransport, String> {
     if token.is_some() {
         require_secure_for_auth(url)?;
@@ -119,7 +120,10 @@ fn authed_transport(
     } else {
         None
     };
-    Ok(HttpTransport::with_auth_refresh(url, token, refresh))
+    // The resolver enforces the SSRF policy at connect time (DNS-rebind safe); it
+    // mirrors `guard_connect_target`: link-local/metadata blocked for all, private
+    // blocked only for untrusted-provenance servers.
+    Ok(HttpTransport::guarded(url, token, refresh, block_private))
 }
 
 /// Provenance Toolport doesn't trust to point at the user's private network. Shared
@@ -197,14 +201,17 @@ pub fn connect_remote(server: &ServerEntry) -> Result<DownstreamServer, String> 
     guard_connect_target(server)?;
     let url = server.url.as_deref().unwrap_or("");
     let server_id = &server.id;
+    // Untrusted-provenance servers also get private/loopback refused at the resolver,
+    // matching `guard_connect_target`'s pre-check but closing the DNS-rebind TOCTOU.
+    let block_private = is_untrusted_source(server.source.as_deref());
     let auth = secrets::get_secret(server_id, secrets::HTTP_AUTH_KEY)
         .or_else(|| first_vaulted_secret(server));
-    let transport = authed_transport(url, auth, server_id)?;
+    let transport = authed_transport(url, auth, server_id, block_private)?;
     match DownstreamServer::connect(server_id.to_string(), Box::new(transport)) {
         Ok(ds) => Ok(ds),
         Err(e) if is_auth_error(&e) => match refresh_token(server_id) {
             Ok(fresh) => {
-                let transport = authed_transport(url, Some(fresh), server_id)?;
+                let transport = authed_transport(url, Some(fresh), server_id, block_private)?;
                 DownstreamServer::connect(server_id.to_string(), Box::new(transport))
             }
             Err(_) => Err(e),
