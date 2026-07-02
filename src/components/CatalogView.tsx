@@ -129,7 +129,7 @@ export function CatalogView({ registry, onAdded }: Props) {
     }
   }
 
-  /** Add every server in a stack that isn't already in Conduit, then point the
+  /** Add every server in a stack that isn't already in Toolport, then point the
    * user at the credential steps for the ones that need them. */
   async function setupStack(stack: Stack) {
     setStackBusy(stack.id);
@@ -156,7 +156,7 @@ export function CatalogView({ registry, onAdded }: Props) {
         if (entry.credentialsUrl || entry.envKeys.length > 0) needCreds++;
       }
       if (added === 0) {
-        toast.success(`${stack.name}: every server is already in Conduit`);
+        toast.success(`${stack.name}: every server is already in Toolport`);
       } else {
         toast.success(`Added ${added} server${added === 1 ? "" : "s"} from ${stack.name}`, {
           description:
@@ -447,7 +447,7 @@ function StackCard({
 function Provenance({ entry }: { entry: CatalogEntry }) {
   const tier =
     entry.source === "curated"
-      ? { label: "Conduit verified", cls: "text-success" }
+      ? { label: "Toolport verified", cls: "text-success" }
       : entry.source === "registry"
         ? { label: "MCP Registry", cls: "text-info" }
         : { label: "Your pick", cls: "text-owned" };
@@ -509,7 +509,7 @@ function CatalogCard({
         {added ? (
           <span className="inline-flex items-center gap-1 text-xs text-success">
             <Check className="size-3" />
-            in Conduit
+            in Toolport
           </span>
         ) : (
           <Button

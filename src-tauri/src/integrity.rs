@@ -2,7 +2,7 @@
 //!
 //! The threat: an MCP tool can mutate its own definition after you approve it
 //! (a "rug pull"), or a server you trust can quietly grow a new tool, with
-//! malicious instructions hidden in a description or schema. Conduit sits on the
+//! malicious instructions hidden in a description or schema. Toolport sits on the
 //! path and already re-queries servers when they change, so it is the natural
 //! place to notice.
 //!
@@ -166,7 +166,7 @@ pub fn check(profile: Option<&str>, current: &[Value]) -> Vec<Value> {
     let mut now: Pins = BTreeMap::new();
 
     for t in current {
-        // Skip Conduit's own meta-tools (no `server__` prefix).
+        // Skip Toolport's own meta-tools (no `server__` prefix).
         let name = match t.get("name").and_then(Value::as_str) {
             Some(n) if n.contains("__") => n,
             _ => continue,

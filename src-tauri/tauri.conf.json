@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Conduit",
+  "productName": "Toolport",
   "version": "0.9.4",
   "identifier": "com.tsout.conduit",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Conduit",
+        "title": "Toolport",
         "width": 1240,
         "height": 820,
         "minWidth": 940,

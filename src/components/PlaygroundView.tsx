@@ -572,7 +572,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
         <div>
           <p className="font-medium">No servers to test</p>
           <p className="max-w-md text-sm text-muted-foreground">
-            Add a server to Conduit, then come back here to invoke its tools and
+            Add a server to Toolport, then come back here to invoke its tools and
             see the raw results, without wiring up a client first.
           </p>
         </div>

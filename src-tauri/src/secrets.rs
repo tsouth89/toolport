@@ -1,5 +1,5 @@
 //! Secret storage in the OS keychain (Windows Credential Manager / macOS
-//! Keychain / libsecret). Secret env values never live in Conduit's registry
+//! Keychain / libsecret). Secret env values never live in Toolport's registry
 //! file or any client config - only here. The gateway pulls them at spawn time
 //! and injects them into the child server's environment.
 
@@ -57,7 +57,7 @@ mod platform {
 
     use super::{account, SERVICE};
 
-    /// Team-scoped keychain access group shared by the Conduit app and the
+    /// Team-scoped keychain access group shared by the Toolport app and the
     /// gateway. Both binaries declare this group in their entitlements
     /// (`keychain-access-groups`), which is what lets each read the other's
     /// data-protection-keychain items with no prompt. The `V4YZPC7T6G` prefix is
@@ -68,7 +68,7 @@ mod platform {
     /// Reserved keychain account for the single 32-byte master key that encrypts
     /// the file backend (`secrets.enc`). Distinct from every server-secret account
     /// (which is `server_id::key`), so it never collides with a real secret. This
-    /// is the ONLY keychain item Conduit creates once the file backend is the
+    /// is the ONLY keychain item Toolport creates once the file backend is the
     /// default on macOS — per-server secrets then live only in `secrets.enc`.
     pub const MASTER_KEY_ACCOUNT: &str = "__conduit_master_key__";
 
@@ -146,7 +146,7 @@ mod platform {
     }
 
     /// Create a generic-password item in the **legacy** keychain that BOTH the
-    /// Conduit app and the `conduit-gateway` binary can read with no keychain
+    /// Toolport app and the `conduit-gateway` binary can read with no keychain
     /// prompt: build a legacy `SecAccess` whose trusted-applications list names
     /// both binaries and pass it as `kSecAttrAccess` on `SecItemAdd`. Setting the
     /// ACL atomically at creation avoids the keychain-password prompt that a
@@ -792,7 +792,7 @@ pub fn delete_secret(server_id: &str, key: &str) -> Result<(), String> {
 
 // ── Legacy keychain migration (macOS) ──────────────────────────────────────
 //
-// Older versions of Conduit used the `keyring` crate, which created keychain
+// Older versions of Toolport used the `keyring` crate, which created keychain
 // items with per-application ACLs. This migration reads each entry's value,
 // deletes it, and re-creates it via the ACL-free `SecItemAdd` path.
 //
@@ -894,7 +894,7 @@ pub fn migrate_legacy_entries(secret_keys: &[(String, String)]) -> MigrationRepo
     }
 }
 
-/// Whether the keychain -> file migration marker exists in the Conduit data dir.
+/// Whether the keychain -> file migration marker exists in the Toolport data dir.
 #[cfg(target_os = "macos")]
 fn file_migration_marker_exists() -> bool {
     crate::registry::conduit_dir()

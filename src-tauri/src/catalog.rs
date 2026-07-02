@@ -77,7 +77,7 @@ fn category_for(name: &str) -> &'static str {
 /// no auth) so only the hint shows. `None` = unknown / no guidance.
 fn credentials_for(name: &str) -> Option<(&'static str, &'static str)> {
     Some(match name {
-        // Token-based: the agent gets an API key Conduit vaults.
+        // Token-based: the agent gets an API key Toolport vaults.
         "Linode" => (
             "https://cloud.linode.com/profile/tokens",
             "Create a Personal Access Token with read/write on the resources you need (Linodes, Volumes, Databases).",

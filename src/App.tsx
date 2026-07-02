@@ -100,7 +100,7 @@ function App() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   // Step the wizard opens at (0 = Welcome). Set to the Connect step when resuming
   // after a catalog detour, so a browsing user still lands on the step that wires
-  // Conduit into their tools.
+  // Toolport into their tools.
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [resumeAtConnect, setResumeAtConnect] = useState(false);
 
@@ -214,7 +214,7 @@ function App() {
   const profileId = registry
     ? (registry.activeProfileId ?? registry.profiles[0]?.id)
     : undefined;
-  // The gateway entry is Conduit itself, not a server it proxies - never list it.
+  // The gateway entry is Toolport itself, not a server it proxies - never list it.
   const servers = (registry?.servers ?? []).filter((s) => !isGatewayServer(s));
   const enabledCount = registry
     ? servers.filter((s) => isEnabled(registry, s.id)).length
@@ -412,7 +412,7 @@ function App() {
               </h1>
               <p className="truncate text-sm text-muted-foreground">
                 {view === "activity"
-                  ? "Tool calls routed through Conduit"
+                  ? "Tool calls routed through Toolport"
                   : view === "catalog"
                     ? "Add MCP servers from the registry"
                     : view === "playground"
@@ -674,7 +674,7 @@ function EmptyState({
     <div className="flex flex-col items-center justify-center gap-4 py-24 text-center">
       <ServerOff className="size-10 text-muted-foreground/50" />
       <div>
-        <p className="font-medium">No servers in Conduit yet</p>
+        <p className="font-medium">No servers in Toolport yet</p>
         <p className="text-sm text-muted-foreground">
           {importable > 0
             ? `Found ${importable} server${importable === 1 ? "" : "s"} in your installed clients. Import them to get started.`
@@ -711,7 +711,7 @@ function ErrorState({ message }: { message: string }) {
             </>
           ) : (
             <>
-              Conduit's backend didn't start. Try quitting and reopening the
+              Toolport's backend didn't start. Try quitting and reopening the
               app.
             </>
           )}

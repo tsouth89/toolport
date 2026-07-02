@@ -353,7 +353,7 @@ struct DcrResponse {
 
 fn register_client(registration_endpoint: &str, redirect_uri: &str) -> Result<String, String> {
     let body = serde_json::json!({
-        "client_name": "Conduit",
+        "client_name": "Toolport",
         "redirect_uris": [redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
@@ -546,7 +546,7 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
                         .get("error_description")
                         .map(|d| format!(": {d}"))
                         .unwrap_or_default();
-                    write_callback_page(&mut stream, "Authorization failed. You can close this window and return to Conduit.");
+                    write_callback_page(&mut stream, "Authorization failed. You can close this window and return to Toolport.");
                     return Err(format!("authorization server returned an error ({error}){desc}"));
                 }
 
@@ -555,7 +555,7 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
                     write_callback_page(&mut stream, "Authorization could not be verified. You can close this window.");
                     return Err("state mismatch (possible CSRF); try connecting again".to_string());
                 }
-                write_callback_page(&mut stream, "Authorization complete. You can close this window and return to Conduit.");
+                write_callback_page(&mut stream, "Authorization complete. You can close this window and return to Toolport.");
                 return Ok(code.cloned().unwrap_or_default());
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {

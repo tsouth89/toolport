@@ -166,7 +166,7 @@ function SecurityResting() {
       <ShieldCheck className="size-4 shrink-0 text-owned" />
       <span>
         <span className="font-medium text-foreground">Protection active.</span>{" "}
-        Conduit watches every tool for tampering (rug pulls), poisoned definitions,
+        Toolport watches every tool for tampering (rug pulls), poisoned definitions,
         and injected output (agentjacking). No issues right now.
       </span>
     </div>
@@ -176,7 +176,7 @@ function SecurityResting() {
 /** Surfaces tool security events: a tool you approved changed (rug-pull signal),
  * a known server added one, a tool definition contains injection-like content
  * (poisoning), or a tool returned data that looks like injected instructions
- * (agentjacking, which Conduit labels as data before the agent sees it).
+ * (agentjacking, which Toolport labels as data before the agent sees it).
  * Collapsible, and each notice can be dismissed once you've reviewed it. */
 function SecurityNotices({
   events,
@@ -212,7 +212,7 @@ function SecurityNotices({
             A tool changed after you approved it, a tool's definition contains
             instruction-like content, or a tool returned data that looks like
             injected instructions. Usually benign, but it's how rug pulls, tool
-            poisoning, and agentjacking work, so Conduit flags it (and labels
+            poisoning, and agentjacking work, so Toolport flags it (and labels
             suspicious tool output as data). Dismiss the ones you've reviewed.
           </p>
           <ul className="space-y-1.5 text-xs">
@@ -279,7 +279,7 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
 
   const share = async () => {
     const text =
-      `Conduit keeps ~${fmtTokens(savings.tokensSaved)} tokens of MCP tool definitions out of my agent's ` +
+      `Toolport keeps ~${fmtTokens(savings.tokensSaved)} tokens of MCP tool definitions out of my agent's ` +
       `context so far. One local gateway for all my MCP servers: conduitmcp.app`;
     try {
       await navigator.clipboard.writeText(text);
@@ -642,14 +642,14 @@ function LiveInspector({ refreshKey }: { refreshKey: number }) {
       {open && (
         <>
           <p className="mt-2 mb-3 max-w-2xl text-xs text-muted-foreground">
-            Ephemeral, local, opt-in. While live inspection is on, Conduit keeps the
+            Ephemeral, local, opt-in. While live inspection is on, Toolport keeps the
             last 50 tool calls' arguments and results here so you can inspect them.
             This buffer is separate from the audit log, never leaves your machine, and
             clears when you turn inspection off or restart the gateway.
           </p>
           {entries.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
-              No calls captured yet. Run a tool through Conduit and it'll show here.
+              No calls captured yet. Run a tool through Toolport and it'll show here.
             </p>
           ) : (
             <div className="flex flex-col gap-1">
@@ -770,7 +770,7 @@ export function ActivityView({
           <div>
             <p className="font-medium">Couldn't load activity</p>
             <p className="max-w-md text-sm text-muted-foreground">
-              Conduit couldn't reach the gateway or read the audit log. This is
+              Toolport couldn't reach the gateway or read the audit log. This is
               not an empty log, if the gateway isn't running, start it and
               refresh.
             </p>
@@ -789,7 +789,7 @@ export function ActivityView({
           <div>
             <p className="font-medium">No tool calls yet</p>
             <p className="max-w-md text-sm text-muted-foreground">
-              Once a client runs a tool through Conduit, every call is recorded
+              Once a client runs a tool through Toolport, every call is recorded
               here, with per-server latency and error rates.
             </p>
           </div>

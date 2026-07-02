@@ -11,7 +11,7 @@ import { isEnabled, activeProfile } from "@/lib/types";
 import type { Registry } from "@/lib/types";
 
 /**
- * Conduit Teams: join a team and have its shared MCP server set appear locally. The
+ * Toolport Teams: join a team and have its shared MCP server set appear locally. The
  * team server holds only the server set + non-secret config, never a key, so after
  * connecting you still vault each server's secrets locally (Servers tab). That keeps
  * "no keys in the cloud" true even on a team.
@@ -114,7 +114,7 @@ export function TeamsView({
     <div className="mx-auto max-w-2xl">
       <div className="mb-5 flex items-center gap-2">
         <Users className="size-5 text-muted-foreground" />
-        <h2 className="text-base font-semibold">Conduit Teams</h2>
+        <h2 className="text-base font-semibold">Toolport Teams</h2>
       </div>
 
       {error && (
@@ -137,7 +137,7 @@ export function TeamsView({
         <div className="rounded-xl border bg-card p-5">
           <h3 className="text-sm font-medium">Connect to a team</h3>
           <p className="mt-1 mb-4 max-w-prose text-sm text-muted-foreground">
-            Paste your team's Conduit Teams server URL and an invite code from your admin.
+            Paste your team's Toolport Teams server URL and an invite code from your admin.
             The team's MCP servers will appear in your active profile. Your keys never leave
             your machine, you'll add each server's secrets locally afterward.
           </p>
@@ -203,7 +203,7 @@ export function TeamsView({
                     </Button>
                   }
                   title="Leave this team?"
-                  description="This removes the team's shared servers from Conduit. Your own servers are untouched."
+                  description="This removes the team's shared servers from Toolport. Your own servers are untouched."
                   confirmLabel="Leave"
                   destructive
                   onConfirm={onDisconnect}
@@ -285,7 +285,7 @@ export function TeamsView({
                               description={
                                 isLocal
                                   ? `This runs a local command on your machine: ${detail}. Only enable it if you trust your team and recognize this command.`
-                                  : `This connects Conduit to ${detail}, a private/LAN address. Only enable it if you trust your team.`
+                                  : `This connects Toolport to ${detail}, a private/LAN address. Only enable it if you trust your team.`
                               }
                               confirmLabel="Enable"
                               onConfirm={() => onEnable(s.id)}

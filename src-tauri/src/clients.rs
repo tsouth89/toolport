@@ -51,7 +51,7 @@ pub struct DetectedClient {
     /// Servers that live outside the main config file but are still readable
     /// (e.g. Cursor plugin servers). Read-only inventory - managed by the client.
     pub plugin_servers: Vec<McpServer>,
-    /// Whether the Conduit gateway is currently installed in this client's config.
+    /// Whether the Toolport gateway is currently installed in this client's config.
     pub gateway_installed: bool,
     /// Set when the config exists but could not be read or parsed.
     pub error: Option<String>,
@@ -97,10 +97,10 @@ struct ClientDef {
     plugin_scan: Option<fn() -> Vec<McpServer>>,
 }
 
-/// The name Conduit uses for its own entry when installed into a client config.
+/// The name Toolport uses for its own entry when installed into a client config.
 pub const GATEWAY_ENTRY_NAME: &str = "conduit";
 
-/// Whether a registry entry refers to Conduit's own gateway. The gateway must
+/// Whether a registry entry refers to Toolport's own gateway. The gateway must
 /// never proxy itself (that recurses), and import must never pull it in.
 pub fn is_gateway_server(server: &ServerEntry) -> bool {
     server.id == GATEWAY_ENTRY_NAME
@@ -152,7 +152,7 @@ impl Platform {
 ///
 /// On Windows it's anchored to the user profile (`~/AppData/Roaming`) rather than
 /// `dirs::config_dir()`. MSIX-packaged apps (Claude Desktop) virtualize the
-/// Roaming known-folder into their package's LocalCache, and if the Conduit
+/// Roaming known-folder into their package's LocalCache, and if the Toolport
 /// process is ever launched inside such a context, `config_dir()` would resolve
 /// to that sandbox - so reads of Claude Desktop's `claude_desktop_config.json`
 /// would miss the real file and report "not configured". The user-profile path
@@ -1187,7 +1187,7 @@ fn parse_yaml_value(content: &str) -> Result<serde_yaml::Value, String> {
 /// Read an existing JSON config we're about to modify. Tolerant of JSONC. When
 /// `lenient` (e.g. Zed's settings.json, which holds the user's whole editor config),
 /// an unparseable file is an ERROR, never silently replaced with an empty object,
-/// so Conduit can't wipe it. For the well-behaved JSON configs, an unparseable file
+/// so Toolport can't wipe it. For the well-behaved JSON configs, an unparseable file
 /// falls back to empty (start fresh), preserving prior behavior.
 fn read_existing_json(content: &str, lenient: bool) -> Result<serde_json::Value, String> {
     match parse_json_value(content) {
@@ -1452,7 +1452,7 @@ pub fn detect_clients() -> Vec<DetectedClient> {
 // Write path
 //
 // Writing a server set back into a client's own format. Every write is preceded
-// by a timestamped backup of the existing file (stored centrally under Conduit's
+// by a timestamped backup of the existing file (stored centrally under Toolport's
 // config dir, not next to the client's config), so any change is reversible.
 // Only env values that are present (non-secret) are written inline; secret
 // values are vaulted separately and injected by the gateway at runtime.
@@ -2188,9 +2188,9 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
 // ---------------------------------------------------------------------------
 // Gateway install
 //
-// "Installing Conduit into a client" means adding a single entry to that
+// "Installing Toolport into a client" means adding a single entry to that
 // client's config that runs the conduit-gateway binary. The client then talks
-// only to Conduit, which routes to everything behind it. This is a surgical
+// only to Toolport, which routes to everything behind it. This is a surgical
 // edit: existing servers (and their secret env values) are left untouched.
 // ---------------------------------------------------------------------------
 
@@ -2208,7 +2208,7 @@ pub(crate) fn resolve_gateway_path() -> Option<PathBuf> {
     // re-homes the gateway into a nested helper bundle so it can carry its own
     // embedded provisioning profile:
     //     Conduit.app/Contents/Helpers/ConduitGateway.app/Contents/MacOS/conduit-gateway
-    // The app binary runs from Conduit.app/Contents/MacOS, so `dir` is that
+    // The app binary runs from Toolport.app/Contents/MacOS, so `dir` is that
     // directory. Prefer the nested binary when it exists. The old bare path
     // (Contents/MacOS/conduit-gateway) is kept as a SYMLINK to this same binary by
     // the signing script for backward compatibility with already-written client
@@ -2414,19 +2414,19 @@ fn install_or_remove(
     })
 }
 
-/// Add Conduit's gateway entry to a client's config (preserves existing servers).
+/// Add Toolport's gateway entry to a client's config (preserves existing servers).
 /// `profile` scopes the client to one profile via `CONDUIT_PROFILE` (None = all).
 pub fn install_gateway(client_id: &str, profile: Option<&str>) -> Result<WriteOutcome, String> {
     install_or_remove(client_id, true, profile)
 }
 
-/// Remove Conduit's gateway entry from a client's config.
+/// Remove Toolport's gateway entry from a client's config.
 pub fn uninstall_gateway(client_id: &str) -> Result<WriteOutcome, String> {
     install_or_remove(client_id, false, None)
 }
 
-/// Replace a client's entire server list with just the Conduit gateway. Used by
-/// "migrate": after the client's servers are imported into Conduit, this leaves
+/// Replace a client's entire server list with just the Toolport gateway. Used by
+/// "migrate": after the client's servers are imported into Toolport, this leaves
 /// the client talking only to the gateway. Backs up first; unrelated config keys
 /// are preserved. Caller is responsible for importing first so nothing is lost.
 pub fn migrate_to_gateway(client_id: &str, profile: Option<&str>) -> Result<WriteOutcome, String> {

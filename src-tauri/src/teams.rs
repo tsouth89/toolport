@@ -1,4 +1,4 @@
-//! Conduit Teams client: join a team, pull/push the shared MCP server set, and merge
+//! Toolport Teams client: join a team, pull/push the shared MCP server set, and merge
 //! it into the local registry non-destructively.
 //!
 //! The Teams server (the paid, source-available `conduit-teams` layer) holds only the

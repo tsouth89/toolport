@@ -112,7 +112,7 @@ function VersionFooter({
     if (!update) return;
     setInstalling(true);
     toast.info(`Updating to v${update.version}…`, {
-      description: "Conduit will restart when it's done.",
+      description: "Toolport will restart when it's done.",
     });
     try {
       await installUpdate(update);
@@ -154,7 +154,7 @@ function VersionFooter({
           title="Check for updates"
           className={`rounded text-muted-foreground transition hover:text-foreground disabled:opacity-70 ${FOCUS_RING}`}
         >
-          {checking ? "Checking…" : `Conduit v${version}`}
+          {checking ? "Checking…" : `Toolport v${version}`}
         </button>
       )}
 
@@ -309,7 +309,7 @@ interface RowProps {
   onSelect: () => void;
 }
 
-/** A client row is about two things only: is Conduit connected here, and is
+/** A client row is about two things only: is Toolport connected here, and is
  * there anything left to import. Raw server counts are deliberately gone -
  * client inventory isn't something you manage from the sidebar. */
 function ClientRow({ client, importCount, selected, onSelect }: RowProps) {
@@ -362,8 +362,8 @@ function ClientRow({ client, importCount, selected, onSelect }: RowProps) {
         </p>
         <p className="mt-1 text-xs text-muted-foreground">
           {connected
-            ? "Conduit is the gateway here. Other entries are just import sources."
-            : "Connect Conduit here, and import any servers you want it to manage."}
+            ? "Toolport is the gateway here. Other entries are just import sources."
+            : "Connect Toolport here, and import any servers you want it to manage."}
         </p>
         {client.usesConnectors && (
           <p className="mt-1 text-xs text-info">
@@ -464,7 +464,7 @@ export function AppSidebar({
           </g>
         </svg>
         <div className="leading-tight">
-          <div className="font-semibold tracking-tight">Conduit</div>
+          <div className="font-semibold tracking-tight">Toolport</div>
           <div className="text-xs text-muted-foreground">
             MCP control center
           </div>

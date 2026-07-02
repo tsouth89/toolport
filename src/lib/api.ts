@@ -237,7 +237,7 @@ export function httpBridgeStatus(): Promise<HttpBridgeStatus> {
   return invoke<HttpBridgeStatus>("http_bridge_status");
 }
 
-/** Join a Conduit Teams server with an invite code; merges the team's servers in. */
+/** Join a Toolport Teams server with an invite code; merges the team's servers in. */
 export function teamConnect(
   serverUrl: string,
   inviteCode: string,
@@ -270,7 +270,7 @@ export function detectClients(): Promise<DetectedClient[]> {
   return invoke<DetectedClient[]>("detect_clients");
 }
 
-/** Install the Conduit gateway into a client's config, optionally scoped to a
+/** Install the Toolport gateway into a client's config, optionally scoped to a
  * profile (by name). Omit profile to expose all enabled servers. */
 export function installGateway(
   clientId: string,
@@ -282,13 +282,13 @@ export function installGateway(
   });
 }
 
-/** Remove the Conduit gateway from a client's config. */
+/** Remove the Toolport gateway from a client's config. */
 export function uninstallGateway(clientId: string): Promise<WriteOutcome> {
   return invoke<WriteOutcome>("uninstall_gateway", { clientId });
 }
 
-/** Import a client's servers into Conduit, then leave the client with only the
- * Conduit gateway (optionally scoped to a profile). Backs up the config first. */
+/** Import a client's servers into Toolport, then leave the client with only the
+ * Toolport gateway (optionally scoped to a profile). Backs up the config first. */
 export function migrateClient(
   clientId: string,
   profile?: string,
@@ -344,7 +344,7 @@ export function probeAuth(url: string): Promise<AuthInfo> {
   return invoke<AuthInfo>("probe_auth", { url });
 }
 
-/** Open Conduit's data directory (registry, logs, audit) in the OS file manager. */
+/** Open Toolport's data directory (registry, logs, audit) in the OS file manager. */
 export function openDataDir(): Promise<void> {
   return invoke<void>("open_data_dir");
 }
@@ -416,7 +416,7 @@ export function setAllEnabled(
   return invoke<Registry>("set_all_enabled", { profileId, enabled });
 }
 
-/** Load Conduit's registry (servers + profiles). */
+/** Load Toolport's registry (servers + profiles). */
 export function getRegistry(): Promise<Registry> {
   return invoke<Registry>("get_registry");
 }

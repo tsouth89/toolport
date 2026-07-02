@@ -1,4 +1,4 @@
-//! Conduit gateway.
+//! Toolport gateway.
 //!
 //! A local MCP server, spoken over stdio (newline-delimited JSON-RPC 2.0). Each
 //! AI client points at this one binary; the gateway routes to all the real
@@ -50,7 +50,7 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 fn status_tool_def() -> Value {
     json!({
         "name": "conduit_status",
-        "description": "Report Conduit's status: the MCP servers enabled in the active profile, each server's tool count, and how many tokens (and dollars) lazy discovery has saved you so far.",
+        "description": "Report Toolport's status: the MCP servers enabled in the active profile, each server's tool count, and how many tokens (and dollars) lazy discovery has saved you so far.",
         "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     })
 }
@@ -61,7 +61,7 @@ fn status_tool_def() -> Value {
 /// the real tool on demand and dispatches through `conduit_call_tool`.
 ///
 /// The description leads with a directive plus GENERIC capability examples (email,
-/// payments, deployments, ...) so the model treats Conduit as the front door for any
+/// payments, deployments, ...) so the model treats Toolport as the front door for any
 /// external action rather than grabbing a loosely-matched competitor tool or giving
 /// up. We intentionally do NOT list the user's specific connected servers here: that
 /// would scale the description with server count, go stale, and leak the user's stack
@@ -133,7 +133,7 @@ fn confirm_tool_def() -> Value {
     json!({
         "name": "conduit_confirm",
         "description": "Confirm and execute a destructive tool call that was intercepted for review. \
-            When Conduit blocks a destructive call, it returns a preview with a `token`. \
+            When Toolport blocks a destructive call, it returns a preview with a `token`. \
             Call this with that token to proceed. The original arguments are replayed exactly \
             — you cannot change them. The token expires after 60 seconds.",
         "inputSchema": {
@@ -150,9 +150,9 @@ fn confirm_tool_def() -> Value {
 fn fetch_result_tool_def() -> Value {
     json!({
         "name": "conduit_fetch_result",
-        "description": "Read more of a large tool result that Conduit truncated. When a \
-            result is too big for context, Conduit returns the head plus a cursor in a \
-            `[Conduit shaped this result]` marker; call this with that `cursor` and the \
+        "description": "Read more of a large tool result that Toolport truncated. When a \
+            result is too big for context, Toolport returns the head plus a cursor in a \
+            `[Toolport shaped this result]` marker; call this with that `cursor` and the \
             `offset` shown in the marker to page through the rest. Nothing was lost.",
         "inputSchema": {
             "type": "object",
@@ -169,9 +169,9 @@ fn fetch_result_tool_def() -> Value {
 fn enable_server_tool_def() -> Value {
     json!({
         "name": "conduit_enable_server",
-        "description": "Turn ON an MCP server in Conduit so its tools become available to you. \
+        "description": "Turn ON an MCP server in Toolport so its tools become available to you. \
             Pass the server's id or name (run conduit_status to see the list). Takes effect within \
-            about a second. Only works when the user has allowed agent control in Conduit; the \
+            about a second. Only works when the user has allowed agent control in Toolport; the \
             global block on destructive tools stays under the user's control and cannot be changed here.",
         "inputSchema": {
             "type": "object",
@@ -187,9 +187,9 @@ fn enable_server_tool_def() -> Value {
 fn disable_server_tool_def() -> Value {
     json!({
         "name": "conduit_disable_server",
-        "description": "Turn OFF an MCP server in Conduit so its tools are no longer loaded. Pass the \
+        "description": "Turn OFF an MCP server in Toolport so its tools are no longer loaded. Pass the \
             server's id or name (run conduit_status to see the list). Takes effect within about a \
-            second. Only works when the user has allowed agent control in Conduit.",
+            second. Only works when the user has allowed agent control in Toolport.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -215,15 +215,15 @@ fn set_server_enabled_via_agent(
 ) -> Result<String, String> {
     if !reg.allow_agent_control {
         return Err(
-            "Conduit: agent control is off. The user must turn on \"Allow agent control\" \
-            in Conduit before an agent can enable or disable servers."
+            "Toolport: agent control is off. The user must turn on \"Allow agent control\" \
+            in Toolport before an agent can enable or disable servers."
                 .to_string(),
         );
     }
     let target = target.trim();
     if target.is_empty() {
         return Err(
-            "Conduit: pass the `server` id or name to change (run conduit_status for the list)."
+            "Toolport: pass the `server` id or name to change (run conduit_status for the list)."
                 .to_string(),
         );
     }
@@ -234,7 +234,7 @@ fn set_server_enabled_via_agent(
         .ok_or_else(|| {
             let known: Vec<&str> = reg.servers.iter().map(|s| s.name.as_str()).collect();
             format!(
-                "Conduit: no server matches \"{target}\". Known servers: {}.",
+                "Toolport: no server matches \"{target}\". Known servers: {}.",
                 known.join(", ")
             )
         })?;
@@ -243,14 +243,14 @@ fn set_server_enabled_via_agent(
     let profile_id = profile
         .map(str::to_string)
         .or_else(|| reg.active_profile_id.clone())
-        .ok_or_else(|| "Conduit: no active profile to change.".to_string())?;
+        .ok_or_else(|| "Toolport: no active profile to change.".to_string())?;
 
     // Load fresh so a concurrent edit in the app isn't clobbered, and re-check the
     // opt-in on that fresh copy (the user may have just turned it off).
     let mut fresh = registry::load_from(path)
-        .map_err(|e| format!("Conduit: could not read the registry ({e})."))?;
+        .map_err(|e| format!("Toolport: could not read the registry ({e})."))?;
     if !fresh.allow_agent_control {
-        return Err("Conduit: agent control is off.".to_string());
+        return Err("Toolport: agent control is off.".to_string());
     }
     if fresh.is_enabled(&profile_id, &server_id) == enable {
         return Ok(format!(
@@ -260,7 +260,7 @@ fn set_server_enabled_via_agent(
     }
     fresh.set_server_enabled(&profile_id, &server_id, enable)?;
     registry::save_to(path, &fresh)
-        .map_err(|e| format!("Conduit: could not save the registry ({e})."))?;
+        .map_err(|e| format!("Toolport: could not save the registry ({e})."))?;
     glog(&format!(
         "agent control: {} server '{server_id}' in profile '{profile_id}'",
         if enable { "ENABLED" } else { "DISABLED" }
@@ -771,7 +771,7 @@ fn enabled_summary(
     // bridge's union - never another tenant's name, command, URL, or tool count).
     // Stdio and the legacy full-access bridge token see the active profile, as
     // before. Both the server list and the tool counts are gated by this set, so
-    // they always agree. Exclude Conduit's own gateway entry (infrastructure).
+    // they always agree. Exclude Toolport's own gateway entry (infrastructure).
     let visible: std::collections::HashSet<String> = match allowed {
         Some(a) => a.clone(),
         None => reg
@@ -845,7 +845,7 @@ fn fmt_tokens(n: u64) -> String {
 }
 
 /// One line summarizing what lazy discovery has saved, for conduit_status, so an
-/// agent can answer "what is Conduit saving me?". Empty until something is saved
+/// agent can answer "what is Toolport saving me?". Empty until something is saved
 /// (a fresh install, or non-lazy mode where nothing is recorded).
 fn savings_line() -> String {
     let s = savings::summary();
@@ -1343,7 +1343,7 @@ fn handle_request(
                     return Some(success(
                         id,
                         json!({
-                            "content": [{ "type": "text", "text": "Conduit: pass the `token` from the intercepted call's preview." }],
+                            "content": [{ "type": "text", "text": "Toolport: pass the `token` from the intercepted call's preview." }],
                             "isError": true
                         }),
                     ));
@@ -1358,7 +1358,7 @@ fn handle_request(
                         return Some(success(
                             id,
                             json!({
-                                "content": [{ "type": "text", "text": "Conduit: token expired or invalid. Call the tool again to get a new preview." }],
+                                "content": [{ "type": "text", "text": "Toolport: token expired or invalid. Call the tool again to get a new preview." }],
                                 "isError": true
                             }),
                         ));
@@ -1506,7 +1506,7 @@ fn handle_request(
                     .unwrap_or("");
                 let result = match registry::resolved_path() {
                     Some(p) => set_server_enabled_via_agent(reg, profile, &p, target, enable),
-                    None => Err("Conduit: could not locate the registry file.".to_string()),
+                    None => Err("Toolport: could not locate the registry file.".to_string()),
                 };
                 let (text, is_error) = match result {
                     Ok(msg) => (msg, false),
@@ -1538,7 +1538,7 @@ fn handle_request(
                     return Some(success(
                         id,
                         json!({
-                            "content": [{ "type": "text", "text": format!("Conduit: '{srv}' is not available to this client.") }],
+                            "content": [{ "type": "text", "text": format!("Toolport: '{srv}' is not available to this client.") }],
                             "isError": true
                         }),
                     ));
@@ -1561,7 +1561,7 @@ fn handle_request(
                     )
                 };
                 let msg = format!(
-                    "Conduit: \"{value}\" for \"{param}\" looks like a placeholder, not a real \
+                    "Toolport: \"{value}\" for \"{param}\" looks like a placeholder, not a real \
                      value, and was not sent. Don't invent identifiers. To get a real \"{param}\", \
                      {source}, then call {name} again with the value it returns."
                 );
@@ -1691,7 +1691,7 @@ fn handle_request(
                     Some(success(
                         id,
                         json!({
-                            "content": [{ "type": "text", "text": format!("Conduit: {e}.{recovery}") }],
+                            "content": [{ "type": "text", "text": format!("Toolport: {e}.{recovery}") }],
                             "isError": true
                         }),
                     ))
@@ -1711,7 +1711,7 @@ fn handle_request(
                 .unwrap_or("");
             match router.read_resource(uri) {
                 Ok(result) => Some(success(id, result)),
-                Err(e) => Some(error(id, -32602, &format!("Conduit: {e}"))),
+                Err(e) => Some(error(id, -32602, &format!("Toolport: {e}"))),
             }
         }
         "prompts/list" => {
@@ -1731,7 +1731,7 @@ fn handle_request(
                 .unwrap_or_else(|| json!({}));
             match router.get_prompt(name, arguments) {
                 Ok(result) => Some(success(id, result)),
-                Err(e) => Some(error(id, -32602, &format!("Conduit: {e}"))),
+                Err(e) => Some(error(id, -32602, &format!("Toolport: {e}"))),
             }
         }
         "ping" => Some(success(id, json!({}))),
@@ -2394,8 +2394,8 @@ fn openapi_spec(
     json!({
         "openapi": "3.1.0",
         "info": {
-            "title": "Conduit gateway",
-            "description": "Conduit MCP gateway as OpenAPI for HTTP tool clients (Open WebUI and any OpenAPI consumer). Search with conduit_search_tools, then call by name with conduit_call_tool.",
+            "title": "Toolport gateway",
+            "description": "Toolport MCP gateway as OpenAPI for HTTP tool clients (Open WebUI and any OpenAPI consumer). Search with conduit_search_tools, then call by name with conduit_call_tool.",
             "version": env!("CARGO_PKG_VERSION")
         },
         // Relative base URL: resolves against the origin the spec was fetched
@@ -2409,7 +2409,7 @@ fn openapi_spec(
                 "bearerAuth": {
                     "type": "http",
                     "scheme": "bearer",
-                    "description": "The bearer token shown in Conduit's Settings -> Integrations toggle. Paste it as the API key in your client. Required whenever the gateway was started with a token (the desktop app always sets one)."
+                    "description": "The bearer token shown in Toolport's Settings -> Integrations toggle. Paste it as the API key in your client. Required whenever the gateway was started with a token (the desktop app always sets one)."
                 }
             },
             "schemas": {
@@ -2486,7 +2486,7 @@ fn handle_http(
         ("GET", "/") | ("GET", "/docs") => (
             200,
             "text/plain; charset=utf-8",
-            "Conduit gateway (HTTP/OpenAPI mode). OpenAPI at /openapi.json. POST a tool name with a JSON body, e.g. POST /conduit_search_tools {\"query\":\"...\"}."
+            "Toolport gateway (HTTP/OpenAPI mode). OpenAPI at /openapi.json. POST a tool name with a JSON body, e.g. POST /conduit_search_tools {\"query\":\"...\"}."
                 .to_string(),
         ),
         ("POST", p) => {

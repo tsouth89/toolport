@@ -1,7 +1,7 @@
 //! Result-shaping: keep oversized tool results from blowing the model's context
 //! WITHOUT losing data. When a downstream tool returns a result larger than the
 //! byte budget, the full body is cached in-process and the model gets a truncated
-//! head plus a Conduit-stamped marker carrying a cursor. `conduit_fetch_result`
+//! head plus a Toolport-stamped marker carrying a cursor. `conduit_fetch_result`
 //! pages through the cached full result. Lossless: nothing is dropped, only
 //! deferred, and the full data stays retrievable.
 //!
@@ -180,7 +180,7 @@ pub fn shape_result(result: &mut Value, budget: usize) -> bool {
     }
 
     let marker = format!(
-        "\n\n[Conduit shaped this result: it was ~{} KB, larger than the {} KB context \
+        "\n\n[Toolport shaped this result: it was ~{} KB, larger than the {} KB context \
          budget. Showing the first {} of {} characters. The full result is cached, call \
          conduit_fetch_result with {{\"cursor\":\"{}\",\"offset\":{}}} to read the rest. \
          Nothing was lost.]",
@@ -203,7 +203,7 @@ pub fn fetch_result(cursor: &str, offset: usize, len: usize) -> Value {
     let Some(c) = map.get(cursor) else {
         return text_result(
             format!(
-                "[Conduit: cursor \"{cursor}\" is unknown or expired. Re-run the original \
+                "[Toolport: cursor \"{cursor}\" is unknown or expired. Re-run the original \
                  tool call to get a fresh result.]"
             ),
             true,
@@ -214,7 +214,7 @@ pub fn fetch_result(cursor: &str, offset: usize, len: usize) -> Value {
     if offset >= total {
         return text_result(
             format!(
-                "[Conduit: offset {offset} is at or past the end of the result ({total} \
+                "[Toolport: offset {offset} is at or past the end of the result ({total} \
                  characters). Nothing more to read.]"
             ),
             false,
@@ -226,11 +226,11 @@ pub fn fetch_result(cursor: &str, offset: usize, len: usize) -> Value {
     let remaining = total - end;
     let footer = if remaining > 0 {
         format!(
-            "\n\n[Conduit: characters {offset}..{end} of {total}. {remaining} remain, call \
+            "\n\n[Toolport: characters {offset}..{end} of {total}. {remaining} remain, call \
              conduit_fetch_result with offset={end} for the next slice.]"
         )
     } else {
-        format!("\n\n[Conduit: end of result ({total} characters).]")
+        format!("\n\n[Toolport: end of result ({total} characters).]")
     };
     text_result(format!("{slice}{footer}"), false)
 }
@@ -299,7 +299,7 @@ mod tests {
         });
         assert!(shape_result(&mut r, 2048));
         let text = r["content"][0]["text"].as_str().unwrap();
-        let head = text.split("\n\n[Conduit shaped").next().unwrap();
+        let head = text.split("\n\n[Toolport shaped").next().unwrap();
         assert!(
             head.len() <= 2048,
             "head was {} bytes, over the 2048 budget",

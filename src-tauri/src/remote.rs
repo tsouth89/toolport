@@ -122,7 +122,7 @@ fn authed_transport(
     Ok(HttpTransport::with_auth_refresh(url, token, refresh))
 }
 
-/// Provenance Conduit doesn't trust to point at the user's private network. Shared
+/// Provenance Toolport doesn't trust to point at the user's private network. Shared
 /// imports (`"shared"`) and public-registry entries (`"registry"`) are
 /// attacker-influenceable; user-added, client-imported, curated-catalog, and team
 /// servers are not, so their local URLs (e.g. a localhost MCP server) still connect.
@@ -155,13 +155,13 @@ fn guard_connect_target(server: &ServerEntry) -> Result<(), String> {
     let host = oauth::host_of_url(server.url.as_deref().unwrap_or("")).unwrap_or_default();
     if host_is_link_local(&host) {
         return Err(format!(
-            "Conduit refused to connect to {host}: link-local / cloud-metadata addresses \
+            "Toolport refused to connect to {host}: link-local / cloud-metadata addresses \
              (169.254.x) are never a valid MCP server and are a common SSRF target."
         ));
     }
     if is_untrusted_source(server.source.as_deref()) && oauth::host_is_private(&host) {
         return Err(format!(
-            "Conduit refused to connect \"{}\" to the private address {host}: it came from \
+            "Toolport refused to connect \"{}\" to the private address {host}: it came from \
              an untrusted source ({}). If you trust it, add the server yourself.",
             server.name,
             server.source.as_deref().unwrap_or("unknown")

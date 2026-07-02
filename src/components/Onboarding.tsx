@@ -160,10 +160,10 @@ function Welcome({
   const found =
     names.length === 0
       ? "We didn't detect any MCP clients yet. You can still add servers now, then connect a client once it's installed."
-      : `We found ${listJoin(names)} on your machine. Conduit will sit between your tools and your servers, so you set each one up once.`;
+      : `We found ${listJoin(names)} on your machine. Toolport will sit between your tools and your servers, so you set each one up once.`;
   return (
     <>
-      <StepHeader icon={<Waypoints className="size-5" />} title="Welcome to Conduit">
+      <StepHeader icon={<Waypoints className="size-5" />} title="Welcome to Toolport">
         One local gateway for all your MCP servers, shared by every AI tool, so your
         agent loads 3 tools instead of hundreds (up to 91% fewer tokens) and every
         server is watched for tampering and prompt injection.
@@ -223,7 +223,7 @@ function AddServers({
     }
   }
 
-  /** Add every server in the chosen stack that isn't already in Conduit. */
+  /** Add every server in the chosen stack that isn't already in Toolport. */
   async function applyStack(s: Stack) {
     setApplying(true);
     const existing = new Set(registry.servers.map((x) => x.name.toLowerCase()));
@@ -242,7 +242,7 @@ function AddServers({
       toast.success(
         added > 0
           ? `Added ${added} server${added === 1 ? "" : "s"} from ${s.name}`
-          : `${s.name}: every server is already in Conduit`,
+          : `${s.name}: every server is already in Toolport`,
         {
           description:
             needCreds > 0
@@ -260,7 +260,7 @@ function AddServers({
   return (
     <>
       <StepHeader icon={<Download className="size-5" />} title="Add your first servers">
-        Pick what you work on and Conduit sets up a matching stack. You can also
+        Pick what you work on and Toolport sets up a matching stack. You can also
         import from your other tools or browse the full catalog.
       </StepHeader>
 
@@ -340,7 +340,7 @@ function AddServers({
         {imported !== null && (
           <div className="flex items-center gap-2 rounded-md bg-success/10 px-3 py-2 text-sm text-success">
             <Check className="size-4" />
-            Imported. Conduit now manages {imported} server
+            Imported. Toolport now manages {imported} server
             {imported === 1 ? "" : "s"}.
           </div>
         )}
@@ -377,7 +377,7 @@ function ConnectClients({
       await installGateway(client.id);
       setDone((prev) => new Set(prev).add(client.id));
       onConnected();
-      toast.success(`Connected Conduit to ${client.name}`);
+      toast.success(`Connected Toolport to ${client.name}`);
     } catch (e) {
       toastError(`Couldn't connect: ${e}`);
     } finally {
@@ -388,7 +388,7 @@ function ConnectClients({
   return (
     <>
       <StepHeader icon={<Link2 className="size-5" />} title="Connect a client">
-        Point a tool at Conduit. It connects once, then sees every server you
+        Point a tool at Toolport. It connects once, then sees every server you
         enable here, no per-tool setup.
       </StepHeader>
 
@@ -493,11 +493,11 @@ function Done({
       >
         {ready ? (
           <>
-            Conduit now manages {serverCount} server
+            Toolport now manages {serverCount} server
             {serverCount === 1 ? "" : "s"} across {connectedCount} connected tool
             {connectedCount === 1 ? "" : "s"}. Toggle one on or off and your clients
             update live, no restart. Each client loads 3 search tools instead of
-            every tool, up to 91% fewer tokens at the same task success. And Conduit watches
+            every tool, up to 91% fewer tokens at the same task success. And Toolport watches
             every server for tampering and prompt injection, see Activity.
           </>
         ) : (
@@ -523,7 +523,7 @@ function Done({
       )}
 
       <Button onClick={onFinish} className="self-start">
-        {ready ? "Start using Conduit" : "Got it"}
+        {ready ? "Start using Toolport" : "Got it"}
         <ArrowRight className="size-4" />
       </Button>
     </>

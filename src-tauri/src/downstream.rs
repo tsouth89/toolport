@@ -256,7 +256,7 @@ fn forward_line(
     tx.send(line).is_ok()
 }
 
-/// Spawn-time supply-chain guard. Conduit runs stdio servers as full-privilege
+/// Spawn-time supply-chain guard. Toolport runs stdio servers as full-privilege
 /// host processes, so this is NOT a sandbox; it refuses the specific *smuggling*
 /// techniques where a benign-looking launcher (`node`, `docker`, `sh`) is turned
 /// into arbitrary code execution or a privileged container by its arguments. The
@@ -290,7 +290,7 @@ pub fn screen_spawn_command(command: &str, args: &[String]) -> Result<(), String
     match dangerous {
         Some(flag) => Err(format!(
             "refusing to launch '{command}': the argument '{flag}' can execute \
-             arbitrary code or escape isolation. Conduit blocks inline-eval and \
+             arbitrary code or escape isolation. Toolport blocks inline-eval and \
              privileged-container flags on spawned servers as a supply-chain guard. \
              If this server is yours and you trust it, launch it from a script file \
              or a wrapper binary instead of an inline command."
@@ -328,7 +328,7 @@ fn first_flag<'a>(args: &'a [String], flags: &[&str]) -> Option<&'a str> {
 /// Docker/Podman args that ESCALATE beyond what a normal host process already has:
 /// privileged mode, added capabilities, device passthrough, and host-namespace
 /// sharing. Plain host mounts (`-v` / `--volume` / `--mount`) are intentionally NOT
-/// blocked: Conduit already runs npx/uvx/binary servers with full host-filesystem
+/// blocked: Toolport already runs npx/uvx/binary servers with full host-filesystem
 /// access, so a docker volume mount is no more dangerous than the servers we run
 /// unrestricted, and blocking it would false-positive on legitimate dockerized MCP
 /// servers. Namespace flags (`--pid`, `--net`, ...) trip only when their value is

@@ -272,7 +272,7 @@ export function aggregateServers(clients: DetectedClient[]): AggregatedServer[] 
   );
 }
 
-// --- Conduit registry (source of truth) ---
+// --- Toolport registry (source of truth) ---
 
 export interface EnvVar {
   key: string;
@@ -318,7 +318,7 @@ export interface Registry {
   lazyDiscovery?: boolean;
   /** Opt-in: let an agent enable/disable servers via the gateway's control tools. */
   allowAgentControl?: boolean;
-  /** Connection to a Conduit Teams server, if joined. Token lives in the keychain. */
+  /** Connection to a Toolport Teams server, if joined. Token lives in the keychain. */
   team?: TeamConnection | null;
   /** Per-server result-shaping budgets in bytes, keyed by server id. Absent =
    * global default; 0 = never shape (full fidelity); n = cap that server at n bytes. */
@@ -342,7 +342,7 @@ export interface HttpClient {
   profile: string;
 }
 
-/** A joined Conduit Teams server (the shared config-sync layer). */
+/** A joined Toolport Teams server (the shared config-sync layer). */
 export interface TeamConnection {
   serverUrl: string;
   teamId: string;
@@ -364,7 +364,7 @@ export function isEnabled(registry: Registry, serverId: string): boolean {
   return activeProfile(registry)?.enabledServerIds.includes(serverId) ?? false;
 }
 
-/** Whether a registry entry is Conduit's own gateway. It's infrastructure, not a
+/** Whether a registry entry is Toolport's own gateway. It's infrastructure, not a
  * proxied server, so it shouldn't appear as a manageable server in the UI.
  * Mirrors `is_gateway_server` in the Rust backend. */
 export function isGatewayServer(server: ServerEntry): boolean {
@@ -376,9 +376,9 @@ export function isGatewayServer(server: ServerEntry): boolean {
   );
 }
 
-/** Servers a client has (config + plugins) that Conduit doesn't manage yet.
+/** Servers a client has (config + plugins) that Toolport doesn't manage yet.
  * These are the only client-side entries worth surfacing - they're import
- * candidates. Conduit's own gateway entry is never importable. */
+ * candidates. Toolport's own gateway entry is never importable. */
 export function importableServers(
   client: DetectedClient,
   registry: Registry | null,

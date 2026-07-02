@@ -31,7 +31,7 @@ import { Label } from "@/components/ui/label";
 function secretErrorMessage(e: unknown): string {
   const msg = `${e}`;
   if (/secret service|freedesktop\.secret|keyring|dbus|d-bus/i.test(msg)) {
-    return "No system keyring found. Conduit keeps secrets in your OS keyring; on Linux that needs a running Secret Service (e.g. gnome-keyring or KWallet). Start and unlock one, then retry.";
+    return "No system keyring found. Toolport keeps secrets in your OS keyring; on Linux that needs a running Secret Service (e.g. gnome-keyring or KWallet). Start and unlock one, then retry.";
   }
   return msg;
 }

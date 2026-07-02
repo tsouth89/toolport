@@ -224,7 +224,7 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           liveInspect,
           "text-info",
           "Live request/response inspection",
-          "Off by default. While on, Conduit captures each tool call's arguments and results to a small local, ephemeral buffer (the last 50 calls) so you can inspect them in Activity. This is separate from the audit log, never leaves your machine, and is cleared when you turn it off or restart the gateway.",
+          "Off by default. While on, Toolport captures each tool call's arguments and results to a small local, ephemeral buffer (the last 50 calls) so you can inspect them in Activity. This is separate from the audit log, never leaves your machine, and is cleared when you turn it off or restart the gateway.",
           applyLiveInspect,
         )}
         {quarantined.length > 0 && (

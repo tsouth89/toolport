@@ -137,9 +137,9 @@ export function ShareDialog({ trigger, onImported }: Props) {
   async function saveToFile() {
     try {
       const path = await save({
-        title: "Save Conduit setup",
+        title: "Save Toolport setup",
         defaultPath: `${slug(name) || "conduit-setup"}.json`,
-        filters: [{ name: "Conduit setup", extensions: ["json"] }],
+        filters: [{ name: "Toolport setup", extensions: ["json"] }],
       });
       if (!path) return;
       await exportConfigToPath(path, name, description, shareFilter);
@@ -166,10 +166,10 @@ export function ShareDialog({ trigger, onImported }: Props) {
   async function loadFromFile() {
     try {
       const path = await openFile({
-        title: "Open a Conduit setup",
+        title: "Open a Toolport setup",
         multiple: false,
         directory: false,
-        filters: [{ name: "Conduit setup", extensions: ["json"] }],
+        filters: [{ name: "Toolport setup", extensions: ["json"] }],
       });
       if (!path || typeof path !== "string") return;
       const json = await readSetupFile(path);
@@ -195,7 +195,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
   }
 
   // Open the import review when a conduit://import?s=<id> deep link arrives (the
-  // share page's "Open in Conduit" button), including one captured before mount.
+  // share page's "Open in Toolport" button), including one captured before mount.
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;

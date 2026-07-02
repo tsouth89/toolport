@@ -254,7 +254,7 @@ export function RegistryServerRow({
                 </button>
               }
               title={`Remove ${server.name}?`}
-              description="This deletes the server from Conduit. Any saved secrets stay in your keychain."
+              description="This deletes the server from Toolport. Any saved secrets stay in your keychain."
               confirmLabel="Remove"
               destructive
               onConfirm={onRemove}

@@ -316,7 +316,7 @@ fn write_to_client(
     clients::write_servers(&client_id, &servers)
 }
 
-/// Install the Conduit gateway into a client (one click "connect to Conduit").
+/// Install the Toolport gateway into a client (one click "connect to Toolport").
 /// `profile` scopes that client to one profile (None = all enabled servers).
 #[tauri::command]
 fn install_gateway(
@@ -333,7 +333,7 @@ fn install_gateway(
     Ok(outcome)
 }
 
-/// Remove the Conduit gateway from a client.
+/// Remove the Toolport gateway from a client.
 #[tauri::command]
 fn uninstall_gateway(
     state: State<RegistryState>,
@@ -400,16 +400,16 @@ fn remove_http_client(state: State<RegistryState>, id: String) -> Result<Registr
 #[serde(rename_all = "camelCase")]
 struct MigrateResult {
     registry: Registry,
-    /// How many of the client's servers were newly imported into Conduit.
+    /// How many of the client's servers were newly imported into Toolport.
     imported: usize,
     /// Names of the servers moved out of the client's config.
     moved: Vec<String>,
 }
 
-/// Migrate a client to Conduit: import its directly-configured servers into the
-/// registry, then rewrite the client's config to contain only the Conduit
+/// Migrate a client to Toolport: import its directly-configured servers into the
+/// registry, then rewrite the client's config to contain only the Toolport
 /// gateway (optionally scoped to `profile`). The client is left managing nothing
-/// directly - everything routes through Conduit. Backs the config up first.
+/// directly - everything routes through Toolport. Backs the config up first.
 ///
 /// Plugin servers (read-only, outside the config file) are left untouched.
 #[tauri::command]
@@ -541,7 +541,7 @@ fn savings_summary() -> serde_json::Value {
 /// How many trailing gateway-log lines the diagnostics bundle includes.
 const DIAG_LOG_LINES: usize = 200;
 
-/// A shareable diagnostics blob for bug reports: Conduit version + OS, a
+/// A shareable diagnostics blob for bug reports: Toolport version + OS, a
 /// secrets-stripped registry summary, and the tail of the always-on gateway log.
 /// Safe to paste into a public issue, secret values live in the OS keychain and
 /// are never included; env vars are listed by key name only.
@@ -549,7 +549,7 @@ const DIAG_LOG_LINES: usize = 200;
 fn gather_diagnostics() -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
-    let _ = writeln!(out, "Conduit diagnostics");
+    let _ = writeln!(out, "Toolport diagnostics");
     let _ = writeln!(out, "version: {}", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(out, "os: {} {}", std::env::consts::OS, std::env::consts::ARCH);
 
@@ -922,7 +922,7 @@ fn reload_into_state(state: &RegistryState) -> Result<Registry, String> {
     Ok(fresh)
 }
 
-/// Join a Conduit Teams server with an invite code. Vaults the member token in the OS
+/// Join a Toolport Teams server with an invite code. Vaults the member token in the OS
 /// keychain, pulls the team's server set, and merges it into the local registry
 /// non-destructively (team servers are tagged and enabled in the active profile).
 #[tauri::command]
@@ -1086,7 +1086,7 @@ fn secret_status(server_id: String, keys: Vec<String>) -> Vec<(String, bool)> {
         .collect()
 }
 
-/// Open Conduit's data directory (registry, logs, audit) in the OS file manager,
+/// Open Toolport's data directory (registry, logs, audit) in the OS file manager,
 /// so users can back it up or inspect it.
 #[tauri::command]
 fn open_data_dir() -> Result<(), String> {
@@ -1265,7 +1265,7 @@ fn read_setup_file(path: String) -> Result<String, String> {
     const MAX_SETUP_BYTES: u64 = 4 * 1024 * 1024;
     if let Ok(meta) = std::fs::metadata(&path) {
         if meta.len() > MAX_SETUP_BYTES {
-            return Err("That file is too large to be a Conduit setup.".to_string());
+            return Err("That file is too large to be a Toolport setup.".to_string());
         }
     }
     std::fs::read_to_string(&path).map_err(|e| format!("Couldn't read the file: {e}"))
@@ -1294,7 +1294,7 @@ fn preview_import(state: State<RegistryState>, json: String) -> Result<Vec<Impor
         servers: Vec<ServerEntry>,
     }
     let doc: Doc = serde_json::from_str(&json)
-        .map_err(|e| format!("That doesn't look like a Conduit setup: {e}"))?;
+        .map_err(|e| format!("That doesn't look like a Toolport setup: {e}"))?;
     let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     Ok(doc
         .servers
@@ -1400,7 +1400,7 @@ fn apply_import(reg: &mut Registry, json: &str) -> Result<(), String> {
         servers: Vec<ServerEntry>,
     }
     let doc: Doc = serde_json::from_str(json)
-        .map_err(|e| format!("That doesn't look like a Conduit setup: {e}"))?;
+        .map_err(|e| format!("That doesn't look like a Toolport setup: {e}"))?;
     for mut s in doc.servers {
         if reg.servers.iter().any(|e| e.name.eq_ignore_ascii_case(&s.name)) {
             continue;
@@ -1567,7 +1567,7 @@ pub fn run() {
 
     // Migrate legacy keychain secrets into the data-protection keychain (the
     // team-scoped shared access group) in the background. On macOS, older versions
-    // of Conduit stored secrets as per-app-ACL keychain items that trigger a
+    // of Toolport stored secrets as per-app-ACL keychain items that trigger a
     // password prompt every time a freshly-signed app/gateway reads them. This
     // moves each value into the data-protection keychain, which the separately
     // signed gateway reads with NO prompt across updates — read each value, write +

@@ -52,7 +52,7 @@ export function ClientDetail({
   // config into a client that isn't installed just creates a file nothing reads.
   const present = client.appPresent;
   const profiles = registry?.profiles ?? [];
-  // The scope Conduit last connected this client with ("" = follow the active
+  // The scope Toolport last connected this client with ("" = follow the active
   // profile). Keep the picker in sync with it as the selected client changes.
   const currentScope = registry?.clientScopes?.[client.id] ?? "";
   useEffect(() => {
@@ -89,7 +89,7 @@ export function ClientDetail({
     }
   }
   // Servers configured directly in the client (not the gateway) that migrate
-  // would move into Conduit and strip from the client's config.
+  // would move into Toolport and strip from the client's config.
   const movable = client.servers.filter(
     (s) => s.name.toLowerCase() !== "conduit",
   );
@@ -100,9 +100,9 @@ export function ClientDetail({
       const result = await migrateClient(client.id, profile || undefined);
       onRegistryChange(result.registry);
       toast.success(
-        `Moved ${result.moved.length} server${result.moved.length === 1 ? "" : "s"} into Conduit`,
+        `Moved ${result.moved.length} server${result.moved.length === 1 ? "" : "s"} into Toolport`,
         {
-          description: `${client.name} now uses only the Conduit gateway. Config backed up.`,
+          description: `${client.name} now uses only the Toolport gateway. Config backed up.`,
         },
       );
       setMigrateOpen(false);
@@ -119,7 +119,7 @@ export function ClientDetail({
   );
   const pluginNames = new Set(client.pluginServers.map((s) => s.name.toLowerCase()));
 
-  // Every client-side server worth showing, deduped by name, minus Conduit's
+  // Every client-side server worth showing, deduped by name, minus Toolport's
   // own gateway entry. These exist here only as import candidates.
   const byName = new Map<string, McpServer>();
   for (const s of [...client.servers, ...client.pluginServers]) {
@@ -150,7 +150,7 @@ export function ClientDetail({
     setBusy(true);
     try {
       await importOne(server);
-      toast.success(`Imported ${server.name} into Conduit`, {
+      toast.success(`Imported ${server.name} into Toolport`, {
         description: "Enable it to serve it to every client through the gateway.",
       });
     } catch (e) {
@@ -174,7 +174,7 @@ export function ClientDetail({
     }
     setBusy(false);
     if (failed.length === 0) {
-      toast.success(`Imported ${ok} server${ok === 1 ? "" : "s"} into Conduit`);
+      toast.success(`Imported ${ok} server${ok === 1 ? "" : "s"} into Toolport`);
     } else if (ok > 0) {
       toast.warning(`Imported ${ok}, couldn't import ${failed.join(", ")}`);
     } else {
@@ -187,10 +187,10 @@ export function ClientDetail({
     try {
       if (installed) {
         await uninstallGateway(client.id);
-        toast.success(`Disconnected Conduit from ${client.name}`);
+        toast.success(`Disconnected Toolport from ${client.name}`);
       } else {
         const outcome = await installGateway(client.id, profile || undefined);
-        toast.success(`Connected Conduit to ${client.name}`, {
+        toast.success(`Connected Toolport to ${client.name}`, {
           description: profile
             ? `Scoped to the "${profile}" profile.`
             : outcome.backup
@@ -214,7 +214,7 @@ export function ClientDetail({
           {installed ? (
             <span className="mb-1 inline-flex items-center gap-1 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-xs font-medium text-success">
               <Link2 className="size-3" />
-              connected to Conduit
+              connected to Toolport
             </span>
           ) : (
             <span className="mb-1 inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-xs font-medium text-muted-foreground">
@@ -275,7 +275,7 @@ export function ClientDetail({
                   Disconnect
                 </Button>
               }
-              title={`Disconnect Conduit from ${client.name}?`}
+              title={`Disconnect Toolport from ${client.name}?`}
               description="This rewrites the client's MCP config to remove the gateway. You can reconnect anytime."
               confirmLabel="Disconnect"
               destructive
@@ -289,15 +289,15 @@ export function ClientDetail({
               disabled={busy || !present}
             >
               <PlugZap className="size-4" />
-              Connect to Conduit
+              Connect to Toolport
             </Button>
           )}
         </div>
       </div>
 
       <p className="text-sm text-muted-foreground">
-        Connect points {client.name} at Conduit so it uses your managed servers.
-        Import copies this client's own servers into Conduit so it can manage them.
+        Connect points {client.name} at Toolport so it uses your managed servers.
+        Import copies this client's own servers into Toolport so it can manage them.
       </p>
 
       {client.usesConnectors && (
@@ -308,8 +308,8 @@ export function ClientDetail({
               <p className="font-medium">{client.name} manages servers as connectors</p>
               <p className="mt-1 text-muted-foreground">
                 Those live in {client.name}'s Customize → Connectors and sync to your
-                account, outside the local config files Conduit reads. Connecting Conduit
-                adds a local gateway entry so your Conduit-managed servers appear in{" "}
+                account, outside the local config files Toolport reads. Connecting Toolport
+                adds a local gateway entry so your Toolport-managed servers appear in{" "}
                 {client.name} too.
               </p>
             </div>
@@ -317,11 +317,11 @@ export function ClientDetail({
         </Card>
       )}
 
-      {/* Import: client servers are sources to pull into Conduit, nothing more. */}
+      {/* Import: client servers are sources to pull into Toolport, nothing more. */}
       <div>
         <div className="mb-1 flex items-center justify-between gap-2">
           <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            Import into Conduit
+            Import into Toolport
           </span>
           <div className="flex items-center gap-1.5">
             {toImport.length > 0 && (
@@ -352,7 +352,7 @@ export function ClientDetail({
         </div>
         <p className="mb-3 text-xs text-muted-foreground">
           The servers {client.name} already has, from its config and any plugins
-          (tagged below). Import what you want Conduit to manage; it becomes the
+          (tagged below). Import what you want Toolport to manage; it becomes the
           source of truth and serves them back through the gateway. "Move config in"
           also clears the config-file ones out of {client.name}, plugin servers stay
           (only {client.name} can remove those).
@@ -382,7 +382,7 @@ export function ClientDetail({
         {toImport.length === 0 && allServers.length > 0 && (
           <p className="mt-3 inline-flex items-center gap-1.5 text-xs text-success">
             <Check className="size-3.5" />
-            Everything here is already in Conduit. Manage it under{" "}
+            Everything here is already in Toolport. Manage it under{" "}
             <span className="inline-flex items-center gap-0.5 font-medium">
               All servers <ArrowRight className="size-3" />
             </span>
@@ -393,7 +393,7 @@ export function ClientDetail({
       <Dialog open={migrateOpen} onOpenChange={setMigrateOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Move {client.name} onto Conduit</DialogTitle>
+            <DialogTitle>Move {client.name} onto Toolport</DialogTitle>
           </DialogHeader>
           <div className="flex flex-col gap-3 py-1 text-sm">
             <p className="text-muted-foreground">
@@ -401,8 +401,8 @@ export function ClientDetail({
               <span className="font-medium text-foreground">
                 {movable.length} server{movable.length === 1 ? "" : "s"}
               </span>{" "}
-              from {client.name} into Conduit, then rewrites {client.name}'s config so it
-              uses <span className="font-medium text-foreground">only the Conduit gateway</span>.
+              from {client.name} into Toolport, then rewrites {client.name}'s config so it
+              uses <span className="font-medium text-foreground">only the Toolport gateway</span>.
               The original config is backed up first.
             </p>
             <p className="rounded-md bg-warning/10 p-2 text-xs text-warning">
@@ -450,7 +450,7 @@ export function ClientDetail({
             </Button>
             <Button onClick={migrate} disabled={busy}>
               <Shuffle className="size-4" />
-              Move {movable.length} into Conduit
+              Move {movable.length} into Toolport
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -498,7 +498,7 @@ function ServerMiniCard({
           {imported ? (
             <span className="inline-flex items-center gap-1 text-xs text-success">
               <Check className="size-3" />
-              in Conduit
+              in Toolport
             </span>
           ) : (
             <Button

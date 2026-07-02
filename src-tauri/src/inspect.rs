@@ -1,7 +1,7 @@
 //! Live request/response inspection: an opt-in, off-by-default local "network tab"
 //! for MCP tool calls.
 //!
-//! This is the ONE place Conduit captures a tool call's arguments and result. It
+//! This is the ONE place Toolport captures a tool call's arguments and result. It
 //! is deliberately kept apart from the governance audit log (`audit.jsonl`), which
 //! stays free of args/results forever. Capture only happens while the user has
 //! `live_inspect` on; when it's off, nothing here is ever called and no file is
