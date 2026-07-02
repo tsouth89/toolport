@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use tauri::{Emitter, Manager, State};
 
+pub mod approval;
 pub mod audit;
 pub mod catalog;
 pub mod clients;

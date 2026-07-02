@@ -1,0 +1,176 @@
+//! Human-in-the-loop (HITL) tool-approval: the contract both sides share.
+//!
+//! When HITL is on, the gateway holds a *gated* tool call and asks the Toolport app for a
+//! human decision before it runs. The app hosts a small approval broker; every gateway
+//! process (there is one per stdio client, plus the app's `--http` bridge) dials OUT to it,
+//! sends the pending call, and blocks reading for the decision. Arguments travel over the
+//! connection and never touch disk. Everything is fail-closed: no endpoint, no answer, a
+//! timeout, or any transport error all mean DENY.
+//!
+//! This module is the piece both the gateway-side client and the app-side broker share:
+//! the wire types, the gating policy, and the on-disk endpoint descriptor. Keeping it in
+//! the lib means there is exactly one definition of the protocol.
+
+use serde::{Deserialize, Serialize};
+
+/// The broker descriptor's filename inside the Conduit data dir. The app writes it on
+/// startup; every gateway process reads it. It holds ONLY the endpoint address and an auth
+/// token, never any call payload.
+pub const ENDPOINT_FILE: &str = "approval-endpoint.json";
+
+/// Fail-closed timeout for a pending approval: if no human decides within this window, the
+/// call is denied. (Configurable later; a sensible default for v1.)
+pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
+/// The broker endpoint descriptor the app publishes and gateways read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointDescriptor {
+    /// The address a gateway connects to (e.g. `127.0.0.1:PORT`, or a named-pipe / uds path
+    /// once the transport is hardened). Opaque to policy.
+    pub endpoint: String,
+    /// A 128-bit random token the gateway must present. Defense-in-depth over the local-user
+    /// filesystem trust boundary: only a process that can read the Conduit data dir (same as
+    /// secrets) can obtain it.
+    pub token: String,
+}
+
+/// Why a call was gated, surfaced in the approval UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalReason {
+    /// The tool is annotated `destructiveHint: true`.
+    Destructive,
+    /// The tool's server has untrusted provenance (a shared or public-registry import).
+    UntrustedSource,
+    /// Both of the above.
+    DestructiveAndUntrusted,
+}
+
+/// A request from a gateway to the broker: "a human should approve this call." The arguments
+/// are included so the person can review them; they stay in memory on both ends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequest {
+    /// Auth token from the endpoint descriptor.
+    pub token: String,
+    /// Opaque per-call id; also the correlation key for the decision.
+    pub id: String,
+    /// Which client/agent triggered it (for display + attribution), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    /// The downstream server the tool belongs to.
+    pub server: String,
+    /// The tool name.
+    pub tool: String,
+    /// Why it was gated, for the UI.
+    pub reason: ApprovalReason,
+    /// The exact arguments the human is approving.
+    pub arguments: serde_json::Value,
+}
+
+/// The broker's answer to an [`ApprovalRequest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    /// A human approved; the call runs.
+    Approved,
+    /// A human denied; the call is refused.
+    Denied,
+    /// No human decided in time (fail-closed); the caller treats this as a deny.
+    Timeout,
+}
+
+impl ApprovalDecision {
+    /// The security-critical predicate: ONLY an explicit human approval lets the call
+    /// proceed. Denied, Timeout, and (at the call site) any transport error all block.
+    pub fn is_approved(self) -> bool {
+        matches!(self, ApprovalDecision::Approved)
+    }
+}
+
+/// HITL gating policy: given whether a tool is destructive and whether its server has
+/// untrusted provenance, decide if the call needs a human. `enabled` is the registry's
+/// `human_approval` master switch. Returns the reason when gated, `None` when the call may
+/// run without approval.
+///
+/// v1 gates destructive tools AND anything from an untrusted-provenance server (the same
+/// shared/registry signal the SSRF connect-guard uses), so it does not rely solely on
+/// servers that bother to set `destructiveHint`.
+pub fn gate_reason(
+    enabled: bool,
+    is_destructive: bool,
+    untrusted_source: bool,
+) -> Option<ApprovalReason> {
+    if !enabled {
+        return None;
+    }
+    match (is_destructive, untrusted_source) {
+        (true, true) => Some(ApprovalReason::DestructiveAndUntrusted),
+        (true, false) => Some(ApprovalReason::Destructive),
+        (false, true) => Some(ApprovalReason::UntrustedSource),
+        (false, false) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate_is_off_when_disabled() {
+        assert_eq!(gate_reason(false, true, true), None);
+        assert_eq!(gate_reason(false, true, false), None);
+    }
+
+    #[test]
+    fn gate_covers_destructive_and_untrusted() {
+        assert_eq!(gate_reason(true, true, false), Some(ApprovalReason::Destructive));
+        assert_eq!(gate_reason(true, false, true), Some(ApprovalReason::UntrustedSource));
+        assert_eq!(
+            gate_reason(true, true, true),
+            Some(ApprovalReason::DestructiveAndUntrusted)
+        );
+        // A read-only tool from a trusted server is never gated, even with HITL on.
+        assert_eq!(gate_reason(true, false, false), None);
+    }
+
+    #[test]
+    fn only_explicit_approval_proceeds() {
+        assert!(ApprovalDecision::Approved.is_approved());
+        assert!(!ApprovalDecision::Denied.is_approved());
+        assert!(!ApprovalDecision::Timeout.is_approved());
+    }
+
+    #[test]
+    fn wire_types_round_trip() {
+        let req = ApprovalRequest {
+            token: "tok".into(),
+            id: "abc".into(),
+            client: Some("cursor".into()),
+            server: "db".into(),
+            tool: "drop_table".into(),
+            reason: ApprovalReason::Destructive,
+            arguments: serde_json::json!({ "table": "users" }),
+        };
+        let round: ApprovalRequest =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(round.tool, "drop_table");
+        assert_eq!(round.reason, ApprovalReason::Destructive);
+        assert_eq!(round.arguments["table"], "users");
+
+        let dec: ApprovalDecision =
+            serde_json::from_str(&serde_json::to_string(&ApprovalDecision::Approved).unwrap())
+                .unwrap();
+        assert!(dec.is_approved());
+    }
+
+    #[test]
+    fn endpoint_descriptor_round_trips() {
+        let d = EndpointDescriptor { endpoint: "127.0.0.1:8790".into(), token: "s3cret".into() };
+        let round: EndpointDescriptor =
+            serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(round.endpoint, "127.0.0.1:8790");
+        assert_eq!(round.token, "s3cret");
+    }
+}

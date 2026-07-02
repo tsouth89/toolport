@@ -139,6 +139,14 @@ pub struct Registry {
     /// of every call first.
     #[serde(default)]
     pub confirm_destructive: bool,
+    /// Human-in-the-loop approval: when true, a *gated* tool call (destructive-hinted, or
+    /// from an untrusted-provenance server) is held and surfaced to the Toolport app for a
+    /// person to approve or deny before it runs. Unlike `confirm_destructive` (which the
+    /// AGENT re-confirms with a token), this puts a HUMAN in the loop: the call blocks until
+    /// a decision or a fail-closed timeout. Off by default. Takes precedence over
+    /// `confirm_destructive` for the tools it gates (a human decision supersedes the agent's).
+    #[serde(default)]
+    pub human_approval: bool,
     /// Quarantine-on-drift: when true, a high-risk tool (poisoned definition, or a
     /// destructive tool whose definition changed/appeared) that drifts from its pinned
     /// baseline is hidden and blocked from every client until the user re-approves it.
@@ -271,6 +279,7 @@ impl Default for Registry {
             active_profile_id: Some(DEFAULT_PROFILE_ID.to_string()),
             deny_destructive: false,
             confirm_destructive: false,
+            human_approval: false,
             quarantine_on_drift: false,
             lazy_discovery: true,
             allow_agent_control: false,
@@ -454,6 +463,13 @@ impl Registry {
         if confirm {
             self.deny_destructive = false;
         }
+    }
+
+    /// Turn human-in-the-loop approval on or off. Independent of deny/confirm: `deny`
+    /// hides tools, `confirm` has the agent re-confirm, `human_approval` holds the call
+    /// for a person. When it gates a tool it takes precedence over `confirm_destructive`.
+    pub fn set_human_approval(&mut self, on: bool) {
+        self.human_approval = on;
     }
 
     /// Set lazy discovery mode (gateway exposes meta-tools vs the full catalog).

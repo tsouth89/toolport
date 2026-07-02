@@ -34,6 +34,7 @@ use conduit_lib::integrity;
 use conduit_lib::registry::{self, Registry, ServerEntry};
 use conduit_lib::remote;
 use conduit_lib::router::{is_destructive, sanitize_segment, Router, ToolPolicy};
+use conduit_lib::approval;
 use conduit_lib::savings;
 use conduit_lib::secrets;
 use conduit_lib::semantic;
@@ -1205,6 +1206,56 @@ fn http_client_label(reg: &Registry, provided: Option<&str>) -> Option<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// A fresh 128-bit correlation id for an approval request (same CSPRNG-or-die policy
+/// as the confirm token: a randomness failure on a security gate is fatal, not papered).
+fn new_correlation_id() -> String {
+    let mut buf = [0u8; 16];
+    getrandom::getrandom(&mut buf).expect("CSPRNG unavailable");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Read the approval-broker endpoint the Toolport app publishes into the data dir.
+/// `None` when it is absent/unreadable (the app is not running) - a fail-closed signal.
+fn read_endpoint_descriptor() -> Option<approval::EndpointDescriptor> {
+    let dir = conduit_lib::registry::conduit_dir()?;
+    let raw = std::fs::read_to_string(dir.join(approval::ENDPOINT_FILE)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Ask the app broker for a human decision on `req`. FAIL-CLOSED: a missing endpoint, a
+/// failed connect, any I/O error, or a read timeout all return `Timeout` (a deny). The
+/// arguments travel over the socket and never touch disk. Transport is loopback TCP +
+/// token for now; hardening to an OS-permissioned named-pipe / uds is a follow-up.
+fn decide_via_broker(
+    desc: Option<approval::EndpointDescriptor>,
+    req: &mut approval::ApprovalRequest,
+) -> approval::ApprovalDecision {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    let deny = approval::ApprovalDecision::Timeout;
+    let Some(desc) = desc else { return deny };
+    req.token = desc.token.clone();
+    let Ok(mut stream) = TcpStream::connect(&desc.endpoint) else { return deny };
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(approval::DEFAULT_TIMEOUT_SECS)));
+    let Ok(line) = serde_json::to_string(req) else { return deny };
+    if stream.write_all(line.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
+        return deny;
+    }
+    let _ = stream.flush();
+    let mut resp = String::new();
+    if BufReader::new(stream).read_line(&mut resp).is_err() || resp.trim().is_empty() {
+        return deny;
+    }
+    serde_json::from_str::<approval::ApprovalDecision>(resp.trim()).unwrap_or(deny)
+}
+
+/// Hold a gated tool call until a human decides via the Toolport app (or it fails closed).
+fn request_human_decision(mut req: approval::ApprovalRequest) -> approval::ApprovalDecision {
+    let desc = read_endpoint_descriptor();
+    decide_via_broker(desc, &mut req)
+}
+
 fn handle_request(
     req: &Value,
     reg: &Registry,
@@ -1594,6 +1645,62 @@ fn handle_request(
                     id,
                     json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
                 ));
+            }
+
+            // Human-in-the-loop approval: hold a gated call (destructive, or from an
+            // untrusted-provenance server) until a person approves it in the Toolport app.
+            // Takes precedence over the agent-facing confirm below, and is fail-closed
+            // (no broker / no answer / timeout all deny). Skipped once `confirmed`.
+            if reg.human_approval && !confirmed {
+                let agg;
+                let catalog: &[Value] = if cached.is_empty() {
+                    agg = router.aggregated_tools();
+                    &agg
+                } else {
+                    cached
+                };
+                let is_dest = catalog.iter().any(|t| {
+                    t.get("name").and_then(|n| n.as_str()) == Some(name) && is_destructive(t)
+                });
+                // Untrusted provenance = the same shared/registry signal the SSRF guard
+                // uses. Match the server the way its tools are prefixed (sanitized id).
+                let untrusted = reg
+                    .servers
+                    .iter()
+                    .find(|s| sanitize_segment(&s.id) == srv)
+                    .map(|s| matches!(s.source.as_deref(), Some("shared") | Some("registry")))
+                    .unwrap_or(false);
+                if let Some(reason) = approval::gate_reason(true, is_dest, untrusted) {
+                    let decision = request_human_decision(approval::ApprovalRequest {
+                        token: String::new(),
+                        id: new_correlation_id(),
+                        client: router.current_client().map(str::to_string),
+                        server: srv.to_string(),
+                        tool: tool.to_string(),
+                        reason,
+                        arguments: arguments.clone(),
+                    });
+                    if !decision.is_approved() {
+                        let why = if decision == approval::ApprovalDecision::Denied {
+                            "was denied by a human reviewer"
+                        } else {
+                            "was not approved in time (the Toolport app may be closed)"
+                        };
+                        audit::record_held(srv, tool, router.current_client());
+                        return Some(success(
+                            id,
+                            json!({
+                                "content": [{ "type": "text", "text": format!(
+                                    "Toolport: the call to {name} {why}, so it did not run. \
+                                     Ask the user to approve it in the Toolport app, then retry."
+                                ) }],
+                                "isError": true
+                            }),
+                        ));
+                    }
+                    // A human approved: skip the agent-confirm step and route the call.
+                    confirmed = true;
+                }
             }
 
             // Per-call confirmation for destructive tools: intercept the first
@@ -3035,6 +3142,32 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The security-critical guarantee: the human-approval broker denies (never
+    /// approves) when it cannot reach a live approver - no endpoint published (app
+    /// closed) or a connection that refuses. Fail-closed is the whole point.
+    #[test]
+    fn approval_broker_fails_closed() {
+        let mk = || approval::ApprovalRequest {
+            token: String::new(),
+            id: "id".into(),
+            client: None,
+            server: "db".into(),
+            tool: "drop".into(),
+            reason: approval::ApprovalReason::Destructive,
+            arguments: serde_json::json!({}),
+        };
+        // No endpoint descriptor (Toolport app not running) -> deny.
+        let mut r = mk();
+        assert!(!decide_via_broker(None, &mut r).is_approved());
+        // A published endpoint that refuses the connection -> deny.
+        let mut r = mk();
+        let bad = Some(approval::EndpointDescriptor {
+            endpoint: "127.0.0.1:1".into(),
+            token: "t".into(),
+        });
+        assert!(!decide_via_broker(bad, &mut r).is_approved());
+    }
 
     fn router() -> Router {
         Router::new()
