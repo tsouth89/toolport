@@ -299,6 +299,16 @@ export interface Profile {
   enabledServerIds: string[];
 }
 
+/** A tool call held awaiting a human decision (the HITL approval queue). */
+export interface PendingApproval {
+  id: string;
+  client: string | null;
+  server: string;
+  tool: string;
+  reason: "destructive" | "untrusted_source" | "destructive_and_untrusted";
+  arguments: unknown;
+}
+
 export interface Registry {
   version: number;
   servers: ServerEntry[];
@@ -308,6 +318,8 @@ export interface Registry {
   denyDestructive?: boolean;
   /** Per-call confirmation: intercept destructive tools with a preview + token. */
   confirmDestructive?: boolean;
+  /** Human-in-the-loop: hold a gated tool call until a person approves it in the app. */
+  humanApproval?: boolean;
   /** Live request/response inspection: capture each tool call's args + result into a
    * small, separate, ephemeral local ring (last 50 calls) for the Activity inspector.
    * Off by default; never touches the audit log. */

@@ -12,6 +12,7 @@ import type {
   McpTool,
   MigrateResult,
   ParsedSnippetServer,
+  PendingApproval,
   ProbeResult,
   Registry,
   SavingsSummary,
@@ -162,6 +163,22 @@ export function setDenyDestructive(deny: boolean): Promise<Registry> {
 /** Toggle per-call confirmation for destructive tools (intercept + preview + token). */
 export function setConfirmDestructive(confirm: boolean): Promise<Registry> {
   return invoke<Registry>("set_confirm_destructive", { confirm });
+}
+
+/** Toggle human-in-the-loop approval: hold a gated tool call (destructive, or from an
+ * untrusted-provenance server) until a person approves or denies it in the app. */
+export function setHumanApproval(on: boolean): Promise<Registry> {
+  return invoke<Registry>("set_human_approval", { on });
+}
+
+/** Tool calls currently held awaiting a human decision (the approval queue). */
+export function listPendingApprovals(): Promise<PendingApproval[]> {
+  return invoke<PendingApproval[]>("list_pending_approvals");
+}
+
+/** Approve or deny a held tool call by id; the parked gateway call then runs or is refused. */
+export function decideApproval(id: string, approved: boolean): Promise<void> {
+  return invoke<void>("decide_approval", { id, approved });
 }
 
 /** Toggle live request/response inspection (opt-in, off by default). When on, the

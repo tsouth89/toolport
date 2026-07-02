@@ -47,6 +47,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { AppSidebar } from "@/components/AppSidebar";
+import { PendingApprovals } from "@/components/PendingApprovals";
 import { RegistryServerRow } from "@/components/RegistryServerRow";
 import { ServerDialog } from "@/components/ServerDialog";
 
@@ -599,6 +600,7 @@ function App() {
         />
         </Suspense>
       )}
+      <PendingApprovals />
       <Toaster position="bottom-right" />
     </TooltipProvider>
   );

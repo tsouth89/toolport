@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, Bot, Check, Copy, Globe, Layers, ShieldAlert, ShieldCheck, ShieldX, Trash2, X } from "lucide-react";
+import { Activity, Bot, Check, Copy, Globe, Layers, ShieldAlert, ShieldCheck, ShieldX, Trash2, UserCheck, X } from "lucide-react";
 import { toastError } from "@/lib/toast";
 import {
   addHttpClient,
@@ -11,6 +11,7 @@ import {
   setAllowAgentControl,
   setConfirmDestructive,
   setDenyDestructive,
+  setHumanApproval,
   setLazyDiscovery,
   setLiveInspect,
   setQuarantineOnDrift,
@@ -40,6 +41,7 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const lazyDiscovery = registry?.lazyDiscovery ?? true;
   const denyDestructive = registry?.denyDestructive ?? false;
   const confirmDestructive = registry?.confirmDestructive ?? false;
+  const humanApproval = registry?.humanApproval ?? false;
   const allowAgentControl = registry?.allowAgentControl ?? false;
   const quarantineOnDrift = registry?.quarantineOnDrift ?? false;
   const liveInspect = registry?.liveInspect ?? false;
@@ -202,6 +204,14 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           "Confirm destructive tools",
           "Hold each destructive call for the agent to confirm before it runs",
           apply(setConfirmDestructive),
+        )}
+        {toggle(
+          UserCheck,
+          humanApproval,
+          "text-info",
+          "Require human approval",
+          "Hold destructive or untrusted-server calls until you approve them in the app",
+          apply(setHumanApproval),
         )}
         {toggle(
           ShieldX,
