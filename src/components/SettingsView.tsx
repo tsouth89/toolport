@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
-import { Activity, Bot, Check, Copy, Globe, Layers, ShieldAlert, ShieldCheck, ShieldX, Trash2, UserCheck, X } from "lucide-react";
+import { Activity, Bot, Check, Copy, Globe, Layers, Power, ShieldAlert, ShieldCheck, ShieldX, Trash2, UserCheck, X } from "lucide-react";
+import {
+  disable as disableAutostart,
+  enable as enableAutostart,
+  isEnabled as isAutostartEnabled,
+} from "@tauri-apps/plugin-autostart";
 import { toastError } from "@/lib/toast";
 import {
   addHttpClient,
@@ -54,9 +59,30 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const [newProfile, setNewProfile] = useState("");
   const [newToken, setNewToken] = useState<string | null>(null);
   const [clientBusy, setClientBusy] = useState(false);
+  const [autostartOn, setAutostartOn] = useState(false);
 
   const httpClients = registry?.httpClients ?? [];
   const profiles = registry?.profiles ?? [];
+
+  // Launch-at-login is OS-level (managed by the autostart plugin), not registry state.
+  useEffect(() => {
+    isAutostartEnabled()
+      .then(setAutostartOn)
+      .catch(() => {});
+  }, []);
+
+  const toggleAutostart = async (on: boolean) => {
+    setBusy(true);
+    try {
+      if (on) await enableAutostart();
+      else await disableAutostart();
+      setAutostartOn(on);
+    } catch (e) {
+      toastError(`Couldn't ${on ? "enable" : "disable"} launch at login: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   async function addClient() {
     if (!newLabel.trim()) return;
@@ -172,6 +198,19 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-6">
+      <section className="flex flex-col gap-2">
+        <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          General
+        </h2>
+        {toggle(
+          Power,
+          autostartOn,
+          "text-info",
+          "Launch at login",
+          "Start Toolport in the tray when you sign in, so it can hold tool calls for approval even before you open it",
+          toggleAutostart,
+        )}
+      </section>
       <section className="flex flex-col gap-2">
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Discovery

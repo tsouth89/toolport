@@ -1,6 +1,9 @@
 use std::sync::Mutex;
 
-use tauri::{Emitter, Manager, State};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Listener, Manager, State};
+use tauri_plugin_notification::NotificationExt;
 
 pub mod approval;
 mod approval_broker;
@@ -1594,6 +1597,96 @@ fn http_bridge_status(state: State<HttpBridgeState>) -> Result<HttpBridgeStatus,
     Ok(HttpBridgeStatus::new(bridge.port, bridge.token.clone()))
 }
 
+/// Bring the main window back to the foreground (from the tray, a re-launch, or an
+/// approval). Un-hides, un-minimizes, and focuses so it works from every hidden state.
+fn show_main_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// Reflect the pending-approval count on the tray tooltip, so a glance at the tray
+/// tells you something is waiting even with the window hidden (complements the OS
+/// notification the broker already fires). Best-effort.
+fn update_tray_tooltip(app: &AppHandle) {
+    let pending = app
+        .try_state::<approval_broker::ApprovalBroker>()
+        .map(|b| b.list().len())
+        .unwrap_or(0);
+    if let Some(tray) = app.tray_by_id("main") {
+        let tip = if pending > 0 {
+            format!(
+                "Toolport - {pending} tool call{} awaiting approval",
+                if pending == 1 { "" } else { "s" }
+            )
+        } else {
+            "Toolport".to_string()
+        };
+        let _ = tray.set_tooltip(Some(tip));
+    }
+}
+
+/// The first time the window is closed to the tray, tell the user it's still running
+/// (so a background HITL gate isn't a surprise) and how to fully quit. Once ever: a
+/// marker file in the data dir gates it.
+fn maybe_show_tray_hint(app: &AppHandle) {
+    let Some(dir) = registry::conduit_dir() else {
+        return;
+    };
+    let marker = dir.join(".tray-hint-shown");
+    if marker.exists() {
+        return;
+    }
+    let _ = std::fs::write(&marker, b"1");
+    let _ = app
+        .notification()
+        .builder()
+        .title("Toolport is still running")
+        .body(
+            "It stays in your tray so it can hold tool calls for your approval. \
+             Quit it any time from the tray icon.",
+        )
+        .show();
+}
+
+/// Build the system-tray (Windows) / menu-bar (macOS) icon: left-click opens the app,
+/// right-click shows an Open/Quit menu. Quit fully exits (the run-loop's Exit handler
+/// tears down the HTTP bridge); closing the window only hides it (see the window-event
+/// handler), so the gateway/broker keep running and HITL stays live.
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "tray_open", "Open Toolport", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "tray_quit", "Quit Toolport", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &sep, &quit])?;
+
+    let mut builder = TrayIconBuilder::with_id("main")
+        .tooltip("Toolport")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "tray_open" => show_main_window(app),
+            "tray_quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+    builder.build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let registry = registry::load().unwrap_or_default();
@@ -1646,9 +1739,9 @@ pub fn run() {
         // a second launch carrying a conduit:// URL is forwarded to the deep-link
         // plugin's on_open_url (set up below); here we just focus the window.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_focus();
-            }
+            // A second launch (or clicking the app while it's hidden in the tray) should
+            // bring the window back, not just focus a hidden window.
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
@@ -1656,6 +1749,12 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        // Launch at login (opt-in via Settings). `--hidden` is passed on auto-launch so
+        // the app starts to the tray without flashing a window (see setup()).
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--hidden"]),
+        ))
         .manage(Mutex::new(registry))
         .manage(Mutex::new(HttpBridge::default()))
         .manage(PendingShare::default())
@@ -1733,7 +1832,37 @@ pub fn run() {
             stop_http_bridge,
             http_bridge_status,
         ])
+        // Close-to-tray: the window's X hides it instead of quitting, so the gateway and
+        // approval broker keep running (HITL only works while the app is alive). Quit is
+        // explicit, from the tray menu. A one-time notification explains it the first time.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    maybe_show_tray_hint(window.app_handle());
+                }
+            }
+        })
         .setup(|app| {
+            let handle = app.handle();
+
+            // Build the tray icon, then show the window - unless launched with `--hidden`
+            // (auto-start at login), in which case we start straight to the tray. The
+            // window is created hidden (visible:false) so a normal launch never flashes.
+            build_tray(handle)?;
+            let start_hidden = std::env::args().any(|a| a == "--hidden");
+            if !start_hidden {
+                show_main_window(handle);
+            }
+
+            // Keep the tray tooltip's pending-approval count fresh as calls are held and
+            // resolved (the broker emits these; the window may be hidden in the tray).
+            let h = handle.clone();
+            app.listen("approval-pending", move |_| update_tray_tooltip(&h));
+            let h = handle.clone();
+            app.listen("approval-resolved", move |_| update_tray_tooltip(&h));
+
             // Mirror external registry changes (an agent toggling a server through
             // the gateway) back into the app and the UI, in a background thread.
             let handle = app.handle().clone();

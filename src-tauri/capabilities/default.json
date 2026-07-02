@@ -11,6 +11,7 @@
     "dialog:allow-save",
     "dialog:allow-open",
     "deep-link:default",
-    "notification:default"
+    "notification:default",
+    "autostart:default"
   ]
 }
