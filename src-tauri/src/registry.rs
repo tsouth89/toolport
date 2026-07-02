@@ -153,7 +153,7 @@ pub struct Registry {
     /// Opt-in, since blocking a tool is more disruptive than just flagging the drift.
     #[serde(default)]
     pub quarantine_on_drift: bool,
-    /// Lazy discovery: the gateway exposes 3 meta-tools (status/search/call)
+    /// Lazy discovery: the gateway exposes a few meta-tools (status/search/call/fetch)
     /// instead of every downstream tool, so clients with tool-count limits don't
     /// drop tools. The gateway reads this from the registry file it already
     /// loads, so it applies to EVERY client regardless of whether the client

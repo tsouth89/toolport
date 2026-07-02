@@ -181,7 +181,7 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           lazyDiscovery,
           "text-info",
           "Lazy discovery",
-          "Expose 3 meta-tools, not the full catalog (all clients)",
+          "Expose a few meta-tools, not the full catalog (all clients)",
           apply(setLazyDiscovery),
         )}
       </section>

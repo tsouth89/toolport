@@ -271,8 +271,8 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
       : null;
   const details = [
     `across ${savings.listLoads.toLocaleString()} tool-list load${savings.listLoads === 1 ? "" : "s"}`,
-    savings.peakCatalog > 3
-      ? `biggest catalog collapsed ${savings.peakCatalog} tools to 3`
+    savings.peakCatalog > 4
+      ? `biggest catalog collapsed ${savings.peakCatalog} tools to a handful`
       : null,
     since ? `since ${since}` : null,
   ].filter(Boolean);

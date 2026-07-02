@@ -1,6 +1,6 @@
 //! Lazy-discovery savings counter.
 //!
-//! Every time the gateway serves a lazy `tools/list` it advertises 3 meta-tools
+//! Every time the gateway serves a lazy `tools/list` it advertises a few meta-tools
 //! instead of the full catalog. The difference, the tool-definition tokens kept
 //! out of the client's context, is appended here as one JSON line. The app sums
 //! the log into the in-app "tokens saved" counter.

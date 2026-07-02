@@ -326,7 +326,7 @@ export interface Registry {
   liveInspect?: boolean;
   /** Quarantine-on-drift: block a high-risk tool that changed until re-approved. */
   quarantineOnDrift?: boolean;
-  /** Global switch: expose 3 meta-tools instead of the full catalog. */
+  /** Global switch: expose a few meta-tools instead of the full catalog. */
   lazyDiscovery?: boolean;
   /** Opt-in: let an agent enable/disable servers via the gateway's control tools. */
   allowAgentControl?: boolean;
