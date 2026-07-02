@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
 
 pub mod approval;
+mod approval_broker;
 pub mod audit;
 pub mod catalog;
 pub mod clients;
@@ -821,6 +822,37 @@ fn set_confirm_destructive(state: State<RegistryState>, confirm: bool) -> Result
     reg.set_confirm_destructive(confirm);
     registry::save(&reg)?;
     Ok(reg.clone())
+}
+
+/// Toggle human-in-the-loop approval. When on, a gated tool call (destructive, or from an
+/// untrusted-provenance server) is HELD until a person approves or denies it in the app,
+/// via the approval broker. Distinct from confirm-destructive (which the agent re-confirms).
+#[tauri::command]
+fn set_human_approval(state: State<RegistryState>, on: bool) -> Result<Registry, String> {
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.set_human_approval(on);
+    registry::save(&reg)?;
+    Ok(reg.clone())
+}
+
+/// The tool calls currently held awaiting a human decision (for the Pending Approvals UI).
+/// Polled by the frontend; the `approval-pending` / `approval-resolved` events prompt a refresh.
+#[tauri::command]
+fn list_pending_approvals(
+    broker: State<approval_broker::ApprovalBroker>,
+) -> Vec<approval_broker::PendingView> {
+    broker.list()
+}
+
+/// Approve or deny a held tool call by id. The parked gateway call then runs (approve) or is
+/// refused (deny). `Err` if the id is unknown (already resolved or timed out).
+#[tauri::command]
+fn decide_approval(
+    broker: State<approval_broker::ApprovalBroker>,
+    id: String,
+    approved: bool,
+) -> Result<(), String> {
+    broker.decide(&id, approved)
 }
 
 /// Toggle live request/response inspection. When enabled, the gateway captures each
@@ -1663,6 +1695,9 @@ pub fn run() {
             set_tool_enabled,
             set_deny_destructive,
             set_confirm_destructive,
+            set_human_approval,
+            list_pending_approvals,
+            decide_approval,
             set_live_inspect,
             get_inspect_log,
             clear_inspect_log,
@@ -1702,6 +1737,12 @@ pub fn run() {
             // the gateway) back into the app and the UI, in a background thread.
             let handle = app.handle().clone();
             std::thread::spawn(move || watch_registry_for_app(handle));
+
+            // Start the human-approval broker: it publishes a loopback endpoint that every
+            // gateway process dials into, and holds gated tool calls until the user approves
+            // or denies them here. Always managed so the approve/deny commands have state.
+            let broker = approval_broker::start(app.handle().clone());
+            app.manage(broker);
 
             // conduit://import?s=<id> deep links open the shared-stack import.
             // The installer registers the scheme; we also register at runtime so
