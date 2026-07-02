@@ -59,6 +59,10 @@ export interface SecurityEvent {
   change: string;
   /** For tool_poison_flag: which heuristic signatures matched. */
   signatures?: string[];
+  /** "high" = loud/actionable (poison, destructive-tool change, safety-annotation
+   * downgrade); "info" = benign non-destructive schema churn for the quiet history.
+   * Absent on events written before severity tiering; classified by type on read. */
+  severity?: "high" | "info";
 }
 
 /** Recent tool-definition integrity events (newest first). */

@@ -17,11 +17,93 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-/// Pins map: namespaced tool name (`server__tool`) -> fingerprint.
-type Pins = BTreeMap<String, String>;
+/// Pins map: namespaced tool name (`server__tool`) -> pinned baseline.
+type Pins = BTreeMap<String, Pin>;
+
+/// A pinned tool baseline. The fingerprint alone can't be reversed to tell WHAT
+/// changed, so we also remember the two safety-relevant annotation bits
+/// (`readOnlyHint` / `destructiveHint`). That lets a later flip from `true -> false`
+/// (a tool quietly shedding a safety constraint) be recognized as a privilege
+/// escalation and flagged loudly, instead of vanishing into benign schema churn.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+struct Pin {
+    /// Version-prefixed fingerprint of the whole definition (see `fingerprint`).
+    fp: String,
+    /// `readOnlyHint` at pin time, if the tool advertised one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ro: Option<bool>,
+    /// `destructiveHint` at pin time, if the tool advertised one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dh: Option<bool>,
+}
+
+/// On-disk pin value: either the legacy bare fingerprint string (pins written before
+/// annotation state was tracked) or the current struct. Deserialized through this so
+/// old baselines load without a spurious flood of "changed"; everything is re-saved in
+/// the struct form on the next check.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PinRepr {
+    Full(Pin),
+    Legacy(String),
+}
+
+impl From<PinRepr> for Pin {
+    fn from(r: PinRepr) -> Self {
+        match r {
+            PinRepr::Full(p) => p,
+            PinRepr::Legacy(fp) => Pin { fp, ro: None, dh: None },
+        }
+    }
+}
+
+/// The safety-relevant MCP annotation hint `key` for `tool`, reading the spec's nested
+/// `annotations.<key>` and the top-level fallback some servers emit (mirrors
+/// `router::is_destructive`).
+fn read_hint(tool: &Value, key: &str) -> Option<bool> {
+    tool.get("annotations")
+        .and_then(|a| a.get(key))
+        .and_then(Value::as_bool)
+        .or_else(|| tool.get(key).and_then(Value::as_bool))
+}
+
+/// Build the pin baseline for `tool` (fingerprint + the two safety annotation bits).
+fn pin_of(tool: &Value) -> Pin {
+    Pin {
+        fp: fingerprint(tool),
+        ro: read_hint(tool, "readOnlyHint"),
+        dh: read_hint(tool, "destructiveHint"),
+    }
+}
+
+/// A safety annotation went from `true -> false` between the pinned baseline and the
+/// current definition: the tool is now claiming FEWER constraints (was read-only, now
+/// writes; or was flagged destructive, now isn't). That's a silent privilege
+/// escalation and a rug-pull tell, so it drives a loud, high-severity notice.
+fn annotation_downgrade(old: &Pin, tool: &Value) -> bool {
+    (old.ro == Some(true) && read_hint(tool, "readOnlyHint") == Some(false))
+        || (old.dh == Some(true) && read_hint(tool, "destructiveHint") == Some(false))
+}
+
+/// Severity of a drift, splitting loud/actionable signal from benign churn:
+/// - `high`: the tool is destructive, or a safety annotation was downgraded. These
+///   interrupt the user (badge + notice) and drive quarantine-on-drift.
+/// - `info`: everything else (a non-destructive tool's description/schema was revised
+///   with its safety hints intact). Recorded to a quiet, viewable history, no badge.
+const SEV_HIGH: &str = "high";
+const SEV_INFO: &str = "info";
+
+fn drift_severity(tool: &Value, annotation_downgrade: bool) -> &'static str {
+    if crate::router::is_destructive(tool) || annotation_downgrade {
+        SEV_HIGH
+    } else {
+        SEV_INFO
+    }
+}
 
 const MAX_SECURITY_BYTES: u64 = 1024 * 1024;
 const KEEP_LINES: usize = 2000;
@@ -128,9 +210,9 @@ fn load_pins(profile: Option<&str>) -> PinsLoad {
     }
     match std::fs::read_to_string(&path)
         .ok()
-        .and_then(|s| serde_json::from_str::<Pins>(&s).ok())
+        .and_then(|s| serde_json::from_str::<BTreeMap<String, PinRepr>>(&s).ok())
     {
-        Some(pins) => PinsLoad::Loaded(pins),
+        Some(pins) => PinsLoad::Loaded(pins.into_iter().map(|(k, v)| (k, v.into())).collect()),
         None => PinsLoad::Corrupt,
     }
 }
@@ -171,8 +253,8 @@ pub fn check(profile: Option<&str>, current: &[Value]) -> Vec<Value> {
             Some(n) if n.contains("__") => n,
             _ => continue,
         };
-        let fp = fingerprint(t);
-        now.insert(name.to_string(), fp.clone());
+        let pin = pin_of(t);
+        now.insert(name.to_string(), pin.clone());
         let server = server_of(name);
         let est = established.contains(server);
 
@@ -185,12 +267,13 @@ pub fn check(profile: Option<&str>, current: &[Value]) -> Vec<Value> {
                 // A different fingerprint is only a real change if it came from the same
                 // algorithm version; a version mismatch is our format upgrade, not the
                 // tool's, so re-baseline quietly (no event, no re-scan).
-                Some(old) if *old != fp && fp_version(old) == fp_version(&fp) => {
-                    events.push(event(server, name, "changed"));
+                Some(old) if old.fp != pin.fp && fp_version(&old.fp) == fp_version(&pin.fp) => {
+                    let sev = drift_severity(t, annotation_downgrade(old, t));
+                    events.push(event(server, name, "changed", sev));
                     scan = true;
                 }
                 None => {
-                    events.push(event(server, name, "added"));
+                    events.push(event(server, name, "added", drift_severity(t, false)));
                     scan = true;
                 }
                 _ => {}
@@ -318,11 +401,20 @@ pub fn apply_quarantine(profile: Option<&str>, current: &[Value], events: &[Valu
         ) else {
             continue;
         };
+        // Only high-severity drift is blocked. `check` already tagged severity, so a
+        // non-destructive "changed" that reached `high` can only be an annotation
+        // downgrade (a tool shedding readOnlyHint/destructiveHint) - the exact
+        // privilege-escalation case we want quarantined even though the tool isn't
+        // itself marked destructive. A poison flag is always high.
+        if e.get("severity").and_then(Value::as_str) != Some(SEV_HIGH) {
+            continue;
+        }
         let reason = match change {
             "poison" => "a poisoned definition was detected",
             "changed" if is_destructive_named(current, tool) => {
                 "a destructive tool's definition changed"
             }
+            "changed" => "a tool dropped a readOnly/destructive safety annotation",
             "added" if is_destructive_named(current, tool) => "a new destructive tool appeared",
             _ => continue,
         };
@@ -673,6 +765,7 @@ fn result_injection_event(server: &str, tool: &str, signatures: &[String], score
         "change": "result",
         "signatures": signatures,
         "score": round2(score),
+        "severity": SEV_HIGH,
     })
 }
 
@@ -694,6 +787,7 @@ fn poison_event(server: &str, tool: &str, signatures: &[String], score: f32) -> 
         "change": "poison",
         "signatures": signatures,
         "score": round2(score),
+        "severity": SEV_HIGH,
     })
 }
 
@@ -704,16 +798,20 @@ fn pins_tamper_event() -> Value {
         "ts": epoch_millis(),
         "type": "pins_load_failed",
         "change": "tamper",
+        "severity": SEV_HIGH,
     })
 }
 
-fn event(server: &str, tool: &str, change: &str) -> Value {
+/// A tool-definition drift event tagged with its `severity` (`high` = loud/actionable,
+/// `info` = benign churn for the quiet history). See `drift_severity`.
+fn event(server: &str, tool: &str, change: &str, severity: &str) -> Value {
     json!({
         "ts": epoch_millis(),
         "type": "tool_drift",
         "server": server,
         "tool": tool,
         "change": change,
+        "severity": severity,
     })
 }
 
@@ -721,10 +819,62 @@ pub fn security_path() -> Option<PathBuf> {
     Some(crate::registry::conduit_dir()?.join("security.jsonl"))
 }
 
+/// Window in which an identical event is treated as a duplicate and suppressed at the
+/// source. Matches the frontend's collapse window so the two agree.
+const DEDUP_WINDOW_MS: u64 = 10 * 60 * 1000;
+
+/// Whether an event with the same `(type, server, tool, change)` was already recorded
+/// within `DEDUP_WINDOW_MS`. Best-effort cross-gateway suppression: every connected
+/// client spawns its own gateway, and they all run `check` against the SHARED baseline,
+/// so one benign server-side revision can be flagged ~6 times at once. Left unchecked
+/// that floods `security.jsonl` and buries the rare real signal (the whole point of this
+/// surface). Racy by nature (no lock across processes), but it collapses the common
+/// concurrent burst; the frontend dedupes again for anything that slips through.
+fn recently_recorded(event: &Value, path: &Path) -> bool {
+    let ty = match event.get("type").and_then(Value::as_str) {
+        Some(t) => t,
+        None => return false,
+    };
+    let now_ts = event
+        .get("ts")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(epoch_millis);
+    let server = event.get("server").and_then(Value::as_str);
+    let tool = event.get("tool").and_then(Value::as_str);
+    let change = event.get("change").and_then(Value::as_str);
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // Newest-first; the first line matching the identity decides (older matches are
+    // strictly further outside the window, so there's no need to scan past it). Bounded
+    // to the retained-line budget so this stays cheap on a large log.
+    for line in content.lines().rev().take(KEEP_LINES) {
+        let prev: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if prev.get("type").and_then(Value::as_str) == Some(ty)
+            && prev.get("server").and_then(Value::as_str) == server
+            && prev.get("tool").and_then(Value::as_str) == tool
+            && prev.get("change").and_then(Value::as_str) == change
+        {
+            let prev_ts = prev.get("ts").and_then(Value::as_u64).unwrap_or(0);
+            return now_ts.saturating_sub(prev_ts) <= DEDUP_WINDOW_MS;
+        }
+    }
+    false
+}
+
 fn record_event(event: &Value) {
     if let Some(path) = security_path() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
+        }
+        // Collapse the concurrent multi-gateway burst before it hits disk (see
+        // `recently_recorded`), so the shared log carries one line per real change.
+        if recently_recorded(event, &path) {
+            return;
         }
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
             // Single write_all (not writeln!, which issues several syscalls) so the many
@@ -794,10 +944,11 @@ mod tests {
             tool("srv__read", "Read a record."),
         ];
         // A benign change to a non-destructive tool must NOT quarantine; a destructive
-        // tool's change and any poison flag must.
+        // tool's change and any poison flag must. Severity is what `check` would tag:
+        // read's plain change is `info`, wipe's (destructive) is `high`.
         let events = vec![
-            event("srv", "srv__read", "changed"),
-            event("srv", "srv__wipe", "changed"),
+            event("srv", "srv__read", "changed", SEV_INFO),
+            event("srv", "srv__wipe", "changed", SEV_HIGH),
             poison_event("srv", "srv__read", &["instruction-override".to_string()], 0.9),
         ];
         assert!(apply_quarantine(profile, &current, &events));
@@ -858,7 +1009,7 @@ mod tests {
         // Pins written by an older version are bare hex (no "vN:" prefix). After a
         // fingerprint-format upgrade the same tool hashes differently, but that's our
         // change, not the tool's, so it must re-baseline without a spurious "changed".
-        let pins: Pins = [("stripe__charge".to_string(), "deadbeef".to_string())]
+        let pins: Pins = [("stripe__charge".to_string(), legacy_pin("deadbeef"))]
             .into_iter()
             .collect();
         let current = vec![tool("stripe__charge", "Create a charge.")];
@@ -869,8 +1020,8 @@ mod tests {
     fn detect_changed_and_added_on_established_server() {
         // diff() is the pure core; test it directly so we don't touch disk.
         let pins: Pins = [
-            ("stripe__charge".to_string(), fingerprint(&tool("stripe__charge", "Create a charge."))),
-            ("stripe__refund".to_string(), fingerprint(&tool("stripe__refund", "Refund."))),
+            ("stripe__charge".to_string(), pin(&tool("stripe__charge", "Create a charge."))),
+            ("stripe__refund".to_string(), pin(&tool("stripe__refund", "Refund."))),
         ]
         .into_iter()
         .collect();
@@ -1020,33 +1171,157 @@ mod tests {
 
     #[test]
     fn newly_seen_server_is_baselined_not_flagged() {
-        let pins: Pins = [("stripe__charge".to_string(), "h".to_string())].into_iter().collect();
+        let pins: Pins = [("stripe__charge".to_string(), legacy_pin("h"))].into_iter().collect();
         // A brand-new server's tools should not flag as drift.
         let current = vec![tool("github__search", "Search repos.")];
         assert!(diff(&pins, &current).is_empty());
     }
 
-    // Pure diff extracted for testing without disk I/O.
+    #[test]
+    fn drift_severity_tiers_loud_vs_benign() {
+        // The alert-fatigue case: a non-destructive tool's description is revised
+        // server-side (RevenueCat's beta churn), safety hints intact -> `info`, quiet
+        // history, no badge.
+        let pins: Pins = [(
+            "rc__edit_paywall_ai".to_string(),
+            pin(&tool("rc__edit_paywall_ai", "Edit a paywall.")),
+        )]
+        .into_iter()
+        .collect();
+        let current = vec![tool("rc__edit_paywall_ai", "Edit a paywall (beta v2).")];
+        let d = diff(&pins, &current);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0]["change"], "changed");
+        assert_eq!(d[0]["severity"], SEV_INFO, "benign non-destructive churn is info");
+
+        // A destructive tool's definition changing is loud.
+        let pins: Pins = [(
+            "srv__wipe".to_string(),
+            pin(&destructive_tool("srv__wipe", "Wipe.")),
+        )]
+        .into_iter()
+        .collect();
+        let d = diff(&pins, &[destructive_tool("srv__wipe", "Wipe everything now.")]);
+        assert_eq!(d[0]["severity"], SEV_HIGH, "a destructive tool's change is high");
+    }
+
+    #[test]
+    fn annotation_downgrade_is_high_severity() {
+        let ro_true = json!({ "name": "db__query", "description": "Query.",
+            "inputSchema": {"type":"object"}, "annotations": { "readOnlyHint": true } });
+        let ro_false = json!({ "name": "db__query", "description": "Query.",
+            "inputSchema": {"type":"object"}, "annotations": { "readOnlyHint": false } });
+
+        // readOnlyHint true -> false is a silent privilege escalation: high, even though
+        // the tool is not marked destructive.
+        let pins: Pins = [("db__query".to_string(), pin(&ro_true))].into_iter().collect();
+        let d = diff(&pins, std::slice::from_ref(&ro_false));
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0]["severity"], SEV_HIGH, "readOnlyHint downgrade must be high");
+
+        // The reverse (false -> true, tightening) is just benign churn -> info.
+        let pins: Pins = [("db__query".to_string(), pin(&ro_false))].into_iter().collect();
+        let d = diff(&pins, std::slice::from_ref(&ro_true));
+        assert_eq!(d[0]["severity"], SEV_INFO, "tightening readOnlyHint is not a downgrade");
+
+        // destructiveHint true -> false is likewise a downgrade -> high.
+        let dh_true = json!({ "name": "db__query", "description": "Query.",
+            "inputSchema": {"type":"object"}, "annotations": { "destructiveHint": true } });
+        let dh_false = json!({ "name": "db__query", "description": "Query.",
+            "inputSchema": {"type":"object"}, "annotations": { "destructiveHint": false } });
+        let pins: Pins = [("db__query".to_string(), pin(&dh_true))].into_iter().collect();
+        let d = diff(&pins, &[dh_false]);
+        assert_eq!(d[0]["severity"], SEV_HIGH, "destructiveHint downgrade must be high");
+    }
+
+    #[test]
+    fn annotation_downgrade_quarantines_non_destructive_tool() {
+        let profile = Some("integrity-downgrade-unit");
+        if let Some(p) = quarantine_path(profile) {
+            let _ = std::fs::remove_file(p);
+        }
+        // A non-destructive tool that shed readOnlyHint. apply_quarantine keys off the
+        // event severity, so this high-severity `changed` is blocked even though the tool
+        // is not marked destructive.
+        let current = vec![json!({ "name": "db__query", "description": "Query.",
+            "inputSchema": {"type":"object"}, "annotations": { "readOnlyHint": false } })];
+        let events = vec![event("db", "db__query", "changed", SEV_HIGH)];
+        assert!(apply_quarantine(profile, &current, &events));
+        assert!(quarantined(profile).contains("db__query"));
+
+        // A benign (info) change to the same tool would NOT quarantine.
+        assert!(release(profile, "db__query"));
+        let benign = vec![event("db", "db__query", "changed", SEV_INFO)];
+        assert!(!apply_quarantine(profile, &current, &benign));
+
+        if let Some(p) = quarantine_path(profile) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn recently_recorded_collapses_burst_within_window() {
+        let path = std::env::temp_dir()
+            .join(format!("toolport-dedup-test-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        // One gateway has already written a drift event.
+        let e1 = event("rc", "rc__x", "changed", SEV_INFO);
+        std::fs::write(&path, format!("{e1}\n")).unwrap();
+        let base_ts = e1["ts"].as_u64().unwrap();
+
+        // A second gateway's identical event a few ms later is a duplicate.
+        let mut soon = event("rc", "rc__x", "changed", SEV_INFO);
+        soon["ts"] = json!(base_ts + 5);
+        assert!(recently_recorded(&soon, &path), "concurrent duplicate must be suppressed");
+
+        // The same drift long after the window is a fresh, real re-flag.
+        let mut later = event("rc", "rc__x", "changed", SEV_INFO);
+        later["ts"] = json!(base_ts + DEDUP_WINDOW_MS + 1);
+        assert!(!recently_recorded(&later, &path), "a re-flag past the window is not a dup");
+
+        // A different tool (or change kind) is never a duplicate.
+        assert!(!recently_recorded(&event("rc", "rc__y", "changed", SEV_INFO), &path));
+        assert!(!recently_recorded(&event("rc", "rc__x", "added", SEV_INFO), &path));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Build a Pin from a tool, for tests that construct a baseline.
+    fn pin(tool: &Value) -> Pin {
+        pin_of(tool)
+    }
+
+    /// A legacy bare-fingerprint pin (as written before annotation state was tracked).
+    fn legacy_pin(fp: &str) -> Pin {
+        Pin { fp: fp.to_string(), ro: None, dh: None }
+    }
+
+    // Pure diff extracted for testing without disk I/O. Mirrors `check`'s drift
+    // classification (including severity) so tests exercise the real logic.
     fn diff(pins: &Pins, current: &[Value]) -> Vec<Value> {
         let mut now: Pins = BTreeMap::new();
         for t in current {
             if let Some(name) = t.get("name").and_then(Value::as_str) {
                 if name.contains("__") {
-                    now.insert(name.to_string(), fingerprint(t));
+                    now.insert(name.to_string(), pin_of(t));
                 }
             }
         }
         let established: BTreeSet<&str> = pins.keys().map(|k| server_of(k)).collect();
         let mut drifts = Vec::new();
-        for (name, fp) in &now {
-            if !established.contains(server_of(name)) {
-                continue;
-            }
+        for t in current {
+            let name = match t.get("name").and_then(Value::as_str) {
+                Some(n) if n.contains("__") && established.contains(server_of(n)) => n,
+                _ => continue,
+            };
+            let new = &now[name];
             match pins.get(name) {
-                Some(old) if old != fp && fp_version(old) == fp_version(fp) => {
-                    drifts.push(event(server_of(name), name, "changed"))
+                Some(old) if old.fp != new.fp && fp_version(&old.fp) == fp_version(&new.fp) => {
+                    let sev = drift_severity(t, annotation_downgrade(old, t));
+                    drifts.push(event(server_of(name), name, "changed", sev))
                 }
-                None => drifts.push(event(server_of(name), name, "added")),
+                None => drifts.push(event(server_of(name), name, "added", drift_severity(t, false))),
                 _ => {}
             }
         }

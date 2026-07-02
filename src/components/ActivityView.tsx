@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronRight,
+  History,
   ScrollText,
   Share2,
   ShieldAlert,
@@ -119,11 +120,37 @@ function eventBadge(e: SecurityEvent): { label: string; cls: string } {
 
 const SECURITY_DISMISSED_KEY = "conduit.security.dismissed";
 
-/** Stable per-event key so a dismissal sticks across refreshes. Includes server +
- * change so tool-less events (e.g. pins_load_failed, where tool is undefined) don't
- * collapse to the same key and dismiss each other. */
+/** High-signal, interrupting events vs benign, quiet-history churn. The backend now
+ * tags a `severity`; for events written before that (no field) we classify by type:
+ * poison / injected-result / lost-baseline are high, a plain tool_drift is benign. */
+function eventSeverity(e: SecurityEvent): "high" | "info" {
+  if (e.severity === "high" || e.severity === "info") return e.severity;
+  if (
+    e.type === "tool_poison_flag" ||
+    e.type === "result_injection" ||
+    e.type === "pins_load_failed"
+  ) {
+    return "high";
+  }
+  return "info";
+}
+
+/** Durable per-event key for dismissal: identity (type, server, tool, change, severity),
+ * NOT the timestamp. A benign drift that re-flags later (e.g. RevenueCat revising a beta
+ * tool again) collapses to the same key, so dismissing it once keeps it dismissed instead
+ * of returning as a brand-new, undismissable notice. Server + change are kept so tool-less
+ * events (e.g. pins_load_failed) don't collide and dismiss each other. Severity is kept so
+ * dismissing a tool's benign change never masks a later HIGH-severity change on that same
+ * tool (e.g. it turns destructive) - that must still interrupt. */
 function securityKey(e: SecurityEvent): string {
-  return `${e.type}:${e.server ?? ""}:${e.tool ?? ""}:${e.ts}:${e.change}`;
+  return `${e.type}:${e.server ?? ""}:${e.tool ?? ""}:${e.change}:${eventSeverity(e)}`;
+}
+
+/** Unique React list key. `securityKey` is deliberately timestamp-free (so dismissal is
+ * durable), but two un-collapsed instances of the same drift can be on screen at once,
+ * so the render key still needs the timestamp to stay unique. */
+function renderKey(e: SecurityEvent): string {
+  return `${securityKey(e)}:${e.ts}`;
 }
 
 /** Each connected client runs its own gateway process, so a single server tool change
@@ -219,7 +246,7 @@ function SecurityNotices({
             {events.slice(0, 10).map((e) => {
               const badge = eventBadge(e);
               return (
-                <li key={securityKey(e)} className="flex items-center gap-2">
+                <li key={renderKey(e)} className="flex items-center gap-2">
                   <span
                     className={`rounded px-1.5 py-0.5 font-medium ${badge.cls}`}
                   >
@@ -249,6 +276,76 @@ function SecurityNotices({
                 </li>
               );
             })}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** A quiet, non-interrupting history of benign tool-definition churn: a
+ * non-destructive tool's description or schema was revised with its safety hints
+ * intact (vendors routinely revise beta tools server-side). Collapsed by default,
+ * muted styling, no badge or warning color, it's viewable for the record, not an
+ * alert. The loud, actionable signal (poison, destructive change, safety-annotation
+ * downgrade) stays in SecurityNotices. Dismissal is durable per drift identity, so
+ * clearing a recurring benign change keeps it quiet when the vendor churns it again. */
+function QuietDriftHistory({
+  events,
+  onDismiss,
+}: {
+  events: SecurityEvent[];
+  onDismiss: (e: SecurityEvent) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mb-4 rounded-lg border border-border/60 bg-muted/20 p-3">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left text-xs text-muted-foreground"
+      >
+        <History className="size-3.5 shrink-0" />
+        <span className="font-medium text-foreground/80">Recent tool changes</span>
+        <span className="rounded-full bg-muted px-1.5 py-0.5 font-medium">
+          {events.length}
+        </span>
+        <ChevronRight
+          className={`ml-auto size-3.5 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+      </button>
+      {open && (
+        <>
+          <p className="mt-2 mb-2 max-w-2xl text-xs text-muted-foreground">
+            Benign, non-destructive definition changes on tools you've already approved
+            (vendors revise beta tools server-side). Kept for the record, not flagged as a
+            risk. Dismiss any you've reviewed, they'll stay quiet if the same change
+            recurs.
+          </p>
+          <ul className="space-y-1 text-xs">
+            {events.slice(0, 20).map((e) => (
+              <li key={renderKey(e)} className="flex items-center gap-2">
+                <span className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">
+                  {e.change === "added" ? "new tool" : "changed"}
+                </span>
+                <code className="font-mono text-muted-foreground">{e.tool}</code>
+                <span className="ml-auto text-muted-foreground/70">
+                  {new Date(e.ts).toLocaleString(undefined, {
+                    month: "short",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </span>
+                <button
+                  onClick={() => onDismiss(e)}
+                  aria-label="Dismiss this change"
+                  className="rounded p-0.5 text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </li>
+            ))}
           </ul>
         </>
       )}
@@ -713,6 +810,10 @@ export function ActivityView({
   }, [refreshKey]);
 
   const liveSecurity = dedupeSecurity(security).filter((e) => !dismissed.has(securityKey(e)));
+  // Split loud/actionable signal from benign churn so vendor revisions don't bury a real
+  // poison or privilege-escalation flag (the failure this whole surface exists to avoid).
+  const highSecurity = liveSecurity.filter((e) => eventSeverity(e) === "high");
+  const infoSecurity = liveSecurity.filter((e) => eventSeverity(e) === "info");
   const dismissSecurity = (e: SecurityEvent) => {
     setDismissed((prev) => {
       const next = new Set(prev);
@@ -728,11 +829,14 @@ export function ActivityView({
 
   const banner = (
     <>
-      {liveSecurity.length > 0 ? (
-        <SecurityNotices events={liveSecurity} onDismiss={dismissSecurity} />
+      {highSecurity.length > 0 ? (
+        <SecurityNotices events={highSecurity} onDismiss={dismissSecurity} />
       ) : (
         <SecurityResting />
       )}
+      {infoSecurity.length > 0 ? (
+        <QuietDriftHistory events={infoSecurity} onDismiss={dismissSecurity} />
+      ) : null}
       {registry?.liveInspect ? <LiveInspector refreshKey={refreshKey} /> : null}
       {savings && savings.tokensSaved > 0 ? (
         <SavingsBanner savings={savings} />
