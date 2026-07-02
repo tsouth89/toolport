@@ -215,7 +215,7 @@ pub fn ip_is_link_local(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-fn ip_is_private(ip: &std::net::IpAddr) -> bool {
+pub(crate) fn ip_is_private(ip: &std::net::IpAddr) -> bool {
     use std::net::IpAddr;
     match ip {
         IpAddr::V4(v4) => {

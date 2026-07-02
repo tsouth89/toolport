@@ -603,6 +603,55 @@ fn ids_match(got: Option<&Value>, wanted: Option<&Value>) -> bool {
 /// long-running session recovers from an expired access token instead of failing.
 pub type RefreshFn = Box<dyn Fn() -> Option<String> + Send + Sync>;
 
+/// Screen resolved socket addresses against the SSRF policy, fail-closed: returns
+/// `Err` if ANY address is link-local / cloud-metadata, or - when `block_private` -
+/// private / loopback / CGNAT. Refusing the whole set (not just filtering the bad
+/// ones out) means a DNS answer that mixes a public and an internal IP can't sneak
+/// the internal one through.
+fn screen_resolved_addrs(
+    addrs: &[std::net::SocketAddr],
+    block_private: bool,
+) -> std::io::Result<()> {
+    for sa in addrs {
+        let ip = sa.ip();
+        if crate::oauth::ip_is_link_local(&ip) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("SSRF guard: refusing link-local / cloud-metadata address {ip}"),
+            ));
+        }
+        if block_private && crate::oauth::ip_is_private(&ip) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("SSRF guard: refusing private / loopback address {ip}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A ureq agent for remote MCP HTTP calls, with the SSRF resolver installed. Because
+/// ureq resolves through this resolver immediately before connecting, screening here
+/// validates the exact address dialed - closing the resolve-then-connect (DNS-rebind)
+/// TOCTOU a separate pre-check has. `block_private` extends the screen to internal
+/// addresses for untrusted-provenance servers.
+fn guarded_agent(block_private: bool) -> ureq::Agent {
+    use std::net::{SocketAddr, ToSocketAddrs};
+    ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(30))
+        // Never follow redirects. MCP Streamable HTTP doesn't need cross-host
+        // redirects, and following one would let a malicious server bounce us to an
+        // internal address (SSRF, e.g. cloud metadata) or replay our Authorization
+        // bearer to a host of its choosing (token theft).
+        .redirects(0)
+        .resolver(move |netloc: &str| -> std::io::Result<Vec<SocketAddr>> {
+            let addrs: Vec<SocketAddr> = netloc.to_socket_addrs()?.collect();
+            screen_resolved_addrs(&addrs, block_private)?;
+            Ok(addrs)
+        })
+        .build()
+}
+
 /// Talks to a remote MCP server over the Streamable HTTP transport: each request
 /// is a POST, and the response is either a JSON body or an SSE stream carrying
 /// the JSON-RPC message. A session id from `initialize` is echoed on later calls.
@@ -631,18 +680,31 @@ impl HttpTransport {
     }
 
     /// Like `with_auth`, but with a callback invoked once on a 401/403 to mint a
-    /// fresh token; the request is retried with whatever it returns.
+    /// fresh token; the request is retried with whatever it returns. Blocks
+    /// link-local / cloud-metadata targets but allows private/loopback (for
+    /// trusted, e.g. user-added local, servers).
     pub fn with_auth_refresh(url: &str, auth: Option<String>, refresh: Option<RefreshFn>) -> Self {
+        Self::guarded(url, auth, refresh, false)
+    }
+
+    /// Like `with_auth_refresh`, but when `block_private` is set the connection also
+    /// refuses private/loopback/CGNAT targets (for untrusted-provenance servers).
+    /// Link-local / cloud-metadata is refused regardless.
+    ///
+    /// This is the DNS-rebind-safe enforcement point: the SSRF policy runs INSIDE
+    /// ureq's resolver, so the IP that is validated is the exact IP ureq dials. A
+    /// hostname that passed a separate pre-connect guard but then rebinds to
+    /// 169.254.169.254 (or, when `block_private`, an internal address) is refused at
+    /// connect time - closing the resolve-then-connect TOCTOU a standalone check has.
+    pub fn guarded(
+        url: &str,
+        auth: Option<String>,
+        refresh: Option<RefreshFn>,
+        block_private: bool,
+    ) -> Self {
         HttpTransport {
             url: url.to_string(),
-            agent: ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(30))
-                // Never follow redirects. MCP Streamable HTTP doesn't need cross-host
-                // redirects, and following one would let a malicious server bounce us to
-                // an internal address (SSRF, e.g. cloud metadata) or replay our
-                // Authorization bearer to a host of its choosing (token theft).
-                .redirects(0)
-                .build(),
+            agent: guarded_agent(block_private),
             session_id: None,
             next_id: 1,
             auth,
@@ -894,7 +956,37 @@ fn extract_array(result: &Value, key: &str) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_command, screen_spawn_command};
+    use super::{resolve_command, screen_resolved_addrs, screen_spawn_command};
+
+    #[test]
+    fn ssrf_resolver_screens_resolved_addresses() {
+        use std::net::SocketAddr;
+        let p = |s: &str| s.parse::<SocketAddr>().unwrap();
+        let metadata = p("169.254.169.254:80"); // AWS/GCP/Azure v4 metadata
+        let aws_v6 = p("[fd00:ec2::254]:80"); // AWS v6 metadata (ULA)
+        let mapped_v6 = p("[::ffff:169.254.169.254]:80"); // IPv4-mapped metadata
+        let private = p("10.0.0.1:80");
+        let loopback = p("127.0.0.1:80");
+        let public = p("8.8.8.8:443");
+
+        // Link-local / cloud-metadata is refused regardless of block_private.
+        for a in [metadata, aws_v6, mapped_v6] {
+            assert!(screen_resolved_addrs(&[a], false).is_err());
+            assert!(screen_resolved_addrs(&[a], true).is_err());
+        }
+        // Private/loopback: allowed for trusted servers, refused for untrusted ones.
+        for a in [private, loopback] {
+            assert!(screen_resolved_addrs(&[a], false).is_ok());
+            assert!(screen_resolved_addrs(&[a], true).is_err());
+        }
+        // A public address is always allowed.
+        assert!(screen_resolved_addrs(&[public], false).is_ok());
+        assert!(screen_resolved_addrs(&[public], true).is_ok());
+        // Fail-closed: a rebind answer mixing public + metadata is refused whole, so
+        // the internal IP can't be reached even alongside a benign one.
+        assert!(screen_resolved_addrs(&[public, metadata], false).is_err());
+        assert!(screen_resolved_addrs(&[public, metadata], true).is_err());
+    }
 
     #[test]
     fn paths_with_extension_pass_through() {
