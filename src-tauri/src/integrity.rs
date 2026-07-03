@@ -399,6 +399,86 @@ pub fn baselines(profile: Option<&str>) -> BTreeMap<String, ToolBaseline> {
     }
 }
 
+/// Aggregate baselines across ALL profile pin files (`tool-pins.json` +
+/// `tool-pins-<slug>.json`), merged by tool name. The gateway keys pins by the
+/// `CONDUIT_PROFILE` it ran under (often None -> `tool-pins.json`), so the identity view
+/// must union every profile's pins rather than guess a single one. For a tool seen in
+/// several profiles: earliest first_seen, latest last_changed, and the fingerprint from
+/// the most recent change.
+pub fn all_baselines() -> BTreeMap<String, ToolBaseline> {
+    let mut merged: BTreeMap<String, ToolBaseline> = BTreeMap::new();
+    let Some(dir) = crate::registry::conduit_dir() else {
+        return merged;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return merged;
+    };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(name) = fname.to_str() else { continue };
+        if !(name.starts_with("tool-pins") && name.ends_with(".json")) {
+            continue;
+        }
+        let Ok(s) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(pins) = serde_json::from_str::<BTreeMap<String, PinRepr>>(&s) else {
+            continue;
+        };
+        for (tool, repr) in pins {
+            let p: Pin = repr.into();
+            let base = ToolBaseline {
+                fingerprint: p.fp,
+                first_seen: p.first_seen,
+                last_changed: p.last_changed,
+            };
+            merged
+                .entry(tool)
+                .and_modify(|e| {
+                    if base.first_seen != 0
+                        && (e.first_seen == 0 || base.first_seen < e.first_seen)
+                    {
+                        e.first_seen = base.first_seen;
+                    }
+                    if base.last_changed >= e.last_changed {
+                        e.last_changed = base.last_changed;
+                        e.fingerprint = base.fingerprint.clone();
+                    }
+                })
+                .or_insert(base);
+        }
+    }
+    merged
+}
+
+/// The set of quarantined tool names across ALL profiles, for the identity view's badge.
+pub fn all_quarantined_names() -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let Some(dir) = crate::registry::conduit_dir() else {
+        return out;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(name) = fname.to_str() else { continue };
+        let is_q = name
+            .strip_prefix("quarantine")
+            .and_then(|r| r.strip_suffix(".json"))
+            .is_some();
+        if !is_q {
+            continue;
+        }
+        if let Ok(s) = std::fs::read_to_string(entry.path()) {
+            if let Ok(q) = serde_json::from_str::<Quarantine>(&s) {
+                out.extend(q.into_keys());
+            }
+        }
+    }
+    out
+}
+
 // ===== Quarantine: block high-risk tools after a drift until re-approved =====
 //
 // `check` is detection-only and re-baselines as it goes, so quarantine keeps its own
