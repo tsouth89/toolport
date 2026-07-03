@@ -23,6 +23,10 @@ authenticate each server once, and every AI client (Claude, Cursor, Codex, and
 the rest) points at Toolport and shares them, so you stop configuring the same
 servers separately in each app.
 
+<p align="center">
+  <img src="docs/app.png" alt="The Toolport desktop app: 14 MCP servers connected in one place with per-server tool counts, and every AI client wired in with one click" width="900" />
+</p>
+
 It also fixes what those servers cost your agent. Every MCP server you connect
 dumps all of its tools into context on every single request, and it adds up fast:
 just 3 servers (62 tools) cost ~24,000 tokens of definitions before you've asked
