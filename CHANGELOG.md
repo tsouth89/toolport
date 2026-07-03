@@ -6,6 +6,20 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+### Security
+- **HTTP clients are scoped on resources and prompts too.** A registered HTTP/OpenAPI
+  client scoped to a subset of servers could still read *any* connected server's
+  resources and prompts (`resources/read` / `prompts/get` ignored the scope); they now
+  enforce the same allowed-server set as tool calls.
+- **Closed three tool-supply-chain detection gaps** from an internal audit: a tool's
+  `outputSchema` is now poison-scanned (not just drift-hashed); injection in a result's
+  `structuredContent` is flagged even when a text block already flagged; and a corrupt
+  quarantine file no longer silently re-exposes quarantined tools (it's preserved and
+  logged instead of failing open).
+- **Gateway durability + auth hardening:** the registry is fsync'd before its atomic
+  rename (no truncated file on a crash), an empty `Bearer` token is rejected instead of
+  looked up, and the per-client token check is constant-time.
+
 ### Added
 - **Teams can require human approval org-wide.** A team admin can turn on "Require
   human approval" in the Teams policy, and every member's gateway then holds gated
