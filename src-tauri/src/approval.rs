@@ -113,6 +113,13 @@ pub fn gate_reason(
     }
 }
 
+/// The stable key for the "allow this tool past approval" lists (per-session in the broker,
+/// persistent in the registry). One definition so both sides agree. `server` is already the
+/// sanitized prefix, so `server/tool` is unambiguous.
+pub fn allow_key(server: &str, tool: &str) -> String {
+    format!("{server}/{tool}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

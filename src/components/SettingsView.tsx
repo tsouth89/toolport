@@ -10,8 +10,10 @@ import {
   addHttpClient,
   clearInspectLog,
   httpBridgeStatus,
+  listAllowedTools,
   listQuarantined,
   releaseQuarantine,
+  revokeAllowedTool,
   removeHttpClient,
   setAllowAgentControl,
   setConfirmDestructive,
@@ -25,7 +27,7 @@ import {
   type HttpBridgeStatus,
   type QuarantinedTool,
 } from "@/lib/api";
-import type { Registry } from "@/lib/types";
+import type { AllowedTool, Registry } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -52,6 +54,7 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const liveInspect = registry?.liveInspect ?? false;
   const [busy, setBusy] = useState(false);
   const [quarantined, setQuarantined] = useState<QuarantinedTool[]>([]);
+  const [allowedTools, setAllowedTools] = useState<AllowedTool[]>([]);
   const [bridge, setBridge] = useState<HttpBridgeStatus | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
@@ -127,6 +130,24 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
       setQuarantined(await listQuarantined());
     } catch (e) {
       toastError(`Couldn't re-approve: ${e}`);
+    }
+  };
+
+  // Tools the user allowed to skip human approval. Polled because "always allow" is chosen
+  // from the approval overlay (a different component), so this keeps the list in sync.
+  useEffect(() => {
+    const load = () => listAllowedTools().then(setAllowedTools).catch(() => {});
+    load();
+    const id = setInterval(load, 10000);
+    return () => clearInterval(id);
+  }, []);
+
+  const revokeAllowed = async (key: string) => {
+    try {
+      await revokeAllowedTool(key);
+      setAllowedTools(await listAllowedTools());
+    } catch (e) {
+      toastError(`Couldn't revoke: ${e}`);
     }
   };
 
@@ -299,6 +320,34 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
                     className="ml-auto shrink-0 rounded-md border bg-background px-2 py-0.5 text-[11px] font-medium hover:bg-accent"
                   >
                     Re-approve
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {allowedTools.length > 0 && (
+          <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <UserCheck className="size-4 shrink-0 text-info" />
+              <span className="text-sm font-medium">Allowed tools</span>
+              <span className="text-xs text-muted-foreground">skip human approval</span>
+            </div>
+            <ul className="flex flex-col gap-1.5">
+              {allowedTools.map((t) => (
+                <li key={t.key} className="flex items-center gap-2 text-xs">
+                  <span className="min-w-0 truncate font-mono">
+                    {t.server}/{t.tool}
+                  </span>
+                  <span className="shrink-0 text-muted-foreground">
+                    {t.persistent ? "always" : "this session"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void revokeAllowed(t.key)}
+                    className="ml-auto shrink-0 rounded-md border bg-background px-2 py-0.5 text-[11px] font-medium hover:bg-accent"
+                  >
+                    Revoke
                   </button>
                 </li>
               ))}

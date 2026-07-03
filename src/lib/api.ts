@@ -12,6 +12,7 @@ import type {
   McpTool,
   MigrateResult,
   ParsedSnippetServer,
+  AllowedTool,
   PendingApproval,
   ProbeResult,
   Registry,
@@ -180,9 +181,28 @@ export function listPendingApprovals(): Promise<PendingApproval[]> {
   return invoke<PendingApproval[]>("list_pending_approvals");
 }
 
-/** Approve or deny a held tool call by id; the parked gateway call then runs or is refused. */
-export function decideApproval(id: string, approved: boolean): Promise<void> {
-  return invoke<void>("decide_approval", { id, approved });
+/** How long an approval sticks: `once` (this call only), `session` (until the app
+ * restarts), or `always` (persisted, skips the prompt for this tool from now on). */
+export type ApprovalScope = "once" | "session" | "always";
+
+/** Approve or deny a held tool call by id; the parked gateway call then runs or is refused.
+ * On approve, `scope` controls whether future calls to the same tool skip the prompt. */
+export function decideApproval(
+  id: string,
+  approved: boolean,
+  scope: ApprovalScope = "once",
+): Promise<void> {
+  return invoke<void>("decide_approval", { id, approved, scope });
+}
+
+/** Tools currently allowed to skip human approval (persistent "always" + this session). */
+export function listAllowedTools(): Promise<AllowedTool[]> {
+  return invoke<AllowedTool[]>("list_allowed_tools");
+}
+
+/** Revoke an allowed tool so it requires approval again. */
+export function revokeAllowedTool(key: string): Promise<void> {
+  return invoke<void>("revoke_allowed_tool", { key });
 }
 
 /** Toggle live request/response inspection (opt-in, off by default). When on, the

@@ -309,6 +309,15 @@ export interface PendingApproval {
   arguments: unknown;
 }
 
+/** A tool the user allowed to skip human approval (Settings "Allowed tools" list). */
+export interface AllowedTool {
+  key: string;
+  server: string;
+  tool: string;
+  /** true = persisted ("always"); false = only for this app session. */
+  persistent: boolean;
+}
+
 export interface Registry {
   version: number;
   servers: ServerEntry[];

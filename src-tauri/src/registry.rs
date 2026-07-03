@@ -147,6 +147,12 @@ pub struct Registry {
     /// `confirm_destructive` for the tools it gates (a human decision supersedes the agent's).
     #[serde(default)]
     pub human_approval: bool,
+    /// Tools the user chose to "always allow" past human approval, so the HITL gate skips
+    /// them. Each entry is a `server/tool` key (see `approval::allow_key`). Persisted so an
+    /// always-allowed tool stays allowed across restarts; the broker also keeps a separate
+    /// ephemeral per-session allowlist that is NOT saved here.
+    #[serde(default)]
+    pub human_approval_allow: Vec<String>,
     /// Quarantine-on-drift: when true, a high-risk tool (poisoned definition, or a
     /// destructive tool whose definition changed/appeared) that drifts from its pinned
     /// baseline is hidden and blocked from every client until the user re-approves it.
@@ -280,6 +286,7 @@ impl Default for Registry {
             deny_destructive: false,
             confirm_destructive: false,
             human_approval: false,
+            human_approval_allow: Vec::new(),
             quarantine_on_drift: false,
             lazy_discovery: true,
             allow_agent_control: false,
@@ -470,6 +477,24 @@ impl Registry {
     /// for a person. When it gates a tool it takes precedence over `confirm_destructive`.
     pub fn set_human_approval(&mut self, on: bool) {
         self.human_approval = on;
+    }
+
+    /// Add a `server/tool` key to the persistent "always allow" list, so the HITL gate
+    /// skips it. Idempotent.
+    pub fn allow_tool(&mut self, key: String) {
+        if !self.human_approval_allow.contains(&key) {
+            self.human_approval_allow.push(key);
+        }
+    }
+
+    /// Remove a key from the persistent allow list (re-require approval for that tool).
+    pub fn revoke_tool(&mut self, key: &str) {
+        self.human_approval_allow.retain(|k| k != key);
+    }
+
+    /// Whether a `server/tool` key is on the persistent always-allow list.
+    pub fn is_tool_allowed(&self, key: &str) -> bool {
+        self.human_approval_allow.iter().any(|k| k == key)
     }
 
     /// Set lazy discovery mode (gateway exposes meta-tools vs the full catalog).

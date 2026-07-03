@@ -12,7 +12,7 @@
 //! human decides in the app UI; a fail-closed timeout denies. Transport is loopback
 //! TCP + token for now; hardening to a named-pipe / uds is a follow-up.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Sender};
@@ -51,6 +51,11 @@ struct Inner {
     token: String,
     /// id -> parked connection. Bounded by `MAX_PENDING`.
     pending: Mutex<HashMap<String, Waiter>>,
+    /// Ephemeral per-session "always allow" set of `server/tool` keys. A matching call
+    /// auto-approves without prompting; cleared on app restart (the persistent list lives
+    /// in the registry). "Approve for this session" adds here; "Always allow" adds here
+    /// AND to the registry.
+    session_allow: Mutex<HashSet<String>>,
 }
 
 /// Cap on simultaneously-pending approvals, so a misbehaving client can't grow the
@@ -75,10 +80,11 @@ impl ApprovalBroker {
             .collect()
     }
 
-    /// Deliver a human decision for `id`. `Err` if the id is unknown (already resolved
-    /// or timed out). Sending is best-effort: a parked connection that already timed out
-    /// has dropped its receiver, which is harmless.
-    pub fn decide(&self, id: &str, approved: bool) -> Result<(), String> {
+    /// Deliver a human decision for `id`, returning the resolved call's view (so the caller
+    /// can apply an "allow this tool" scope from its server/tool). `Err` if the id is unknown
+    /// (already resolved or timed out). Sending is best-effort: a parked connection that
+    /// already timed out has dropped its receiver, which is harmless.
+    pub fn decide(&self, id: &str, approved: bool) -> Result<PendingView, String> {
         let waiter = self
             .inner
             .pending
@@ -93,10 +99,50 @@ impl ApprovalBroker {
                     ApprovalDecision::Denied
                 };
                 let _ = w.decide.send(d);
-                Ok(())
+                Ok(w.view)
             }
             None => Err("no pending approval with that id (it may have expired)".into()),
         }
+    }
+
+    /// Add a `server/tool` key to the ephemeral session allowlist (auto-approve until the
+    /// app restarts). Both "approve for session" and "always allow" add here so the
+    /// decision takes effect immediately for later matching calls.
+    pub fn add_session_allow(&self, key: String) {
+        self.inner
+            .session_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key);
+    }
+
+    /// Remove a key from the session allowlist (used when the user revokes it).
+    pub fn remove_session_allow(&self, key: &str) {
+        self.inner
+            .session_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(key);
+    }
+
+    /// Snapshot the session allowlist for the UI.
+    pub fn session_allowed(&self) -> Vec<String> {
+        self.inner
+            .session_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Whether a key is in the ephemeral session allowlist.
+    fn session_contains(&self, key: &str) -> bool {
+        self.inner
+            .session_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(key)
     }
 }
 
@@ -115,6 +161,7 @@ pub fn start(app: AppHandle) -> ApprovalBroker {
         inner: Arc::new(Inner {
             token: token.clone(),
             pending: Mutex::new(HashMap::new()),
+            session_allow: Mutex::new(HashSet::new()),
         }),
     };
 
@@ -182,6 +229,20 @@ fn handle_conn(stream: TcpStream, broker: ApprovalBroker, app: AppHandle) {
         return;
     }
 
+    // Auto-approve if the user already allowed this tool - per session (broker) or
+    // persistently (registry). Skips the prompt entirely so "approve for this session"
+    // and "always allow this tool" actually stick for later matching calls.
+    let key = crate::approval::allow_key(&req.server, &req.tool);
+    if broker.session_contains(&key) || registry_allows(&app, &key) {
+        let _ = out.set_write_timeout(Some(Duration::from_secs(10)));
+        let _ = writeln!(
+            out,
+            "{}",
+            serde_json::to_string(&ApprovalDecision::Approved).unwrap_or_default()
+        );
+        return;
+    }
+
     let view = PendingView {
         id: req.id.clone(),
         client: req.client.clone(),
@@ -239,6 +300,18 @@ fn handle_conn(stream: TcpStream, broker: ApprovalBroker, app: AppHandle) {
     );
 }
 
+/// Whether the tool `key` is on the registry's persistent always-allow list. Reads the
+/// app-managed registry state; false if unavailable.
+fn registry_allows(app: &AppHandle, key: &str) -> bool {
+    app.try_state::<Mutex<crate::registry::Registry>>()
+        .map(|s| {
+            s.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_tool_allowed(key)
+        })
+        .unwrap_or(false)
+}
+
 /// Notify the human that a call is held: an OS notification plus a taskbar-attention
 /// flash on the main window. Best-effort and non-blocking - if either fails (permission
 /// off, no window) the in-app overlay is still the source of truth. We flash rather than
@@ -265,6 +338,7 @@ mod tests {
             inner: Arc::new(Inner {
                 token: "tok".into(),
                 pending: Mutex::new(HashMap::new()),
+                session_allow: Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -314,5 +388,23 @@ mod tests {
     #[test]
     fn unknown_id_errs() {
         assert!(broker().decide("nope", true).is_err());
+    }
+
+    #[test]
+    fn session_allow_round_trips_and_decide_returns_view() {
+        let b = broker();
+        let key = crate::approval::allow_key("db", "db__read");
+        assert!(!b.session_contains(&key));
+        b.add_session_allow(key.clone());
+        assert!(b.session_contains(&key));
+        assert_eq!(b.session_allowed(), vec![key.clone()]);
+        b.remove_session_allow(&key);
+        assert!(!b.session_contains(&key));
+
+        // decide now hands back the resolved view (so the command can apply an allow scope).
+        let rx = park(&b, "z");
+        let view = b.decide("z", true).unwrap();
+        assert_eq!(view.tool, "drop");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), ApprovalDecision::Approved);
     }
 }
