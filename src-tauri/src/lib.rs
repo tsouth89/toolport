@@ -18,6 +18,7 @@ pub mod registry;
 pub mod remote;
 pub mod router;
 pub mod savings;
+pub mod searchtrace;
 pub mod semantic;
 pub mod shaping;
 pub mod secrets;
@@ -996,6 +997,22 @@ fn clear_inspect_log() -> Result<(), String> {
     Ok(())
 }
 
+/// Recent lazy-discovery search traces (newest first): what the model searched for,
+/// which tools matched, and the tool-definition tokens the results cost vs. loading
+/// the whole catalog. The in-path proof that lazy discovery is working. Empty when
+/// nothing has searched yet.
+#[tauri::command]
+fn get_search_traces(limit: usize) -> Vec<serde_json::Value> {
+    searchtrace::read_recent(limit)
+}
+
+/// Clear the search-trace log (delete `search-trace.jsonl`).
+#[tauri::command]
+fn clear_search_traces() -> Result<(), String> {
+    searchtrace::clear();
+    Ok(())
+}
+
 /// Toggle quarantine-on-drift. When enabled, the gateway hides and blocks a high-risk
 /// tool (poisoned definition, or a destructive tool whose definition changed/appeared)
 /// that drifts from its pinned baseline, until the user re-approves it.
@@ -1915,6 +1932,8 @@ pub fn run() {
             set_live_inspect,
             get_inspect_log,
             clear_inspect_log,
+            get_search_traces,
+            clear_search_traces,
             set_quarantine_on_drift,
             list_quarantined,
             release_quarantine,

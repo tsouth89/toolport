@@ -86,6 +86,27 @@ export interface InspectEntry {
   durationMs?: number;
 }
 
+/** One lazy-discovery search: what the model searched for and what came back, with
+ * the ground-truth token cost of the results vs. loading the whole catalog. */
+export interface SearchTrace {
+  ts: number;
+  client?: string;
+  query: string;
+  server?: string;
+  top: string;
+  names: string[];
+  returned: number;
+  total: number;
+  /** Tool-definition tokens the returned schemas cost this turn (≈). */
+  returnedTokens: number;
+  /** Tool-definition tokens advertising the whole (scoped) catalog would cost (≈). */
+  flatTokens: number;
+  /** flatTokens - returnedTokens: the context kept out of the model this turn. */
+  savedTokens: number;
+  /** The loop-breaker fired: repeated searches kept landing on the same top tool. */
+  escalated: boolean;
+}
+
 export interface ProbeResult {
   serverId: string;
   ok: boolean;

@@ -17,6 +17,7 @@ import type {
   ProbeResult,
   Registry,
   SavingsSummary,
+  SearchTrace,
   ServerEntry,
   ToolCallResult,
   Stack,
@@ -237,6 +238,18 @@ export function getInspectLog(limit = 50): Promise<InspectEntry[]> {
 /** Clear the live-inspection ring so no captured args/results linger. */
 export function clearInspectLog(): Promise<void> {
   return invoke<void>("clear_inspect_log");
+}
+
+/** Recent lazy-discovery search traces (newest first): what the model searched for,
+ * which tools matched, and the tool-definition tokens the results cost vs. loading the
+ * whole catalog. Empty until something has searched. */
+export function getSearchTraces(limit = 100): Promise<SearchTrace[]> {
+  return invoke<SearchTrace[]>("get_search_traces", { limit });
+}
+
+/** Clear the search-trace log. */
+export function clearSearchTraces(): Promise<void> {
+  return invoke<void>("clear_search_traces");
 }
 
 /** Toggle quarantine-on-drift: block a high-risk tool that drifted until re-approved. */
