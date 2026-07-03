@@ -3360,8 +3360,18 @@ fn main() {
             "request: {}",
             req.get("method").and_then(|m| m.as_str()).unwrap_or("")
         ));
-        let response =
-            process_request(&state, &req, &search_guard, &confirm_guard, None, None);
+        // A panic in a handler must not unwind out of this loop and kill the gateway:
+        // stdio has no supervisor (unlike the HTTP listener, which catches per request),
+        // so one panic would drop the whole MCP connection and take every tool with it.
+        // Catch it, log it, and return a JSON-RPC internal error for this request.
+        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            process_request(&state, &req, &search_guard, &confirm_guard, None, None)
+        }))
+        .unwrap_or_else(|_| {
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            glog("panic while handling a request; returned an internal error, gateway still up");
+            Some(error(id, -32603, "internal error"))
+        });
         if let Some(resp) = response {
             let mut out = state
                 .stdout

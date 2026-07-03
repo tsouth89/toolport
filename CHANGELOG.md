@@ -17,6 +17,10 @@ Entries before the rename below shipped under the project's former name, Conduit
   overflowed the paging math into an invalid byte slice that panicked; on the stdio
   transport (no panic guard) that took down the whole gateway process. The offset math
   now saturates.
+- **The stdio transport now catches handler panics like the HTTP one already did.** A
+  panic while handling a request returns a JSON-RPC internal error for that request and
+  keeps the gateway running, instead of unwinding out and dropping the whole MCP
+  connection (defense-in-depth for the primary local transport).
 - **HTTP clients are scoped on resources and prompts too.** A registered HTTP/OpenAPI
   client scoped to a subset of servers could still read *any* connected server's
   resources and prompts (`resources/read` / `prompts/get` ignored the scope); they now
