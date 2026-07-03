@@ -39,6 +39,15 @@ struct Pin {
     /// `destructiveHint` at pin time, if the tool advertised one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dh: Option<bool>,
+    /// Epoch ms this tool's definition was first pinned (identity provenance). Set once
+    /// and never moved. 0 = a legacy pin from before timestamps; backfilled on the next
+    /// check so the identity view has a usable date instead of 1970.
+    #[serde(default)]
+    first_seen: u64,
+    /// Epoch ms of the most recent definition change (or the first pin). Advances only
+    /// when the fingerprint actually changes, so "last changed" reflects real drift.
+    #[serde(default)]
+    last_changed: u64,
 }
 
 /// On-disk pin value: either the legacy bare fingerprint string (pins written before
@@ -56,7 +65,13 @@ impl From<PinRepr> for Pin {
     fn from(r: PinRepr) -> Self {
         match r {
             PinRepr::Full(p) => p,
-            PinRepr::Legacy(fp) => Pin { fp, ro: None, dh: None },
+            PinRepr::Legacy(fp) => Pin {
+                fp,
+                ro: None,
+                dh: None,
+                first_seen: 0,
+                last_changed: 0,
+            },
         }
     }
 }
@@ -77,6 +92,9 @@ fn pin_of(tool: &Value) -> Pin {
         fp: fingerprint(tool),
         ro: read_hint(tool, "readOnlyHint"),
         dh: read_hint(tool, "destructiveHint"),
+        // Timestamps are reconciled against the prior baseline in `check`, not set here.
+        first_seen: 0,
+        last_changed: 0,
     }
 }
 
@@ -313,10 +331,28 @@ pub fn check(profile: Option<&str>, current: &[Value]) -> Vec<Value> {
     }
 
     // Re-baseline present tools (merge, never delete) so we alert once per change
-    // and so a transient disconnect can't silently reset a server's baseline.
+    // and so a transient disconnect can't silently reset a server's baseline. Carry
+    // the identity timestamps forward: first_seen is set once and never moves;
+    // last_changed advances only when the fingerprint actually changed. Legacy pins
+    // (0) are backfilled to `stamp` on this first post-upgrade check.
+    let stamp = epoch_millis();
     let mut updated = pins.clone();
-    for (name, fp) in &now {
-        updated.insert(name.clone(), fp.clone());
+    for (name, fresh) in &now {
+        let (first_seen, last_changed) = match pins.get(name) {
+            Some(old) if old.fp == fresh.fp => (
+                if old.first_seen == 0 { stamp } else { old.first_seen },
+                if old.last_changed == 0 { stamp } else { old.last_changed },
+            ),
+            Some(old) => (
+                if old.first_seen == 0 { stamp } else { old.first_seen },
+                stamp,
+            ),
+            None => (stamp, stamp),
+        };
+        updated.insert(
+            name.clone(),
+            Pin { first_seen, last_changed, ..fresh.clone() },
+        );
     }
     if updated != pins {
         save_pins(profile, &updated);
@@ -326,6 +362,41 @@ pub fn check(profile: Option<&str>, current: &[Value]) -> Vec<Value> {
         record_event(e);
     }
     events
+}
+
+/// A tool's pinned identity baseline, exposed for the capability-provenance view.
+/// The fingerprint is the same one drift detection compares against, so a human can
+/// see exactly which definition was pinned and when it last moved.
+#[derive(Clone, Debug, Serialize)]
+pub struct ToolBaseline {
+    /// Version-prefixed fingerprint of the pinned definition.
+    pub fingerprint: String,
+    /// Epoch ms the tool was first seen (0 only if never checked).
+    pub first_seen: u64,
+    /// Epoch ms of the last definition change (or first pin).
+    pub last_changed: u64,
+}
+
+/// The pinned baselines for `profile`, keyed by namespaced tool name (`server__tool`).
+/// Read-only; drives the tool-identity view. Empty if no baseline exists yet or it's
+/// unreadable (the identity view degrades to "no fingerprint yet", never fails).
+pub fn baselines(profile: Option<&str>) -> BTreeMap<String, ToolBaseline> {
+    match load_pins(profile) {
+        PinsLoad::Loaded(pins) => pins
+            .into_iter()
+            .map(|(name, p)| {
+                (
+                    name,
+                    ToolBaseline {
+                        fingerprint: p.fp,
+                        first_seen: p.first_seen,
+                        last_changed: p.last_changed,
+                    },
+                )
+            })
+            .collect(),
+        _ => BTreeMap::new(),
+    }
 }
 
 // ===== Quarantine: block high-risk tools after a drift until re-approved =====
@@ -1104,6 +1175,41 @@ mod tests {
     }
 
     #[test]
+    fn baseline_tracks_first_seen_and_last_changed() {
+        let profile = Some("identity-ts-unit");
+        if let Some(p) = pins_path(profile) {
+            let _ = std::fs::remove_file(p);
+        }
+
+        // First check pins the tool: first_seen and last_changed are both set to now.
+        let v1 = vec![tool("srv__a", "First.")];
+        check(profile, &v1);
+        let b1 = baselines(profile);
+        let a1 = b1.get("srv__a").expect("tool should be pinned").clone();
+        assert!(a1.first_seen > 0, "first_seen set on first pin");
+        assert_eq!(a1.first_seen, a1.last_changed, "fresh pin: first_seen == last_changed");
+
+        // Re-checking the SAME definition moves neither timestamp.
+        check(profile, &v1);
+        let a2 = baselines(profile)["srv__a"].clone();
+        assert_eq!(a2.first_seen, a1.first_seen, "first_seen stable across checks");
+        assert_eq!(a2.last_changed, a1.last_changed, "last_changed stable when unchanged");
+
+        // Changing the definition advances last_changed but preserves first_seen.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let v2 = vec![tool("srv__a", "Changed description.")];
+        check(profile, &v2);
+        let a3 = baselines(profile)["srv__a"].clone();
+        assert_ne!(a3.fingerprint, a1.fingerprint, "fingerprint changed");
+        assert_eq!(a3.first_seen, a1.first_seen, "first_seen unchanged on drift");
+        assert!(a3.last_changed > a1.last_changed, "last_changed advances on drift");
+
+        if let Some(p) = pins_path(profile) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
     fn fingerprint_ignores_key_order_in_schema() {
         let a = json!({ "name": "x__y", "description": "d", "inputSchema": { "a": 1, "b": 2 } });
         let b = json!({ "name": "x__y", "description": "d", "inputSchema": { "b": 2, "a": 1 } });
@@ -1563,7 +1669,7 @@ mod tests {
 
     /// A legacy bare-fingerprint pin (as written before annotation state was tracked).
     fn legacy_pin(fp: &str) -> Pin {
-        Pin { fp: fp.to_string(), ro: None, dh: None }
+        Pin { fp: fp.to_string(), ro: None, dh: None, first_seen: 0, last_changed: 0 }
     }
 
     // Pure diff extracted for testing without disk I/O. Mirrors `check`'s drift
