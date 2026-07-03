@@ -3,13 +3,17 @@
   <desc>A cloud of many tool names on the left funnels through the Toolport gateway into three meta-tools on the right.</desc>
   <rect x="1" y="1" width="1198" height="598" rx="24" fill="#1E3A66" stroke="rgba(255,255,255,0.10)"/>
 
+  <!-- brand mark: four hex anchor "nuts", drawn in the card navy so they notch the white porthole ring (matches toolport-icon) -->
+
   <!-- header: porthole mark + wordmark -->
   <g transform="translate(56,40)">
     <circle cx="18" cy="18" r="16" fill="none" stroke="#FFFFFF" stroke-width="7"/>
-    <circle cx="18" cy="2"  r="2.6" fill="#FFFFFF"/>
-    <circle cx="34" cy="18" r="2.6" fill="#FFFFFF"/>
-    <circle cx="18" cy="34" r="2.6" fill="#FFFFFF"/>
-    <circle cx="2"  cy="18" r="2.6" fill="#FFFFFF"/>
+    <g fill="#1E3A66">
+      <polygon points="18.00,-0.80 15.58,0.60 15.58,3.40 18.00,4.80 20.42,3.40 20.42,0.60"/>
+      <polygon points="34.00,15.20 31.58,16.60 31.58,19.40 34.00,20.80 36.42,19.40 36.42,16.60"/>
+      <polygon points="18.00,31.20 15.58,32.60 15.58,35.40 18.00,36.80 20.42,35.40 20.42,32.60"/>
+      <polygon points="2.00,15.20 -0.42,16.60 -0.42,19.40 2.00,20.80 4.42,19.40 4.42,16.60"/>
+    </g>
     <circle cx="18" cy="18" r="4.5" fill="#F97316"/>
     <text x="50" y="27" font-size="30" font-weight="600" fill="#FFFFFF">Toolport</text>
   </g>
@@ -46,10 +50,12 @@
 
   <!-- gateway node: porthole mark -->
   <circle cx="556" cy="254" r="26" fill="none" stroke="#FFFFFF" stroke-width="10"/>
-  <circle cx="556" cy="228" r="4" fill="#FFFFFF"/>
-  <circle cx="582" cy="254" r="4" fill="#FFFFFF"/>
-  <circle cx="556" cy="280" r="4" fill="#FFFFFF"/>
-  <circle cx="530" cy="254" r="4" fill="#FFFFFF"/>
+  <g fill="#1E3A66">
+    <polygon points="556.00,223.40 552.02,225.70 552.02,230.30 556.00,232.60 559.98,230.30 559.98,225.70"/>
+    <polygon points="582.00,249.40 578.02,251.70 578.02,256.30 582.00,258.60 585.98,256.30 585.98,251.70"/>
+    <polygon points="556.00,275.40 552.02,277.70 552.02,282.30 556.00,284.60 559.98,282.30 559.98,277.70"/>
+    <polygon points="530.00,249.40 526.02,251.70 526.02,256.30 530.00,258.60 533.98,256.30 533.98,251.70"/>
+  </g>
   <circle cx="556" cy="254" r="8" fill="#F97316"/>
 
   <!-- right: 3 meta-tools -->

@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="docs/hero.png" alt="Toolport" width="720" />
-
 # Toolport
 
 **Every tool. One port.** One local gateway for all your MCP servers, shared by
