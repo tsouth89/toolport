@@ -209,8 +209,7 @@ pub fn fetch_result(cursor: &str, offset: usize, len: usize) -> Value {
             true,
         );
     };
-    let chars: Vec<char> = c.body.chars().collect();
-    let total = chars.len();
+    let total = c.body.chars().count();
     if offset >= total {
         return text_result(
             format!(
@@ -222,7 +221,22 @@ pub fn fetch_result(cursor: &str, offset: usize, len: usize) -> Value {
     }
     let len = if len == 0 { budget() } else { len };
     let end = (offset + len).min(total);
-    let slice: String = chars[offset..end].iter().collect();
+    // Map the character window [offset, end) to byte offsets in a single pass, so a
+    // page read never allocates a Vec<char> of the whole (possibly multi-MB) body.
+    // `end == total` leaves end_byte at the body's byte length (the loop never yields
+    // char index `total`), so the last page runs cleanly to the end.
+    let mut start_byte = c.body.len();
+    let mut end_byte = c.body.len();
+    for (char_idx, (byte_idx, _)) in c.body.char_indices().enumerate() {
+        if char_idx == offset {
+            start_byte = byte_idx;
+        }
+        if char_idx == end {
+            end_byte = byte_idx;
+            break;
+        }
+    }
+    let slice = c.body[start_byte..end_byte].to_string();
     let remaining = total - end;
     let footer = if remaining > 0 {
         format!(
@@ -305,6 +319,31 @@ mod tests {
             "head was {} bytes, over the 2048 budget",
             head.len()
         );
+    }
+
+    #[test]
+    fn fetch_pages_multibyte_by_char_offset() {
+        // The body is all 3-byte chars, so char offsets != byte offsets. The
+        // single-pass byte mapping must slice on char boundaries and honor the
+        // requested character window exactly.
+        let mut r = json!({
+            "content": [{ "type": "text", "text": "€".repeat(4_000) }],
+            "isError": false
+        });
+        assert!(shape_result(&mut r, 2048));
+        let text = r["content"][0]["text"].as_str().unwrap();
+        let cursor = text
+            .split("\"cursor\":\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap()
+            .to_string();
+        // Read 100 chars starting at char 1000 (byte 3000): all euros, none split.
+        let page = fetch_result(&cursor, 1000, 100);
+        let pt = page["content"][0]["text"].as_str().unwrap();
+        let body = pt.split("\n\n[Toolport:").next().unwrap();
+        assert_eq!(body.chars().filter(|&c| c == '€').count(), 100);
+        assert!(pt.contains("of 4000"));
     }
 
     #[test]

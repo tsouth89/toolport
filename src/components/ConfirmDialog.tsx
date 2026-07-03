@@ -42,6 +42,10 @@ export function ConfirmDialog({
     try {
       await onConfirm();
       setOpen(false);
+    } catch {
+      // Keep the dialog open on failure so the user can retry. onConfirm owns
+      // surfacing the error (its handlers toast); swallow here so a rejection
+      // doesn't escape as an unhandled promise rejection from the onClick.
     } finally {
       setBusy(false);
     }
