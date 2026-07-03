@@ -107,11 +107,16 @@ function App() {
 
   const lastProbeRef = useRef(0);
   const probingRef = useRef(false);
+  // Whether the most recent probe threw (vs. returned results or was skipped). Lets
+  // the manual Refresh distinguish "health check failed" from "nothing to report" so
+  // a thrown probe doesn't masquerade as a green success toast.
+  const probeErroredRef = useRef(false);
   const loadedOnce = useRef(false);
 
   // Probe health quietly (no toast). Used on load and after authenticating, so
   // each server's status badge reflects reality without the user clicking around.
   const reprobe = useCallback(async (): Promise<ProbeResult[]> => {
+    probeErroredRef.current = false;
     // Never stack probes. A probe spawns/reads every server (and on macOS can
     // trigger keychain prompts); overlapping runs amplify that into a storm,
     // especially since each dismissed prompt returns focus and could re-trigger.
@@ -124,7 +129,9 @@ function App() {
       setHealth(Object.fromEntries(results.map((r) => [r.serverId, r])));
       return results;
     } catch {
-      /* non-fatal: badges just stay in "checking" */
+      // Non-fatal: badges just stay in "checking". Record that it threw so a manual
+      // refresh reports the failure instead of a false success (both return []).
+      probeErroredRef.current = true;
       return [];
     } finally {
       setProbing(false);
@@ -161,6 +168,10 @@ function App() {
           if (results.length > 0) {
             const up = results.filter((r) => r.ok).length;
             toast.success(`${up} of ${results.length} servers healthy`);
+          } else if (probeErroredRef.current) {
+            // The registry/clients reloaded, but the health probe itself threw.
+            // Don't dress that up as a green success.
+            toast.warning("Refreshed, but couldn't check server health");
           } else {
             // Registry/clients still reloaded; give feedback even when the probe
             // was skipped (already in flight) or there are no servers to report.
