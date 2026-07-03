@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Check, Globe, Loader2, Monitor, ShieldAlert, Trash2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -41,15 +41,27 @@ const REASON: Record<Reason, { label: string; className: string; Icon: typeof Tr
  */
 export function PendingApprovals() {
   const [pending, setPending] = useState<PendingApproval[]>([]);
-  const [busy, setBusy] = useState<string | null>(null);
+  // Ids with a decision in flight: shown dimmed + disabled, removed authoritatively by the
+  // resolved event / poll (NOT optimistically), so a poll landing before the backend
+  // reflects the decision can't flicker the row back looking un-decided.
+  const [resolving, setResolving] = useState<Set<string>>(new Set());
   // When we first saw each id, so the countdown starts from first sighting (the broker
   // deadline is authoritative; this is a close, honest approximation for the UI).
   const seenAt = useRef<Map<string, number>>(new Map());
   const [now, setNow] = useState(() => Date.now());
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const prevCount = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
-      setPending(await listPendingApprovals());
+      const list = await listPendingApprovals();
+      setPending(list);
+      // Prune resolving ids the backend has confirmed gone (authoritative removal).
+      setResolving((s) => {
+        const ids = new Set(list.map((p) => p.id));
+        const next = new Set([...s].filter((id) => ids.has(id)));
+        return next.size === s.size ? s : next;
+      });
     } catch {
       // Broker not up yet / transient — keep the current list rather than flashing empty.
     }
@@ -84,30 +96,58 @@ export function PendingApprovals() {
   }, [pending]);
 
   const decide = async (id: string, approved: boolean, scope: ApprovalScope = "once") => {
-    setBusy(id);
+    setResolving((s) => new Set(s).add(id));
     try {
       await decideApproval(id, approved, scope);
-      setPending((p) => p.filter((x) => x.id !== id));
+      // Intentionally NOT removed here — the approval-resolved event + poll remove it.
     } catch (e) {
       toastError(`Couldn't record your decision: ${e}`);
+      setResolving((s) => {
+        const n = new Set(s);
+        n.delete(id);
+        return n;
+      });
       void refresh();
-    } finally {
-      setBusy(null);
     }
   };
 
+  // When the queue first appears, move focus into the dialog so keyboard / screen-reader
+  // users are taken to the (fail-closed, time-boxed) decision instead of silently missing it.
+  useEffect(() => {
+    if (prevCount.current === 0 && pending.length > 0) dialogRef.current?.focus();
+    prevCount.current = pending.length;
+  }, [pending.length]);
+
   if (pending.length === 0) return null;
+
+  // Escape denies the oldest still-pending item — a fail-safe keyboard shortcut (deny is
+  // the safe direction; the agent just retries).
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape") {
+      const first = pending.find((p) => !resolving.has(p.id));
+      if (first) void decide(first.id, false);
+    }
+  };
 
   return (
     <div className="pointer-events-none fixed inset-x-0 top-0 z-50 flex justify-center px-4 pt-4">
       {/* Soft scrim to draw the eye without blocking the rest of the app. */}
       <div className="pointer-events-none absolute inset-x-0 top-0 h-40 bg-gradient-to-b from-background/70 to-transparent" />
       <div
+        ref={dialogRef}
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
         role="alertdialog"
         aria-modal="false"
         aria-label="Tool calls awaiting your approval"
-        className="animate-in fade-in slide-in-from-top-2 pointer-events-auto relative w-full max-w-lg overflow-hidden rounded-xl border border-warning/40 bg-popover/95 shadow-2xl ring-1 ring-warning/10 backdrop-blur"
+        className="animate-in fade-in slide-in-from-top-2 pointer-events-auto relative w-full max-w-lg overflow-hidden rounded-xl border border-warning/40 bg-popover/95 shadow-2xl ring-1 ring-warning/10 backdrop-blur outline-none focus-visible:ring-2 focus-visible:ring-warning"
       >
+        {/* Announce count changes to screen readers without re-announcing on every countdown
+         * tick (the visible timer lives elsewhere; this text only changes when the count does). */}
+        <div aria-live="assertive" className="sr-only">
+          {pending.length} tool call{pending.length > 1 ? "s" : ""} awaiting your approval. Press
+          Escape to deny.
+        </div>
         <header className="flex items-center gap-3 border-b border-border/60 px-4 py-3">
           <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-warning/15 text-warning">
             <ShieldAlert className="size-4" />
@@ -127,7 +167,7 @@ export function PendingApprovals() {
             const remaining = Math.max(0, Math.ceil((TIMEOUT_MS - (now - started)) / 1000));
             const pct = Math.max(0, Math.min(100, (remaining / (TIMEOUT_MS / 1000)) * 100));
             const urgent = remaining <= 20;
-            const isBusy = busy === a.id;
+            const isBusy = resolving.has(a.id);
             return (
               <li key={a.id} className="px-4 py-3.5">
                 <div className="mb-2 flex items-start justify-between gap-3">
