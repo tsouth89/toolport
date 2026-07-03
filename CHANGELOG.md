@@ -7,6 +7,13 @@ Entries before the rename below shipped under the project's former name, Conduit
 ## [Unreleased]
 
 ### Security
+- **Agent-control enable/disable now respects the client's scope.** In HTTP mode a
+  registered client could call `toolport_enable_server` / `toolport_disable_server` on
+  a server outside its allowed set (toggling another tenant's server), and a "no server
+  matches" error listed every server in the registry across tenants. Both the lookup and
+  that "Known servers" list are now filtered to the client's scope, so an out-of-scope
+  server is indistinguishable from a non-existent one. (Only reachable when the global
+  "Allow agent control" opt-in is on.)
 - **`fetch_result` is now scoped to the client that produced the result.** In HTTP mode
   one gateway serves every registered client from a shared result cache with sequential
   `r{n}` cursors, so a scoped client could read another client's large-result body by
