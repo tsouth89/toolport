@@ -1852,7 +1852,14 @@ fn handle_request(
                 .and_then(|u| u.as_str())
                 .unwrap_or("");
             match router.read_resource(uri) {
-                Ok(result) => Some(success(id, result)),
+                Ok(mut result) => {
+                    // Content defense: a resource is as attacker-controllable as a tool
+                    // result, so scan it for injection and label any flagged text as data.
+                    if reg.content_defense {
+                        integrity::inspect_result(uri, "resource", &mut result);
+                    }
+                    Some(success(id, result))
+                }
                 Err(e) => Some(error(id, -32602, &format!("Toolport: {e}"))),
             }
         }
@@ -1872,7 +1879,14 @@ fn handle_request(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             match router.get_prompt(name, arguments) {
-                Ok(result) => Some(success(id, result)),
+                Ok(mut result) => {
+                    // Content defense: a prompt's messages are attacker-controllable too;
+                    // scan for injection and label any flagged text as data.
+                    if reg.content_defense {
+                        integrity::inspect_result(name, "prompt", &mut result);
+                    }
+                    Some(success(id, result))
+                }
                 Err(e) => Some(error(id, -32602, &format!("Toolport: {e}"))),
             }
         }
