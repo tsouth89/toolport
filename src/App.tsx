@@ -473,7 +473,12 @@ function App() {
                       {servers.length > 0 && (
                         <DropdownMenuItem
                           onClick={handleToggleAll}
-                          disabled={busyId !== null}
+                          // Gate on the flag handleToggleAll actually sets (togglingAll),
+                          // not just busyId, so it can't be re-fired mid-run. Disabled
+                          // while a search is active: it acts on ALL servers, so it must
+                          // not silently toggle ones hidden by the filter.
+                          disabled={togglingAll || busyId !== null || query.trim() !== ""}
+                          title={query.trim() !== "" ? "Clear the search to enable or disable all servers" : undefined}
                         >
                           <ServerOff className="mr-2 size-4" />
                           <span>
