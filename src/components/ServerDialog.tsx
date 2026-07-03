@@ -18,6 +18,7 @@ import {
   testServer,
   updateServer,
 } from "@/lib/api";
+import { formatArgs, parseArgs } from "@/lib/args";
 import type { Registry, ServerEntry, Transport } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import {
@@ -72,7 +73,7 @@ export function ServerDialog({
     name: initial?.name ?? "",
     transport: (initial?.transport ?? "stdio") as Transport,
     command: initial?.command ?? "",
-    args: initial?.args.join(" ") ?? "",
+    args: formatArgs(initial?.args ?? []),
     url: initial?.url ?? "",
   });
   // Env vars (API keys etc.). Values are vaulted in the OS keychain, never stored
@@ -111,7 +112,7 @@ export function ServerDialog({
         name: initial?.name ?? "",
         transport: (initial?.transport ?? "stdio") as Transport,
         command: initial?.command ?? "",
-        args: initial?.args.join(" ") ?? "",
+        args: formatArgs(initial?.args ?? []),
         url: initial?.url ?? "",
       });
       setEnvRows(initial?.env.map((e) => ({ key: e.key, value: "" })) ?? []);
@@ -154,7 +155,7 @@ export function ServerDialog({
         name: s.name || "",
         transport: (s.transport === "unknown" ? "stdio" : s.transport) as Transport,
         command: s.command ?? "",
-        args: s.args.join(" "),
+        args: formatArgs(s.args),
         url: s.url ?? "",
       });
       setEnvRows(
@@ -190,7 +191,7 @@ export function ServerDialog({
       name: form.name.trim(),
       transport: form.transport,
       command: isStdio ? form.command.trim() || null : null,
-      args: isStdio ? form.args.split(/\s+/).filter(Boolean) : [],
+      args: isStdio ? parseArgs(form.args) : [],
       env: declared.map((r) => ({
         key: r.key.trim(),
         value: withSecretValues && r.value ? r.value : null,
@@ -363,7 +364,9 @@ export function ServerDialog({
                 <Label htmlFor="srv-args">Arguments</Label>
                 <Input
                   id="srv-args"
-                  placeholder="-y @modelcontextprotocol/server-filesystem"
+                  placeholder={
+                    '-y @scope/package  (quote paths with spaces, e.g. "/Applications/My App.app/tool")'
+                  }
                   value={form.args}
                   onChange={(e) => set("args", e.target.value)}
                 />
