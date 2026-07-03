@@ -468,6 +468,18 @@ impl Router {
         self.prompts.clone()
     }
 
+    /// The server that advertised resource `uri`, if any. Used to scope a registered
+    /// HTTP client's resource access to its allowed server set (see the gateway).
+    pub fn resource_server(&self, uri: &str) -> Option<&str> {
+        self.resource_routes.get(uri).map(String::as_str)
+    }
+
+    /// The server that owns the exposed prompt `name`, if any. Used to scope a
+    /// registered HTTP client's prompt access to its allowed server set.
+    pub fn prompt_server(&self, exposed_name: &str) -> Option<&str> {
+        self.prompt_routes.get(exposed_name).map(|(s, _)| s.as_str())
+    }
+
     /// Read a resource by uri from whichever server advertised it. `&self`: locks
     /// only the owning server (see `route_call`).
     pub fn read_resource(&self, uri: &str) -> Result<Value, String> {
@@ -646,6 +658,27 @@ mod tests {
         assert_eq!(sanitize_segment("file-system"), "file_system");
         assert_eq!(sanitize_segment("list-offerings"), "list_offerings");
         assert_eq!(sanitize_segment("already_ok"), "already_ok");
+    }
+
+    #[test]
+    fn resource_and_prompt_server_resolve_owner() {
+        let mut router = Router::new();
+        router.add(mock_server("github"));
+        router.add(mock_server("postgres"));
+        // Resources keep their server-scoped uris; the map resolves the owner.
+        assert_eq!(router.resource_server("github://readme"), Some("github"));
+        assert_eq!(router.resource_server("postgres://readme"), Some("postgres"));
+        assert_eq!(router.resource_server("unknown://x"), None);
+        // Prompts resolve by their exposed (namespaced) name.
+        let prompts = router.aggregated_prompts();
+        let gh_prompt = prompts
+            .iter()
+            .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
+            .find(|n| router.prompt_server(n) == Some("github"))
+            .expect("a github prompt is exposed")
+            .to_string();
+        assert_eq!(router.prompt_server(&gh_prompt), Some("github"));
+        assert_eq!(router.prompt_server("no__such_prompt"), None);
     }
 
     #[test]
