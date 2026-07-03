@@ -370,6 +370,8 @@ export interface Registry {
   activeProfileId: string | null;
   /** Per-tool exposure overrides (rename / re-describe), keyed by server id then original tool name. */
   toolOverrides?: Record<string, Record<string, ToolOverride>>;
+  /** Tools pinned as lazy-discovery prerequisites, keyed by server id -> original tool names. */
+  pinnedTools?: Record<string, string[]>;
   /** Global switch: hide and block every destructive-hinted tool. */
   denyDestructive?: boolean;
   /** Per-call confirmation: intercept destructive tools with a preview + token. */

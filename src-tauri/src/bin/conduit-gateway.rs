@@ -1651,6 +1651,40 @@ fn handle_request(
                 if escalate {
                     matches.truncate(1); // only the best match, no distractions
                 }
+                // Always surface pinned prerequisite tools (with their full schema),
+                // even if the query didn't rank them, so a load-bearing tool (auth /
+                // list-before-act, or one whose description doesn't match the keywords)
+                // is never hidden behind lazy discovery. Scoped (source is already the
+                // client's catalog) and capped so a big pin set can't itself bloat.
+                let mut pins_added = 0usize;
+                if !reg.pinned_tools.is_empty() {
+                    let have: std::collections::HashSet<&str> = matches
+                        .iter()
+                        .filter_map(|m| m.get("name").and_then(Value::as_str))
+                        .collect();
+                    let mut pinned: Vec<Value> = source
+                        .iter()
+                        .filter(|t| {
+                            t.get("name")
+                                .and_then(Value::as_str)
+                                .map(|n| !have.contains(n))
+                                .unwrap_or(false)
+                                && t.get("name")
+                                    .and_then(Value::as_str)
+                                    .and_then(|n| router.route_of(n))
+                                    .map(|(srv, orig)| reg.is_tool_pinned(srv, orig))
+                                    .unwrap_or(false)
+                        })
+                        .take(10)
+                        .cloned()
+                        .collect();
+                    if !pinned.is_empty() {
+                        // Prepend so prerequisites lead the results.
+                        pins_added = pinned.len();
+                        pinned.append(&mut matches);
+                        matches = pinned;
+                    }
+                }
                 // Tell the agent when results were truncated, so a buried tool isn't
                 // mistaken for a missing capability.
                 let more = if total > matches.len() && !escalate {
@@ -1678,6 +1712,15 @@ fn handle_request(
                 } else {
                     ""
                 };
+                // Pinned prerequisites are prepended (not query-ranked), so name them so
+                // the "top match" directive below isn't confused with the leading rows.
+                let pin_note = if pins_added > 0 {
+                    format!(
+                        " ({pins_added} pinned prerequisite tool(s) listed first, before the ranked matches.)"
+                    )
+                } else {
+                    String::new()
+                };
                 let lead = if matches.is_empty() {
                     format!(
                         "No tools matched{scope}. Try different keywords, or call toolport_status to \
@@ -1692,7 +1735,7 @@ fn handle_request(
                         "You have searched {} times and keep getting the same top tool, `{top}`. It \
                          is the best match and its full input schema is below - call toolport_call_tool \
                          now with name \"{top}\". Searching again will keep returning this. Only if \
-                         `{top}` genuinely cannot do the task, call toolport_status to see other servers.",
+                         `{top}` genuinely cannot do the task, call toolport_status to see other servers.{pin_note}",
                         repeats
                     )
                 } else {
@@ -1702,7 +1745,7 @@ fn handle_request(
                     format!(
                         "Found {total} matching tool(s){scope}. Top match: `{top}` - its full input \
                          schema is included below, so call it now with toolport_call_tool (name: \
-                         \"{top}\") if it fits. Only search again if none of these match.{more}{schema_note}"
+                         \"{top}\") if it fits. Only search again if none of these match.{pin_note}{more}{schema_note}"
                     )
                 };
                 let text = format!(

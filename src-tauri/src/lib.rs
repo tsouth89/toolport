@@ -806,6 +806,22 @@ fn set_tool_enabled(
     Ok(reg.clone())
 }
 
+/// Pin (or unpin) a tool as a lazy-discovery prerequisite: search always surfaces a
+/// pinned tool with its full schema, regardless of the query's match score, so a
+/// load-bearing tool is never hidden. Propagates live via the registry watcher.
+#[tauri::command]
+fn set_tool_pinned(
+    state: State<RegistryState>,
+    server_id: String,
+    tool: String,
+    pinned: bool,
+) -> Result<Registry, String> {
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.set_tool_pinned(&server_id, &tool, pinned);
+    registry::save(&reg)?;
+    Ok(reg.clone())
+}
+
 /// Flip the global destructive-tool deny switch. When on, the gateway hides and
 /// blocks every tool annotated `destructiveHint: true` across all servers.
 #[tauri::command]
@@ -2024,6 +2040,7 @@ pub fn run() {
             remove_http_client,
             call_tool,
             set_tool_enabled,
+            set_tool_pinned,
             set_deny_destructive,
             set_confirm_destructive,
             set_human_approval,

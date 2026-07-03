@@ -7,6 +7,7 @@ import {
   Loader2,
   MessageSquare,
   Pencil,
+  Pin,
   Play,
   ShieldAlert,
   XCircle,
@@ -21,6 +22,7 @@ import {
   listServerTools,
   readResource,
   setToolEnabled,
+  setToolPinned,
   setToolOverride,
 } from "@/lib/api";
 import type {
@@ -614,6 +616,10 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
     () => new Set(serverEntry?.disabledTools ?? []),
     [serverEntry],
   );
+  const pinnedSet = useMemo(
+    () => new Set(serverId ? (registry?.pinnedTools?.[serverId] ?? []) : []),
+    [registry, serverId],
+  );
 
   /** Is this tool exposed to clients right now? (per-tool off, or destructive
    * while the global switch is on, both hide it at the gateway.) */
@@ -630,6 +636,18 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
       onRegistryChange(await setToolEnabled(serverId, toolName, enabled));
     } catch (e) {
       toastError(`Couldn't update the tool: ${e}`);
+    } finally {
+      setPolicyBusy(false);
+    }
+  }
+
+  async function togglePin(toolName: string, pinned: boolean) {
+    if (!serverId) return;
+    setPolicyBusy(true);
+    try {
+      onRegistryChange(await setToolPinned(serverId, toolName, pinned));
+    } catch (e) {
+      toastError(`Couldn't pin the tool: ${e}`);
     } finally {
       setPolicyBusy(false);
     }
@@ -778,6 +796,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
               const exposed = isExposed(t);
               const selected = t.name === selectedTool;
               const perToolOff = disabledSet.has(t.name);
+              const pinned = pinnedSet.has(t.name);
               return (
                 <div
                   key={t.name}
@@ -807,6 +826,24 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
                         {t.description}
                       </span>
                     )}
+                  </button>
+                  <button
+                    onClick={() => togglePin(t.name, !pinned)}
+                    disabled={policyBusy}
+                    title={
+                      pinned
+                        ? "Pinned: always surfaced in lazy-discovery search"
+                        : "Pin as a prerequisite (always surfaced in search)"
+                    }
+                    aria-label={pinned ? `Unpin ${t.name}` : `Pin ${t.name}`}
+                    aria-pressed={pinned}
+                    className="shrink-0 rounded p-1 hover:bg-muted disabled:opacity-50"
+                  >
+                    <Pin
+                      className={`size-4 ${
+                        pinned ? "fill-current text-owned" : "text-muted-foreground"
+                      }`}
+                    />
                   </button>
                   <Switch
                     checked={!perToolOff}
