@@ -848,14 +848,87 @@ fn list_pending_approvals(
 }
 
 /// Approve or deny a held tool call by id. The parked gateway call then runs (approve) or is
-/// refused (deny). `Err` if the id is unknown (already resolved or timed out).
+/// refused (deny). `scope` (on approve) controls whether future calls to the same tool skip
+/// the prompt: `once` (default, remember nothing), `session` (until the app restarts), or
+/// `always` (persisted). `Err` if the id is unknown (already resolved or timed out).
 #[tauri::command]
 fn decide_approval(
     broker: State<approval_broker::ApprovalBroker>,
+    state: State<RegistryState>,
     id: String,
     approved: bool,
+    scope: String,
 ) -> Result<(), String> {
-    broker.decide(&id, approved)
+    let view = broker.decide(&id, approved)?;
+    if approved && scope != "once" {
+        let key = approval::allow_key(&view.server, &view.tool);
+        broker.add_session_allow(key.clone());
+        if scope == "always" {
+            let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            reg.allow_tool(key);
+            registry::save(&reg)?;
+        }
+    }
+    Ok(())
+}
+
+/// A tool allowed to skip human approval, for the Settings "Allowed tools" list.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AllowedTool {
+    key: String,
+    server: String,
+    tool: String,
+    /// true = persisted ("always"); false = only for this app session.
+    persistent: bool,
+}
+
+/// Tools currently allowed to skip human approval: persistent ("always allow") from the
+/// registry, plus this session's temporary allows from the broker.
+#[tauri::command]
+fn list_allowed_tools(
+    state: State<RegistryState>,
+    broker: State<approval_broker::ApprovalBroker>,
+) -> Vec<AllowedTool> {
+    let persistent = {
+        let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        reg.human_approval_allow.clone()
+    };
+    let split = |key: &str| match key.split_once('/') {
+        Some((s, t)) => (s.to_string(), t.to_string()),
+        None => (String::new(), key.to_string()),
+    };
+    let mut out: Vec<AllowedTool> = persistent
+        .iter()
+        .map(|k| {
+            let (server, tool) = split(k);
+            AllowedTool { key: k.clone(), server, tool, persistent: true }
+        })
+        .collect();
+    for k in broker.session_allowed() {
+        if !persistent.contains(&k) {
+            let (server, tool) = split(&k);
+            out.push(AllowedTool { key: k, server, tool, persistent: false });
+        }
+    }
+    out
+}
+
+/// Revoke an allowed tool (re-require approval): drop it from both the persistent registry
+/// list and this session's allowlist.
+#[tauri::command]
+fn revoke_allowed_tool(
+    state: State<RegistryState>,
+    broker: State<approval_broker::ApprovalBroker>,
+    key: String,
+) -> Result<(), String> {
+    {
+        let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        reg.revoke_tool(&key);
+        registry::save(&reg)?;
+    }
+    broker.remove_session_allow(&key);
+    Ok(())
 }
 
 /// Toggle live request/response inspection. When enabled, the gateway captures each
@@ -1798,6 +1871,8 @@ pub fn run() {
             set_human_approval,
             list_pending_approvals,
             decide_approval,
+            list_allowed_tools,
+            revoke_allowed_tool,
             set_live_inspect,
             get_inspect_log,
             clear_inspect_log,

@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Check, Globe, Loader2, Monitor, ShieldAlert, Trash2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { decideApproval, listPendingApprovals } from "@/lib/api";
+import { decideApproval, listPendingApprovals, type ApprovalScope } from "@/lib/api";
 import type { PendingApproval } from "@/lib/types";
 import { toastError } from "@/lib/toast";
 
@@ -83,10 +83,10 @@ export function PendingApprovals() {
     for (const id of seenAt.current.keys()) if (!ids.has(id)) seenAt.current.delete(id);
   }, [pending]);
 
-  const decide = async (id: string, approved: boolean) => {
+  const decide = async (id: string, approved: boolean, scope: ApprovalScope = "once") => {
     setBusy(id);
     try {
-      await decideApproval(id, approved);
+      await decideApproval(id, approved, scope);
       setPending((p) => p.filter((x) => x.id !== id));
     } catch (e) {
       toastError(`Couldn't record your decision: ${e}`);
@@ -200,6 +200,26 @@ export function PendingApprovals() {
                       Approve
                     </Button>
                   </div>
+                </div>
+
+                {/* Skip the prompt for this tool next time - curbs approval fatigue. */}
+                <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
+                  <span>Skip next time?</span>
+                  <button
+                    disabled={isBusy}
+                    onClick={() => void decide(a.id, true, "session")}
+                    className="font-medium text-foreground/80 underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
+                  >
+                    Allow for this session
+                  </button>
+                  <span className="text-muted-foreground/40">·</span>
+                  <button
+                    disabled={isBusy}
+                    onClick={() => void decide(a.id, true, "always")}
+                    className="font-medium text-foreground/80 underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
+                  >
+                    Always allow this tool
+                  </button>
                 </div>
               </li>
             );
