@@ -67,7 +67,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
   // The user's servers and which to include in the shared stack (default all).
   const [servers, setServers] = useState<{ name: string; transport: string }[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  // A generated share link (conduitmcp.app/s/...), cleared when the export changes.
+  // A generated share link (toolport.app/s/...), cleared when the export changes.
   const [shareLink, setShareLink] = useState("");
   const [linking, setLinking] = useState(false);
 

@@ -1295,8 +1295,8 @@ fn export_config_to_path(
     std::fs::write(&path, json).map_err(|e| format!("Couldn't write the file: {e}"))
 }
 
-/// Public endpoint that turns a shared setup into a `conduitmcp.app/s/<id>` link.
-const SHARE_ENDPOINT: &str = "https://conduitmcp.app/api/share";
+/// Public endpoint that turns a shared setup into a `toolport.app/s/<id>` link.
+const SHARE_ENDPOINT: &str = "https://toolport.app/api/share";
 
 /// POST a shareable setup (the secret-stripped JSON from `export_config`) to the
 /// share service and return the short link to copy. The service stores it with a

@@ -55,7 +55,7 @@ function fmtTokens(n: number): string {
 }
 
 /** Models for the dollar estimate, input-token list prices ($/1M), grouped by
- *  provider. Matches the public calculator at conduitmcp.app/calculator. */
+ *  provider. Matches the public calculator at toolport.app/calculator. */
 const SAVINGS_MODELS = [
   {
     group: "Anthropic",
@@ -380,7 +380,7 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
   const share = async () => {
     const text =
       `Toolport keeps ~${fmtTokens(savings.tokensSaved)} tokens of MCP tool definitions out of my agent's ` +
-      `context so far. One local gateway for all my MCP servers: conduitmcp.app`;
+      `context so far. One local gateway for all my MCP servers: toolport.app`;
     try {
       await navigator.clipboard.writeText(text);
       toast.success("Savings copied, paste them anywhere");

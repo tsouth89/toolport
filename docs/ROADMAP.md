@@ -7,10 +7,14 @@ that exposes 3 meta-tools the agent searches on demand, so context stays flat:
 measured ~90% fewer tokens at the same task success. This document is the working
 spec, capturing the architecture decision and the build order.
 
-**Status (2026-07-01):** v0.9.4 published. Signed/notarized macOS (Apple Silicon +
-Intel, data-protection keychain + nested gateway, no keychain prompts on update),
-Windows (Azure Trusted Signing), Linux (deb/AppImage) via a tag-triggered pipeline +
-in-app auto-updater. 20 clients. Shipping: lazy discovery, OAuth/key auth
+**Status (2026-07-03):** v1.1.0 published (renamed Conduit -> Toolport at v1.0.0).
+Signed/notarized macOS (Apple Silicon + Intel, data-protection keychain + nested
+gateway, no keychain prompts on update), Windows (Azure Trusted Signing), Linux
+(deb/AppImage) via a tag-triggered pipeline + in-app auto-updater. 20 clients.
+Recently shipped: human-in-the-loop tool approval (with approve-for-session and
+per-tool overrides), tray/menu-bar background running + launch-at-login, desktop
+notifications on held calls, and severity-tiered security notices. Shipping: lazy
+discovery, OAuth/key auth
 with live propagation, catalog, import/migrate, per-tool + destructive-tool
 governance, audit log, resources/prompts proxying, tool playground, semantic search,
 rug-pull + injection + agentjacking detection, result-shaping Tier 1. **v0.7.0 made
@@ -269,7 +273,7 @@ Tier 3 - launch prep
       unsigned with documented bypass); cargo-audit in CI.
 - [x] Verify macOS / Linux (signed mac dmgs arm64 + Intel, Linux deb/AppImage;
       tested across Windows/macOS/Ubuntu VMs)
-- [x] Marketing site (conduitmcp.app) with demo video.
+- [x] Marketing site (toolport.app) with demo video.
 - [x] In-app auto-updater (Tauri v2 updater plugin + signed `latest.json` from the
       release pipeline). Live from v0.3.3 onward.
 - [x] First-run onboarding wizard (detect clients, add servers, connect a client).

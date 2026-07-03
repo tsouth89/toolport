@@ -44,8 +44,10 @@ That's it. Ask for something one of your servers does ("list my recent emails",
 
 - **Local-only by default.** The gateway binds `127.0.0.1`, so only this machine
   can reach it. If you run Open WebUI in Docker, set `CONDUIT_HTTP_HOST=0.0.0.0`
-  and point the tool server at `http://host.docker.internal:8765`. The HTTP
-  surface is unauthenticated, so only expose it (`0.0.0.0`) on a trusted network.
+  and point the tool server at `http://host.docker.internal:8765`. A loopback bind
+  may run without a token, but a non-loopback bind (`0.0.0.0`) **requires**
+  `CONDUIT_HTTP_TOKEN` (the gateway refuses to bind non-loopback without one); still
+  only expose it on a trusted network.
 - **Lazy vs full discovery.** Lazy (default) keeps the model's context tiny and
   is best for capable models. For a weaker local model, `CONDUIT_DISCOVERY=full`
   scoped to a small profile exposes the tools directly (no search step) so the
