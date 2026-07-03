@@ -321,7 +321,7 @@ fn first_flag<'a>(args: &'a [String], flags: &[&str]) -> Option<&'a str> {
     args.iter().find(|a| {
         let al = a.to_ascii_lowercase();
         let head = al.split('=').next().unwrap_or(&al);
-        flags.iter().any(|f| head == *f)
+        flags.contains(&head)
     }).map(|a| a.as_str())
 }
 
