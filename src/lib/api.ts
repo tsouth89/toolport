@@ -205,20 +205,21 @@ export function revokeAllowedTool(key: string): Promise<void> {
   return invoke<void>("revoke_allowed_tool", { key });
 }
 
-/** Set (or clear) a per-tool exposure override, keyed by exposed `server__tool` name:
+/** Set (or clear) a per-tool exposure override, keyed by `(server, original tool)`:
  * rename and/or replace the description clients see. Blank name + description clears it.
  * The call still routes to the original downstream tool. */
 export function setToolOverride(
-  exposed: string,
+  server: string,
+  tool: string,
   name: string | null,
   description: string | null,
 ): Promise<Registry> {
-  return invoke<Registry>("set_tool_override", { exposed, name, description });
+  return invoke<Registry>("set_tool_override", { server, tool, name, description });
 }
 
 /** Remove a tool's exposure override, restoring the server's own name + description. */
-export function clearToolOverride(exposed: string): Promise<Registry> {
-  return invoke<Registry>("clear_tool_override", { exposed });
+export function clearToolOverride(server: string, tool: string): Promise<Registry> {
+  return invoke<Registry>("clear_tool_override", { server, tool });
 }
 
 /** Toggle live request/response inspection (opt-in, off by default). When on, the

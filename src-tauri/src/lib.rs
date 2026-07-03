@@ -931,22 +931,24 @@ fn revoke_allowed_tool(
     Ok(())
 }
 
-/// Set (or clear) a per-tool exposure override, keyed by the exposed (`server__tool`) name:
-/// rename the tool and/or replace its description as clients see it (the latter locally
-/// neutralizes a poisoned description). Empty/blank name and description clears the override.
-/// The call still routes to the original downstream tool; gateways pick up the change via
-/// the registry watcher.
+/// Set (or clear) a per-tool exposure override, keyed by `(server, original tool)`: rename
+/// the tool and/or replace its description as clients see it (the latter locally neutralizes
+/// a poisoned description). Empty/blank name and description clears the override. The call
+/// still routes to the original downstream tool; gateways pick up the change via the registry
+/// watcher.
 #[tauri::command]
 fn set_tool_override(
     state: State<RegistryState>,
-    exposed: String,
+    server: String,
+    tool: String,
     name: Option<String>,
     description: Option<String>,
 ) -> Result<Registry, String> {
     let norm = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.set_tool_override(
-        exposed,
+        server,
+        tool,
         registry::ToolOverride { name: norm(name), description: norm(description) },
     );
     registry::save(&reg)?;
@@ -955,9 +957,13 @@ fn set_tool_override(
 
 /// Remove a tool's exposure override, restoring the server's own name and description.
 #[tauri::command]
-fn clear_tool_override(state: State<RegistryState>, exposed: String) -> Result<Registry, String> {
+fn clear_tool_override(
+    state: State<RegistryState>,
+    server: String,
+    tool: String,
+) -> Result<Registry, String> {
     let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.clear_tool_override(&exposed);
+    reg.clear_tool_override(&server, &tool);
     registry::save(&reg)?;
     Ok(reg.clone())
 }

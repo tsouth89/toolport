@@ -1603,7 +1603,17 @@ fn handle_request(
             };
             let name = name.as_str();
 
-            let (srv, tool) = name.split_once("__").unwrap_or(("?", name));
+            // Resolve the call's real (server, original tool) from the router's route map,
+            // NOT by splitting the exposed name on `__`. A renamed tool (via a tool override)
+            // or a server id containing `__` would otherwise mis-derive the server and
+            // silently weaken the scope guard and the HITL untrusted-provenance check below.
+            let (server_id, tool_name) = router
+                .route_of(name)
+                .map(|(s, t)| (s.to_string(), t.to_string()))
+                .unwrap_or_else(|| (String::new(), name.to_string()));
+            let srv_owned = sanitize_segment(&server_id);
+            let srv = srv_owned.as_str();
+            let tool = tool_name.as_str();
 
             // Scope guard: a registered HTTP client may only call tools on the
             // servers its token is allowed to see (a no-op when unscoped). Search
