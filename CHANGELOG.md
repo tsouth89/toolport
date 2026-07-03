@@ -4,6 +4,24 @@ All notable changes to Toolport are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the GitHub releases.
 Entries before the rename below shipped under the project's former name, Conduit.
 
+## [Unreleased]
+
+### Changed
+- **The gateway stays responsive while a tool call is held for approval.** A call
+  awaiting human approval (up to two minutes) no longer blocks other requests,
+  live setting toggles, or server-config reloads: the dispatcher now releases its
+  locks before the downstream call and the approval wait.
+
+### Fixed
+- **Approval prompt is keyboard- and screen-reader-accessible.** When a held call
+  appears, focus moves into the prompt, Escape denies the oldest pending call, and
+  the count is announced. Also removed a brief flicker where a just-decided row
+  could momentarily reappear.
+- Large tool results paged via `fetch_result` no longer re-scan the whole cached
+  body on each page.
+- A failed confirmation (e.g. removing a server) keeps its dialog open cleanly
+  instead of surfacing an unhandled error.
+
 ## [1.1.0] - 2026-07-02
 
 ### Added
