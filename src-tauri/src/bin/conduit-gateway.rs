@@ -1165,6 +1165,29 @@ fn server_of_tool(name: &str) -> &str {
     name.split_once("__").map(|(s, _)| s).unwrap_or(name)
 }
 
+/// Whether the exposed tool `name` is destructive, for the HITL / confirm gate. Resolves
+/// from the cached catalog first, then the LIVE router if the cache doesn't list it (a
+/// cold or stale cache, or a tool whose `destructiveHint` was just added by drift). If
+/// NEITHER can resolve the tool, it's treated as destructive - a gate that can't see a
+/// tool must not wave it through (fail-closed). A truly unknown tool fails at routing
+/// anyway, so the only effect is that a genuinely-destructive-but-uncached tool is never
+/// silently ungated.
+fn tool_is_destructive_fail_closed(name: &str, cached: &[Value], router: &Router) -> bool {
+    let lookup = |tools: &[Value]| {
+        tools
+            .iter()
+            .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
+            .map(is_destructive)
+    };
+    if let Some(d) = lookup(cached) {
+        return d;
+    }
+    if let Some(d) = lookup(&router.aggregated_tools()) {
+        return d;
+    }
+    true
+}
+
 /// Keep only tools whose server prefix is in `allowed`. `None` = no scoping
 /// (every tool passes). A meta-tool (no `server__` namespace, e.g.
 /// `toolport_search_tools`) is always kept, since it isn't owned by any
@@ -1707,16 +1730,9 @@ fn handle_request(
             // Takes precedence over the agent-facing confirm below, and is fail-closed
             // (no broker / no answer / timeout all deny). Skipped once `confirmed`.
             if reg.human_approval && !confirmed {
-                let agg;
-                let catalog: &[Value] = if cached.is_empty() {
-                    agg = router.aggregated_tools();
-                    &agg
-                } else {
-                    cached
-                };
-                let is_dest = catalog.iter().any(|t| {
-                    t.get("name").and_then(|n| n.as_str()) == Some(name) && is_destructive(t)
-                });
+                // Resolve destructiveness robustly: cache, then live router, else
+                // fail-closed (an unknown tool must not skip the human gate).
+                let is_dest = tool_is_destructive_fail_closed(name, cached, router);
                 // Untrusted provenance = the same shared/registry signal the SSRF guard
                 // uses. Match the server the way its tools are prefixed (sanitized id).
                 let untrusted = reg
@@ -1767,19 +1783,10 @@ fn handle_request(
             // Skip when `confirmed` is true: the call arrived via toolport_confirm
             // and was already reviewed (prevents re-interception loop).
             if reg.confirm_destructive && !confirmed {
-                // Look up the tool in the catalog to check destructiveHint.
-                // Fall back to the live router when the cache is cold/stale,
-                // matching the pattern used by tools/list and conduit_search.
-                let agg;
-                let catalog: &[Value] = if cached.is_empty() {
-                    agg = router.aggregated_tools();
-                    &agg
-                } else {
-                    cached
-                };
-                let dest = catalog.iter().any(|t| {
-                    t.get("name").and_then(|n| n.as_str()) == Some(name) && is_destructive(t)
-                });
+                // Resolve destructiveness robustly (cache, then live router, else
+                // fail-closed), so a cold/stale cache can't skip the confirm step for a
+                // destructive tool.
+                let dest = tool_is_destructive_fail_closed(name, cached, router);
                 if dest {
                     let token = confirm.store(name.to_string(), arguments.clone());
                     let args_pretty = serde_json::to_string_pretty(&arguments).unwrap_or_default();
@@ -3655,6 +3662,26 @@ mod tests {
         assert_eq!(server_of_tool("resend__send_email"), "resend");
         // A meta-tool has no namespace; the whole name is returned.
         assert_eq!(server_of_tool("toolport_status"), "toolport_status");
+    }
+
+    #[test]
+    fn destructive_check_resolves_then_fails_closed() {
+        let cached = vec![
+            json!({ "name": "s__del", "annotations": { "destructiveHint": true } }),
+            json!({ "name": "s__read" }),
+        ];
+        let empty = router();
+        // In the cache: use its destructiveHint.
+        assert!(tool_is_destructive_fail_closed("s__del", &cached, &empty));
+        assert!(!tool_is_destructive_fail_closed("s__read", &cached, &empty));
+        // Unknown to both cache and router: FAIL-CLOSED (treated as destructive), so a
+        // gate can't silently wave through a tool it can't see.
+        assert!(tool_is_destructive_fail_closed("s__unknown", &cached, &empty));
+        assert!(tool_is_destructive_fail_closed("anything", &[], &empty));
+        // Absent from the cache but resolvable via the LIVE router: use the router's def
+        // (the mock's "deploy" is non-destructive), not the fail-closed default.
+        let routed = routed_router("vercel", "deploy");
+        assert!(!tool_is_destructive_fail_closed("vercel__deploy", &[], &routed));
     }
 
     #[test]
