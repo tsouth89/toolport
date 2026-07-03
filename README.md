@@ -12,7 +12,7 @@ every AI client, with far fewer tokens.
 
 </div>
 
-![Toolport: every tool from all your servers, collapsed to the 3 your agent loads](docs/feature.svg)
+![Toolport: every tool from all your servers, collapsed to the 3 your agent loads](docs/lazy-discovery.svg)
 
 <!-- TODO(toolport): re-capture the product demo GIF from the rebranded (Toolport) build before publicizing. Old docs/demo.gif shows the pre-rename UI.
 ![Toolport demo: add a server, connect it to every AI tool, and the agent uses it](docs/demo.gif)
