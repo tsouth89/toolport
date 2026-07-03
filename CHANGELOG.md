@@ -6,6 +6,12 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+### Added
+- **Teams can require human approval org-wide.** A team admin can turn on "Require
+  human approval" in the Teams policy, and every member's gateway then holds gated
+  tool calls for a person to approve. Like the other org policies, it's tighten-only:
+  it can force approval on for the team but can never turn a member's own setting off.
+
 ### Changed
 - **The HTTP gateway now handles requests concurrently.** Each request runs on its
   own worker, so a slow downstream server or a tool call held for human approval (up

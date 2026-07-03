@@ -243,6 +243,7 @@ fn team_export(reg: &Registry) -> Value {
         "screeningPolicy": {
             "forceContentDefense": reg.content_defense,
             "forceQuarantineOnDrift": reg.quarantine_on_drift,
+            "forceHumanApproval": reg.human_approval,
         },
     })
 }
@@ -364,16 +365,21 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
         reg.deny_destructive = true;
     }
 
-    // 5. Screening policy is tighten-only as well: the org can force content defense and
-    //    drift-quarantine ON, but a member can never be loosened by a team config. A
-    //    missing policy or a `false` flag is a no-op (it does not turn a member's own
-    //    toggle off), so this only ever raises the member's safety posture.
+    // 5. Screening policy is tighten-only as well: the org can force content defense,
+    //    drift-quarantine, and human approval ON, but a member can never be loosened by a
+    //    team config. A missing policy or a `false` flag is a no-op (it does not turn a
+    //    member's own toggle off), so this only ever raises the member's safety posture.
     if let Some(sp) = team_cfg.get("screeningPolicy") {
         if sp.get("forceContentDefense").and_then(Value::as_bool) == Some(true) {
             reg.content_defense = true;
         }
         if sp.get("forceQuarantineOnDrift").and_then(Value::as_bool) == Some(true) {
             reg.quarantine_on_drift = true;
+        }
+        // Org-mandated human-in-the-loop: force the member's gateway to hold gated tool
+        // calls for human approval. Tighten-only, like the flags above.
+        if sp.get("forceHumanApproval").and_then(Value::as_bool) == Some(true) {
+            reg.human_approval = true;
         }
     }
 
@@ -585,21 +591,24 @@ mod tests {
     #[test]
     fn screening_policy_can_tighten_but_never_loosen() {
         let mut r = base_registry();
-        // Member starts with content defense off and drift-quarantine off.
+        // Member starts with content defense off, drift-quarantine off, human approval off.
         r.content_defense = false;
         r.quarantine_on_drift = false;
+        r.human_approval = false;
 
-        // Org policy forces both on: the member's posture is raised.
+        // Org policy forces all three on: the member's posture is raised.
         apply_team_config(
             &mut r,
             "t1",
             &json!({ "servers": [], "screeningPolicy": {
                 "forceContentDefense": true,
                 "forceQuarantineOnDrift": true,
+                "forceHumanApproval": true,
             }}),
         );
         assert!(r.content_defense, "org policy forced content defense on");
         assert!(r.quarantine_on_drift, "org policy forced drift-quarantine on");
+        assert!(r.human_approval, "org policy forced human approval on");
 
         // A policy with the flags false, or absent entirely, never turns them back off.
         apply_team_config(
@@ -608,14 +617,17 @@ mod tests {
             &json!({ "servers": [], "screeningPolicy": {
                 "forceContentDefense": false,
                 "forceQuarantineOnDrift": false,
+                "forceHumanApproval": false,
             }}),
         );
         assert!(r.content_defense, "false flag never loosens an existing lock");
         assert!(r.quarantine_on_drift, "false flag never loosens an existing lock");
+        assert!(r.human_approval, "false flag never loosens an existing lock");
 
         apply_team_config(&mut r, "t1", &json!({ "servers": [] }));
         assert!(r.content_defense, "absent policy never loosens an existing lock");
         assert!(r.quarantine_on_drift, "absent policy never loosens an existing lock");
+        assert!(r.human_approval, "absent policy never loosens an existing lock");
     }
 
     #[test]
@@ -625,10 +637,12 @@ mod tests {
         let mut r = base_registry();
         r.content_defense = true;
         r.quarantine_on_drift = true;
+        r.human_approval = true;
         let cfg = team_export(&r);
         let sp = cfg.get("screeningPolicy").expect("policy is emitted");
         assert_eq!(sp.get("forceContentDefense").and_then(Value::as_bool), Some(true));
         assert_eq!(sp.get("forceQuarantineOnDrift").and_then(Value::as_bool), Some(true));
+        assert_eq!(sp.get("forceHumanApproval").and_then(Value::as_bool), Some(true));
     }
 
     #[test]
