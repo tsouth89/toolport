@@ -1116,16 +1116,17 @@ fn build_tool_identities(
 }
 
 /// The capability-provenance table: every pinned tool's identity for the active
-/// profile, newest-changed first. Empty until the gateway has pinned a baseline.
+/// newest-changed first. Aggregates pins across all profiles, because the gateway keys
+/// pins by the CONDUIT_PROFILE it ran under (often None -> tool-pins.json), which need
+/// not equal the app's active profile. Empty until the gateway has pinned a baseline.
 #[tauri::command]
 fn list_tool_identities(state: State<RegistryState>) -> Vec<ToolIdentity> {
     let reg = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let profile = reg.active_profile_id.as_deref();
     let mut ids = build_tool_identities(
-        &integrity::baselines(profile),
-        &integrity::quarantined(profile),
+        &integrity::all_baselines(),
+        &integrity::all_quarantined_names(),
         &reg.servers,
         &reg.profiles,
     );
