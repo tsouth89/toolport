@@ -100,6 +100,23 @@ export interface SearchTrace {
   savedTokens: number;
   /** The loop-breaker fired: repeated searches kept landing on the same top tool. */
   escalated: boolean;
+  /** Ranker used: keyword-only (`lexical`) or semantic re-rank. Absent on older traces. */
+  mode?: "lexical" | "semantic";
+  /** Per-result explanation, in result order: why each tool surfaced. Absent on older
+   * traces (fall back to `names`). */
+  ranking?: SearchTraceRank[];
+}
+
+/** Why one tool surfaced in a lazy-discovery search. */
+export interface SearchTraceRank {
+  name: string;
+  /** 1-based position in the returned results. */
+  rank: number;
+  /** Query terms this tool matched, e.g. "products (name)". Empty when it surfaced
+   * without a keyword hit (a semantic match or a pinned prerequisite). */
+  matched: string[];
+  /** A pinned prerequisite prepended ahead of the ranked matches, not a query hit. */
+  pinned: boolean;
 }
 
 /** One exposed tool's verifiable identity: the model-visible alias joined back to its

@@ -795,6 +795,44 @@ fn semantic_rerank<'a>(
     Some(out)
 }
 
+/// Human-readable "why this tool" for the search trace: which query terms hit the
+/// tool's name vs its description. Reuses the same tokenizer and synonyms the ranker
+/// scores with, so the explanation reflects the real match (minus IDF weighting).
+/// Bounded so a long query can't bloat a trace line; an empty result means the tool
+/// surfaced without a keyword hit (a semantic match, or a pinned prerequisite).
+fn explain_match(query: &str, tool: &Value) -> Vec<String> {
+    use std::collections::HashSet;
+    let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+    let desc = tool.get("description").and_then(Value::as_str).unwrap_or("");
+    let name_set: HashSet<String> = search_tokens(name).into_iter().collect();
+    let desc_set: HashSet<String> = index_tokens(desc).into_iter().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for qt in index_tokens(query) {
+        let cands = std::iter::once(qt.as_str()).chain(synonym_group(qt.as_str()).iter().copied());
+        for c in cands {
+            let field = if name_set.contains(c) {
+                Some("name")
+            } else if desc_set.contains(c) {
+                Some("desc")
+            } else {
+                None
+            };
+            if let Some(f) = field {
+                let label = format!("{c} ({f})");
+                if seen.insert(label.clone()) {
+                    out.push(label);
+                }
+                break; // best (name-preferred) field for this query token
+            }
+        }
+        if out.len() >= 6 {
+            break;
+        }
+    }
+    out
+}
+
 /// Project selected tools to search results, bounding the total size of their
 /// (sometimes enormous) input schemas. Lazy discovery exists to keep the agent's
 /// context small, so one server's giant schemas must not blow it up: the top
@@ -1759,6 +1797,25 @@ fn handle_request(
                     .iter()
                     .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(str::to_string))
                     .collect();
+                // Per-result "why it surfaced": rank, the query terms it matched (name
+                // vs description), and whether it's a prepended pinned prerequisite
+                // rather than a query hit. Turns "which tools" into "why this tool".
+                let ranking: Vec<Value> = matches
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        json!({
+                            "name": m.get("name").and_then(Value::as_str).unwrap_or(""),
+                            "rank": i + 1,
+                            "matched": explain_match(query, m),
+                            "pinned": i < pins_added,
+                        })
+                    })
+                    .collect();
+                // Reflects the configured ranker (semantic re-rank falls back to lexical
+                // on any embedding failure, so this is the intended mode, not a per-call
+                // guarantee it succeeded).
+                let mode = if sem_cfg.is_active() { "semantic" } else { "lexical" };
                 searchtrace::record(
                     client,
                     query,
@@ -1770,6 +1827,8 @@ fn handle_request(
                     savings::estimate_tokens(&matches),
                     savings::estimate_tokens(source),
                     escalate,
+                    &ranking,
+                    mode,
                 );
                 return Some(success(
                     id,
@@ -4326,6 +4385,25 @@ mod tests {
         assert!(names.contains(&"toolport_call_tool"));
         assert!(names.contains(&"toolport_fetch_result"));
         assert!(!names.contains(&"resend__send_email"));
+    }
+
+    #[test]
+    fn explain_match_reports_hits_and_ignores_misses() {
+        let tool = json!({
+            "name": "acme__send_email",
+            "description": "Send an email message to a recipient.",
+        });
+        // A query term present in the tool is reported as a match.
+        let why = explain_match("email", &tool);
+        assert!(!why.is_empty(), "expected a match, got {why:?}");
+        assert!(why.iter().any(|m| m.contains("email")), "got {why:?}");
+        // A term absent from both name and description contributes nothing.
+        assert!(
+            explain_match("quantum", &tool).is_empty(),
+            "unexpected match for an absent term"
+        );
+        // A pinned/semantic-only surface (no lexical overlap) yields no explanation.
+        assert!(explain_match("", &tool).is_empty());
     }
 
     #[test]

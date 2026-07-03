@@ -725,6 +725,11 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
             loop-broken
           </span>
         )}
+        {t.mode === "semantic" && (
+          <span className="shrink-0 rounded bg-owned/10 px-1.5 py-0.5 text-[11px] text-owned">
+            semantic
+          </span>
+        )}
         <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
           {hit ? `${t.returned} of ${t.total}` : "no match"}
         </span>
@@ -735,20 +740,48 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
       {open && (
         <div className="border-t border-border/50 bg-muted/20 px-3 py-2 pl-9 text-xs">
           {hit ? (
-            <div className="mb-2 flex flex-wrap gap-1">
-              {t.names.map((n) => (
-                <span
-                  key={n}
-                  className={`rounded px-1.5 py-0.5 font-mono text-[11px] ${
-                    n === t.top
-                      ? "bg-owned/15 text-owned"
-                      : "bg-muted text-muted-foreground"
-                  }`}
-                >
-                  {n}
-                </span>
-              ))}
-            </div>
+            t.ranking && t.ranking.length > 0 ? (
+              <div className="mb-2 space-y-1">
+                {t.ranking.map((r) => (
+                  <div key={r.name} className="flex items-baseline gap-2">
+                    <span className="w-5 shrink-0 text-right tabular-nums text-[11px] text-muted-foreground">
+                      #{r.rank}
+                    </span>
+                    <span
+                      className={`shrink-0 font-mono text-[11px] ${
+                        r.name === t.top ? "text-owned" : "text-foreground"
+                      }`}
+                    >
+                      {r.name}
+                    </span>
+                    <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+                      {r.pinned
+                        ? "pinned prerequisite"
+                        : r.matched.length > 0
+                          ? `matched ${r.matched.join(", ")}`
+                          : t.mode === "semantic"
+                            ? "semantic match"
+                            : "—"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mb-2 flex flex-wrap gap-1">
+                {t.names.map((n) => (
+                  <span
+                    key={n}
+                    className={`rounded px-1.5 py-0.5 font-mono text-[11px] ${
+                      n === t.top
+                        ? "bg-owned/15 text-owned"
+                        : "bg-muted text-muted-foreground"
+                    }`}
+                  >
+                    {n}
+                  </span>
+                ))}
+              </div>
+            )
           ) : (
             <div className="mb-2 text-muted-foreground">No tools matched this query.</div>
           )}
