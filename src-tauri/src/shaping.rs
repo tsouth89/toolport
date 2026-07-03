@@ -46,6 +46,9 @@ pub fn budget() -> usize {
 struct Cached {
     body: String,
     at: Instant,
+    /// The client the result belongs to (a registered HTTP client's label), or None
+    /// for the single-tenant stdio process. Only this client may fetch it back.
+    owner: Option<String>,
 }
 
 fn cache() -> &'static Mutex<HashMap<String, Cached>> {
@@ -126,7 +129,7 @@ fn is_text_representable(result: &Value) -> bool {
 /// it with a truncated head + a stamped cursor marker, and return `true` (shaped).
 /// A `budget` of 0 disables shaping. Lossless: the full body stays fetchable via
 /// [`fetch_result`].
-pub fn shape_result(result: &mut Value, budget: usize) -> bool {
+pub fn shape_result(result: &mut Value, budget: usize, owner: Option<&str>) -> bool {
     if budget == 0 {
         return false;
     }
@@ -175,6 +178,7 @@ pub fn shape_result(result: &mut Value, budget: usize) -> bool {
             Cached {
                 body,
                 at: Instant::now(),
+                owner: owner.map(str::to_string),
             },
         );
     }
@@ -197,17 +201,26 @@ pub fn shape_result(result: &mut Value, budget: usize) -> bool {
 
 /// Return the next slice of a cached shaped result, by cursor + character offset.
 /// `len` of 0 means "use the current budget".
-pub fn fetch_result(cursor: &str, offset: usize, len: usize) -> Value {
+pub fn fetch_result(cursor: &str, offset: usize, len: usize, requester: Option<&str>) -> Value {
     let mut map = cache().lock().unwrap_or_else(|e| e.into_inner());
     sweep(&mut map);
-    let Some(c) = map.get(cursor) else {
-        return text_result(
-            format!(
-                "[Toolport: cursor \"{cursor}\" is unknown or expired. Re-run the original \
-                 tool call to get a fresh result.]"
-            ),
-            true,
-        );
+    // Scope: a cached result is readable only by the client that stashed it. A mismatch
+    // returns the SAME "unknown or expired" answer as a missing cursor, so a scoped
+    // client can't probe which cursors exist. This matters because the stash is
+    // process-global, and in HTTP mode one gateway serves every registered client;
+    // without this check a client could read another tenant's result by guessing the
+    // sequential `r{n}` cursor.
+    let c = match map.get(cursor) {
+        Some(c) if c.owner.as_deref() == requester => c,
+        _ => {
+            return text_result(
+                format!(
+                    "[Toolport: cursor \"{cursor}\" is unknown or expired. Re-run the original \
+                     tool call to get a fresh result.]"
+                ),
+                true,
+            );
+        }
     };
     let total = c.body.chars().count();
     if offset >= total {
@@ -220,7 +233,12 @@ pub fn fetch_result(cursor: &str, offset: usize, len: usize) -> Value {
         );
     }
     let len = if len == 0 { budget() } else { len };
-    let end = (offset + len).min(total);
+    // saturating_add: a client-supplied `len` near usize::MAX must not overflow
+    // `offset + len`. On debug that panics; on release it wraps to `end < offset`,
+    // and the byte-mapping below then slices `body[start_byte..end_byte]` with
+    // start > end - a panic that, on the stdio transport (no catch_unwind), takes
+    // down the whole gateway. Saturating clamps `end` to `total` instead.
+    let end = offset.saturating_add(len).min(total);
     // Map the character window [offset, end) to byte offsets in a single pass, so a
     // page read never allocates a Vec<char> of the whole (possibly multi-MB) body.
     // `end == total` leaves end_byte at the body's byte length (the loop never yields
@@ -260,14 +278,14 @@ mod tests {
     #[test]
     fn under_budget_is_untouched() {
         let mut r = big_text_result(100);
-        assert!(!shape_result(&mut r, 1024));
+        assert!(!shape_result(&mut r, 1024, None));
         assert_eq!(r["content"][0]["text"].as_str().unwrap().len(), 100);
     }
 
     #[test]
     fn over_budget_truncates_and_caches() {
         let mut r = big_text_result(10_000);
-        assert!(shape_result(&mut r, 2048));
+        assert!(shape_result(&mut r, 2048, None));
         let text = r["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("conduit_fetch_result"));
         assert!(text.len() < 10_000);
@@ -278,13 +296,13 @@ mod tests {
     #[test]
     fn budget_zero_disables() {
         let mut r = big_text_result(10_000);
-        assert!(!shape_result(&mut r, 0));
+        assert!(!shape_result(&mut r, 0, None));
     }
 
     #[test]
     fn fetch_pages_the_remainder() {
         let mut r = big_text_result(10_000);
-        shape_result(&mut r, 2048);
+        shape_result(&mut r, 2048, None);
         // Pull the cursor back out of the marker.
         let text = r["content"][0]["text"].as_str().unwrap();
         let cursor = text
@@ -293,15 +311,66 @@ mod tests {
             .and_then(|s| s.split('"').next())
             .unwrap()
             .to_string();
-        let more = fetch_result(&cursor, 1500, 500);
+        let more = fetch_result(&cursor, 1500, 500, None);
         let mt = more["content"][0]["text"].as_str().unwrap();
         assert!(mt.contains("of 10000"));
     }
 
     #[test]
     fn fetch_unknown_cursor_is_an_error() {
-        let v = fetch_result("nope", 0, 100);
+        let v = fetch_result("nope", 0, 100, None);
         assert_eq!(v["isError"].as_bool(), Some(true));
+    }
+
+    // Pull the cursor back out of a shaped result's marker.
+    fn cursor_of(r: &Value) -> String {
+        r["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .split("\"cursor\":\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn fetch_is_scoped_to_the_owning_client() {
+        let mut r = big_text_result(10_000);
+        assert!(shape_result(&mut r, 2048, Some("alice")));
+        let cursor = cursor_of(&r);
+        // A different client (or an unattributed one) gets the same "unknown/expired"
+        // answer as a missing cursor: no cross-tenant read, and no oracle for which
+        // cursors exist. The stash is process-global, so in HTTP mode this is the only
+        // thing stopping one client from reading another's result by guessing r{n}.
+        assert_eq!(
+            fetch_result(&cursor, 0, 100, Some("mallory"))["isError"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            fetch_result(&cursor, 0, 100, None)["isError"].as_bool(),
+            Some(true)
+        );
+        // The owner still reads it.
+        assert_ne!(
+            fetch_result(&cursor, 0, 100, Some("alice"))["isError"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn fetch_with_pathological_len_does_not_panic() {
+        let mut r = big_text_result(10_000);
+        shape_result(&mut r, 2048, None);
+        let cursor = cursor_of(&r);
+        // offset + len must saturate, not overflow into a start > end byte slice
+        // (which panics, and on the stdio transport takes down the whole gateway).
+        let v = fetch_result(&cursor, 5, usize::MAX, None);
+        assert_ne!(v["isError"].as_bool(), Some(true));
+        assert!(v["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("end of result"));
     }
 
     #[test]
@@ -311,7 +380,7 @@ mod tests {
             "content": [{ "type": "text", "text": "€".repeat(5_000) }],
             "isError": false
         });
-        assert!(shape_result(&mut r, 2048));
+        assert!(shape_result(&mut r, 2048, None));
         let text = r["content"][0]["text"].as_str().unwrap();
         let head = text.split("\n\n[Toolport shaped").next().unwrap();
         assert!(
@@ -330,7 +399,7 @@ mod tests {
             "content": [{ "type": "text", "text": "€".repeat(4_000) }],
             "isError": false
         });
-        assert!(shape_result(&mut r, 2048));
+        assert!(shape_result(&mut r, 2048, None));
         let text = r["content"][0]["text"].as_str().unwrap();
         let cursor = text
             .split("\"cursor\":\"")
@@ -339,7 +408,7 @@ mod tests {
             .unwrap()
             .to_string();
         // Read 100 chars starting at char 1000 (byte 3000): all euros, none split.
-        let page = fetch_result(&cursor, 1000, 100);
+        let page = fetch_result(&cursor, 1000, 100, None);
         let pt = page["content"][0]["text"].as_str().unwrap();
         let body = pt.split("\n\n[Toolport:").next().unwrap();
         assert_eq!(body.chars().filter(|&c| c == '€').count(), 100);
@@ -349,7 +418,7 @@ mod tests {
     #[test]
     fn fetch_past_end_reports_nothing_more() {
         let mut r = big_text_result(10_000);
-        shape_result(&mut r, 2048);
+        shape_result(&mut r, 2048, None);
         let text = r["content"][0]["text"].as_str().unwrap();
         let cursor = text
             .split("\"cursor\":\"")
@@ -357,7 +426,7 @@ mod tests {
             .and_then(|s| s.split('"').next())
             .unwrap()
             .to_string();
-        let past = fetch_result(&cursor, 999_999, 100);
+        let past = fetch_result(&cursor, 999_999, 100, None);
         let pt = past["content"][0]["text"].as_str().unwrap();
         assert!(pt.contains("past the end"));
         assert_eq!(past["isError"].as_bool(), Some(false));
@@ -370,7 +439,7 @@ mod tests {
             "content": [{ "type": "image", "data": "A".repeat(10_000), "mimeType": "image/png" }],
             "isError": false
         });
-        assert!(!shape_result(&mut r, 2048));
+        assert!(!shape_result(&mut r, 2048, None));
         assert_eq!(r["content"][0]["type"].as_str(), Some("image"));
     }
 
@@ -383,7 +452,7 @@ mod tests {
             "annotations": { "blob": "Z".repeat(10_000) },
             "isError": false
         });
-        assert!(!shape_result(&mut r, 2048));
+        assert!(!shape_result(&mut r, 2048, None));
         assert_eq!(r["content"][0]["text"].as_str(), Some("small"));
     }
 
@@ -392,7 +461,7 @@ mod tests {
         // Insert well past the cap; the cache must never exceed MAX_CACHE_ENTRIES.
         for _ in 0..(MAX_CACHE_ENTRIES + 20) {
             let mut r = big_text_result(5_000);
-            shape_result(&mut r, 1024);
+            shape_result(&mut r, 1024, None);
         }
         let map = cache().lock().unwrap_or_else(|e| e.into_inner());
         assert!(

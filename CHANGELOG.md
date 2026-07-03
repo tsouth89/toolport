@@ -7,6 +7,16 @@ Entries before the rename below shipped under the project's former name, Conduit
 ## [Unreleased]
 
 ### Security
+- **`fetch_result` is now scoped to the client that produced the result.** In HTTP mode
+  one gateway serves every registered client from a shared result cache with sequential
+  `r{n}` cursors, so a scoped client could read another client's large-result body by
+  guessing a cursor (`fetch_result` was the one data path that skipped the client scope
+  check). It now only returns a result to the client that stashed it, with the same
+  "unknown or expired" answer for anything else so cursors can't be probed.
+- **A malformed `fetch_result` can no longer crash the gateway.** A pathological `len`
+  overflowed the paging math into an invalid byte slice that panicked; on the stdio
+  transport (no panic guard) that took down the whole gateway process. The offset math
+  now saturates.
 - **HTTP clients are scoped on resources and prompts too.** A registered HTTP/OpenAPI
   client scoped to a subset of servers could still read *any* connected server's
   resources and prompts (`resources/read` / `prompts/get` ignored the scope); they now

@@ -1467,7 +1467,9 @@ fn handle_request(
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
                 let len = arguments.get("len").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                return Some(success(id, shaping::fetch_result(cursor, offset, len)));
+                // Pass the calling client so a client can only fetch results it stashed
+                // (the stash is process-global in HTTP mode).
+                return Some(success(id, shaping::fetch_result(cursor, offset, len, client)));
             }
 
             // toolport_confirm: replay a previously-intercepted destructive call.
@@ -1877,7 +1879,7 @@ fn handle_request(
                         .get(srv)
                         .map(|&b| b as usize)
                         .unwrap_or_else(shaping::budget);
-                    shaping::shape_result(&mut result, budget);
+                    shaping::shape_result(&mut result, budget, client);
                     // Recover from a downstream failure: point the model at
                     // sibling list/get tools that can supply a missing/invalid
                     // identifier. Appended after shaping so it's never truncated.
