@@ -68,6 +68,10 @@ Entries before the rename below shipped under the project's former name, Conduit
   Realistic results are far under the cap, so detection is unaffected in practice.
 
 ### Added
+- **Pi coding agent is now a supported client.** Toolport detects Pi, imports its
+  configured MCP servers, and installs/removes the gateway entry in Pi's global config
+  (`~/.pi/agent/mcp.json`), the same one-click flow as Cursor and the other clients.
+  (Requested on the r/LocalLLaMA launch thread.)
 - **Pin a tool as a lazy-discovery prerequisite.** Mark a load-bearing tool (auth,
   list-before-act, or one whose description doesn't match the model's keywords) with the
   pin toggle in the tool list, and lazy-discovery search will always surface it with its
