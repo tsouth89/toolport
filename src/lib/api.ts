@@ -162,6 +162,15 @@ export function setToolEnabled(
   return invoke<Registry>("set_tool_enabled", { serverId, tool, enabled });
 }
 
+/** Pin/unpin a tool as a lazy-discovery prerequisite (search always surfaces it). */
+export function setToolPinned(
+  serverId: string,
+  tool: string,
+  pinned: boolean,
+): Promise<Registry> {
+  return invoke<Registry>("set_tool_pinned", { serverId, tool, pinned });
+}
+
 /** Toggle the global destructive-tool deny switch. */
 export function setDenyDestructive(deny: boolean): Promise<Registry> {
   return invoke<Registry>("set_deny_destructive", { deny });

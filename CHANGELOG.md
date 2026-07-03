@@ -68,6 +68,12 @@ Entries before the rename below shipped under the project's former name, Conduit
   Realistic results are far under the cap, so detection is unaffected in practice.
 
 ### Added
+- **Pin a tool as a lazy-discovery prerequisite.** Mark a load-bearing tool (auth,
+  list-before-act, or one whose description doesn't match the model's keywords) with the
+  pin toggle in the tool list, and lazy-discovery search will always surface it with its
+  full schema, regardless of the query's match score, so it's never hidden behind
+  discovery. Pinned tools stay scoped to the client and are capped so a large pin set
+  can't itself bloat a result. (Requested on the r/LocalLLaMA launch thread.)
 - **Tool identities (capability provenance).** A new Activity panel shows what each
   model-visible tool name actually maps to: its source server and the profiles that
   enable it, the pinned definition fingerprint drift detection checks against, and when

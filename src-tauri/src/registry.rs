@@ -209,6 +209,13 @@ pub struct Registry {
     /// call still routes to the original downstream tool.
     #[serde(default)]
     pub tool_overrides: HashMap<String, HashMap<String, ToolOverride>>,
+    /// Tools pinned as lazy-discovery prerequisites, keyed by server id -> original tool
+    /// names. Search always surfaces a pinned tool (with its schema) regardless of the
+    /// query's match score, so a load-bearing tool (auth, list-before-act, one whose
+    /// description doesn't match the user's keywords) is never hidden behind lazy
+    /// discovery. Empty = nothing pinned.
+    #[serde(default)]
+    pub pinned_tools: HashMap<String, Vec<String>>,
     /// Quarantine-on-drift: when true, a high-risk tool (poisoned definition, or a
     /// destructive tool whose definition changed/appeared) that drifts from its pinned
     /// baseline is hidden and blocked from every client until the user re-approves it.
@@ -344,6 +351,7 @@ impl Default for Registry {
             human_approval: false,
             human_approval_allow: Vec::new(),
             tool_overrides: HashMap::new(),
+            pinned_tools: HashMap::new(),
             quarantine_on_drift: false,
             lazy_discovery: true,
             allow_agent_control: false,
@@ -508,6 +516,29 @@ impl Registry {
             .find(|s| s.id == server_id)
             .map(|s| !s.disabled_tools.iter().any(|t| t == tool))
             .unwrap_or(true)
+    }
+
+    /// Pin or unpin a tool as a lazy-discovery prerequisite (by ORIGINAL tool name).
+    /// Idempotent; drops the server's entry when its last pin is removed.
+    pub fn set_tool_pinned(&mut self, server_id: &str, tool: &str, pinned: bool) {
+        let list = self.pinned_tools.entry(server_id.to_string()).or_default();
+        let present = list.iter().any(|t| t == tool);
+        if pinned && !present {
+            list.push(tool.to_string());
+        } else if !pinned && present {
+            list.retain(|t| t != tool);
+        }
+        if list.is_empty() {
+            self.pinned_tools.remove(server_id);
+        }
+    }
+
+    /// Whether a tool is pinned as a prerequisite (default: not pinned).
+    pub fn is_tool_pinned(&self, server_id: &str, tool: &str) -> bool {
+        self.pinned_tools
+            .get(server_id)
+            .map(|l| l.iter().any(|t| t == tool))
+            .unwrap_or(false)
     }
 
     /// Set the global destructive-tool deny switch. Mutually exclusive with
@@ -997,6 +1028,27 @@ mod tests {
         r.set_tool_enabled(&id, "create_issue", true).unwrap();
         assert!(r.is_tool_enabled(&id, "create_issue"));
         assert!(r.servers.iter().find(|s| s.id == id).unwrap().disabled_tools.is_empty());
+    }
+
+    #[test]
+    fn tool_pin_is_idempotent_and_prunes_empty() {
+        let mut r = Registry::default();
+        let id = r.add_server(sample_server("github"));
+        // Default: nothing pinned.
+        assert!(!r.is_tool_pinned(&id, "create_issue"));
+        // Pin, then double-pin doesn't duplicate.
+        r.set_tool_pinned(&id, "create_issue", true);
+        r.set_tool_pinned(&id, "create_issue", true);
+        assert!(r.is_tool_pinned(&id, "create_issue"));
+        assert_eq!(r.pinned_tools.get(&id).map(Vec::len), Some(1));
+        // A second pin adds to the same server's list.
+        r.set_tool_pinned(&id, "list_issues", true);
+        assert_eq!(r.pinned_tools.get(&id).map(Vec::len), Some(2));
+        // Unpinning the last one prunes the server entry entirely.
+        r.set_tool_pinned(&id, "create_issue", false);
+        r.set_tool_pinned(&id, "list_issues", false);
+        assert!(!r.is_tool_pinned(&id, "create_issue"));
+        assert!(r.pinned_tools.get(&id).is_none());
     }
 
     #[test]
