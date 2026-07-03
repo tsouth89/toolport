@@ -5,13 +5,13 @@
 # LOCAL macOS sign + package flow for the keychain-access-group wrapper (Phase 2).
 #
 # What it does:
-#   1. Finds the bare conduit-gateway binary inside a built Toolport.app.
+#   1. Finds the bare toolport-gateway binary inside a built Toolport.app.
 #   2. Rebuilds it as a nested helper bundle:
-#        Toolport.app/Contents/Helpers/ConduitGateway.app
+#        Toolport.app/Contents/Helpers/ToolportGateway.app
 #      so the gateway can carry its OWN embedded provisioning profile (a bare
 #      Mach-O cannot embed a .provisionprofile; only a bundle can).
 #   3. Leaves a symlink at the OLD bare path
-#        Toolport.app/Contents/MacOS/conduit-gateway
+#        Toolport.app/Contents/MacOS/toolport-gateway
 #      pointing at the nested binary, so existing client configs that spawn the
 #      old path keep working.
 #   4. Codesigns inside-out (no --deep): gateway bundle first, then the outer app,
@@ -48,8 +48,8 @@ GW_ENTITLEMENTS="$REPO_ROOT/src-tauri/Gateway.entitlements"
 
 # Identifiers (must match the entitlements + profiles).
 GW_BUNDLE_ID="com.tsout.conduit.gateway"
-GW_EXECUTABLE="conduit-gateway"
-HELPER_APP_NAME="ConduitGateway.app"
+GW_EXECUTABLE="toolport-gateway"
+HELPER_APP_NAME="ToolportGateway.app"
 
 # A version string for the helper Info.plist. Pull it from the app's own
 # Info.plist if available, else fall back.
@@ -113,16 +113,19 @@ HELPERS_DIR="$APP/Contents/Helpers"
 HELPER_APP="$HELPERS_DIR/$HELPER_APP_NAME"
 HELPER_BIN="$HELPER_APP/Contents/MacOS/$GW_EXECUTABLE"
 SYMLINK_PATH="$APP/Contents/MacOS/$GW_EXECUTABLE"
+# Pre-rename bare path, kept as a SECOND symlink so client configs written by an
+# older Toolport (which spawn `conduit-gateway`) keep resolving to the same binary.
+LEGACY_SYMLINK_PATH="$APP/Contents/MacOS/conduit-gateway"
 
 # ---------------------------------------------------------------------------
 # 1. Locate the gateway binary inside the app.
-#    It is EITHER the bare Mach-O at Contents/MacOS/conduit-gateway (fresh build),
+#    It is EITHER the bare Mach-O at Contents/MacOS/toolport-gateway (fresh build),
 #    OR already inside the nested helper bundle (re-run). We must not pick up the
 #    backward-compat symlink as the "real" binary.
 # ---------------------------------------------------------------------------
 bold "[1/5] Locating the gateway binary inside the app"
 
-# Find every candidate named conduit-gateway, skipping symlinks (-type f).
+# Find every candidate named toolport-gateway, skipping symlinks (-type f).
 # (Portable read loop instead of `mapfile`, which is bash 4+ only; macOS ships bash 3.2.)
 CANDIDATES=()
 while IFS= read -r _candidate; do
@@ -174,14 +177,15 @@ echo "  helper version = $HELPER_VERSION"
 bold "[2/5] Building nested helper bundle: $HELPER_APP"
 
 # Stash the real binary aside so we can rebuild the bundle from a clean slate.
-TMP_BIN="$(mktemp "${TMPDIR:-/tmp}/conduit-gateway.XXXXXX")"
+TMP_BIN="$(mktemp "${TMPDIR:-/tmp}/toolport-gateway.XXXXXX")"
 cp -f "$REAL_BIN" "$TMP_BIN"
 chmod +x "$TMP_BIN"
 
 # Remove any prior helper bundle and the bare/symlink path, then recreate. This
 # is what makes the script idempotent: every run rebuilds from $TMP_BIN.
 rm -rf "$HELPER_APP"
-rm -f "$SYMLINK_PATH"      # also removes a stale symlink or a leftover bare binary
+rm -f "$SYMLINK_PATH"         # also removes a stale symlink or a leftover bare binary
+rm -f "$LEGACY_SYMLINK_PATH"  # and any stale pre-rename compat symlink
 mkdir -p "$HELPER_APP/Contents/MacOS"
 
 # (a) the binary, moved into the helper bundle.
@@ -199,9 +203,9 @@ cat > "$HELPER_APP/Contents/Info.plist" <<PLIST
 	<key>CFBundleExecutable</key>
 	<string>$GW_EXECUTABLE</string>
 	<key>CFBundleName</key>
-	<string>ConduitGateway</string>
+	<string>ToolportGateway</string>
 	<key>CFBundleDisplayName</key>
-	<string>Conduit Gateway</string>
+	<string>Toolport Gateway</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -224,17 +228,24 @@ cp -f "$GW_PROFILE" "$HELPER_APP/Contents/embedded.provisionprofile"
 green "  helper bundle assembled"
 
 # ---------------------------------------------------------------------------
-# 3. Backward-compat symlink at the OLD bare gateway path.
-#    Contents/MacOS/conduit-gateway -> ../Helpers/ConduitGateway.app/Contents/MacOS/conduit-gateway
+# 3. Bare-path symlinks -> nested binary.
+#    Contents/MacOS/toolport-gateway -> ../Helpers/ToolportGateway.app/Contents/MacOS/toolport-gateway  (current)
+#    Contents/MacOS/conduit-gateway  -> (same target)                                                    (pre-rename compat)
+#    Both let a client spawn either path and reach the same signed, profile-bearing
+#    gateway, so configs written by an older Toolport keep working after the rename.
 # ---------------------------------------------------------------------------
-bold "[3/5] Linking old bare path -> nested binary (backward compat)"
-ln -s "../Helpers/$HELPER_APP_NAME/Contents/MacOS/$GW_EXECUTABLE" "$SYMLINK_PATH"
-[[ -L "$SYMLINK_PATH" ]] || die "Failed to create backward-compat symlink at $SYMLINK_PATH"
-# Resolve it to confirm it points at the real binary.
+bold "[3/5] Linking bare paths -> nested binary (current + backward compat)"
+GW_TARGET="../Helpers/$HELPER_APP_NAME/Contents/MacOS/$GW_EXECUTABLE"
+ln -s "$GW_TARGET" "$SYMLINK_PATH"
+[[ -L "$SYMLINK_PATH" ]] || die "Failed to create symlink at $SYMLINK_PATH"
+ln -s "$GW_TARGET" "$LEGACY_SYMLINK_PATH"
+[[ -L "$LEGACY_SYMLINK_PATH" ]] || die "Failed to create backward-compat symlink at $LEGACY_SYMLINK_PATH"
+# Resolve both to confirm they point at the real binary.
 if ! readlink "$SYMLINK_PATH" >/dev/null 2>&1; then
   die "Symlink at $SYMLINK_PATH does not resolve"
 fi
 green "  symlink: $SYMLINK_PATH -> $(readlink "$SYMLINK_PATH")"
+green "  compat:  $LEGACY_SYMLINK_PATH -> $(readlink "$LEGACY_SYMLINK_PATH")"
 
 # ---------------------------------------------------------------------------
 # 4. Codesign INSIDE-OUT (no --deep): gateway bundle first, then the outer app.

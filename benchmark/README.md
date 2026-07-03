@@ -32,7 +32,7 @@ profile-scoped client writes `tool-cache-<profile>.json`; the unscoped default i
 
 ```bash
 # 1. Build the gateway
-npm run build:gateway        # or: cargo build --release --bin conduit-gateway
+npm run build:gateway        # or: cargo build --release --bin toolport-gateway
 
 # 2. Connect a few servers in Toolport, and edit the TASKS in bench.js to match them.
 

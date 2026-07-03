@@ -1067,7 +1067,7 @@ impl DownstreamServer {
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": { "name": "conduit-gateway", "version": env!("CARGO_PKG_VERSION") }
+                "clientInfo": { "name": "toolport-gateway", "version": env!("CARGO_PKG_VERSION") }
             }),
         ).map_err(|e| e.to_string())?;
         let caps = init.get("capabilities");

@@ -99,7 +99,7 @@ try {
 }
 
 function defaultGateway() {
-  const exe = process.platform === "win32" ? "conduit-gateway.exe" : "conduit-gateway";
+  const exe = process.platform === "win32" ? "toolport-gateway.exe" : "toolport-gateway";
   const release = join(ROOT, "src-tauri", "target", "release", exe);
   const debug = join(ROOT, "src-tauri", "target", "debug", exe);
   if (existsSync(release)) return release;

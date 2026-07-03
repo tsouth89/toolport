@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Application Identifier for the standalone conduit-gateway binary. Must
+	<!-- Application Identifier for the standalone toolport-gateway binary. Must
 	     match its embedded provisioning profile and the keychain access group
 	     prefix (Team ID V4YZPC7T6G). -->
 	<key>com.apple.application-identifier</key>

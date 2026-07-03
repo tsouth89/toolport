@@ -108,7 +108,12 @@ pub fn is_gateway_server(server: &ServerEntry) -> bool {
         || server
             .command
             .as_deref()
-            .map(|c| c.to_lowercase().contains("conduit-gateway"))
+            .map(|c| {
+                let c = c.to_lowercase();
+                // Match the current name and the pre-rename one, so a client
+                // configured by an older Toolport is still recognized as ours.
+                c.contains("toolport-gateway") || c.contains("conduit-gateway")
+            })
             .unwrap_or(false)
 }
 
@@ -2206,7 +2211,7 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
 // Gateway install
 //
 // "Installing Toolport into a client" means adding a single entry to that
-// client's config that runs the conduit-gateway binary. The client then talks
+// client's config that runs the toolport-gateway binary. The client then talks
 // only to Toolport, which routes to everything behind it. This is a surgical
 // edit: existing servers (and their secret env values) are left untouched.
 // ---------------------------------------------------------------------------
@@ -2216,33 +2221,39 @@ pub(crate) fn resolve_gateway_path() -> Option<PathBuf> {
     let dir = exe.parent()?;
     let ext = std::env::consts::EXE_SUFFIX;
     // Dev / `cargo run`, and most packaged builds: the gateway sits next to the app
-    // binary as `conduit-gateway` (Tauri strips the sidecar's target-triple suffix
+    // binary as `toolport-gateway` (Tauri strips the sidecar's target-triple suffix
     // when installing). True for Windows (install dir), macOS (.app/Contents/MacOS),
-    // and the Linux .deb (/usr/bin).
-    let plain = dir.join(format!("conduit-gateway{ext}"));
+    // and the Linux .deb (/usr/bin). `conduit-gateway` is the pre-rename name, kept
+    // as a fallback so an install updated in place still resolves.
+    let plain = dir.join(format!("toolport-gateway{ext}"));
+    let plain_legacy = dir.join(format!("conduit-gateway{ext}"));
 
     // macOS signed bundle: the keychain-access-group wrapper (scripts/macos-sign-local.sh)
     // re-homes the gateway into a nested helper bundle so it can carry its own
     // embedded provisioning profile:
-    //     Conduit.app/Contents/Helpers/ConduitGateway.app/Contents/MacOS/conduit-gateway
+    //     Toolport.app/Contents/Helpers/ToolportGateway.app/Contents/MacOS/toolport-gateway
     // The app binary runs from Toolport.app/Contents/MacOS, so `dir` is that
-    // directory. Prefer the nested binary when it exists. The old bare path
-    // (Contents/MacOS/conduit-gateway) is kept as a SYMLINK to this same binary by
-    // the signing script for backward compatibility with already-written client
-    // configs, so spawning either path reaches the same signed, profile-bearing
-    // gateway. (Existing-install client-config rewrite to the nested path is a
-    // later concern; not handled here.)
+    // directory. Prefer the nested binary when it exists. Both bare paths
+    // (Contents/MacOS/{toolport,conduit}-gateway) are kept as SYMLINKs to this same
+    // binary by the signing script, so spawning either reaches the same signed,
+    // profile-bearing gateway and older client configs still work. The pre-rename
+    // helper (ConduitGateway.app) is checked as a fallback for an in-place update.
     #[cfg(target_os = "macos")]
     {
-        let nested = dir
-            .join("..")
-            .join("Helpers")
-            .join("ConduitGateway.app")
-            .join("Contents")
-            .join("MacOS")
-            .join("conduit-gateway");
-        if nested.exists() {
-            return Some(nested);
+        for (app, exe) in [
+            ("ToolportGateway.app", "toolport-gateway"),
+            ("ConduitGateway.app", "conduit-gateway"),
+        ] {
+            let nested = dir
+                .join("..")
+                .join("Helpers")
+                .join(app)
+                .join("Contents")
+                .join("MacOS")
+                .join(exe);
+            if nested.exists() {
+                return Some(nested);
+            }
         }
     }
 
@@ -2251,20 +2262,29 @@ pub(crate) fn resolve_gateway_path() -> Option<PathBuf> {
     // it would be dead by the time a client tries to spawn it. Copy the gateway to a
     // stable per-user location and hand clients that path. ($APPIMAGE is only set
     // when running inside an AppImage.)
-    if std::env::var_os("APPIMAGE").is_some() && plain.exists() {
-        if let Some(stable) = stable_gateway_copy(&plain) {
-            return Some(stable);
+    if std::env::var_os("APPIMAGE").is_some() {
+        for src in [&plain, &plain_legacy] {
+            if src.exists() {
+                if let Some(stable) = stable_gateway_copy(src) {
+                    return Some(stable);
+                }
+            }
         }
     }
 
     if plain.exists() {
         return Some(plain);
     }
+    if plain_legacy.exists() {
+        return Some(plain_legacy);
+    }
     // Packaged fallback: a sidecar that kept its `-<target-triple>` suffix.
     if let Some(triple) = option_env!("CONDUIT_TARGET_TRIPLE").filter(|t| !t.is_empty()) {
-        let suffixed = dir.join(format!("conduit-gateway-{triple}{ext}"));
-        if suffixed.exists() {
-            return Some(suffixed);
+        for name in ["toolport-gateway", "conduit-gateway"] {
+            let suffixed = dir.join(format!("{name}-{triple}{ext}"));
+            if suffixed.exists() {
+                return Some(suffixed);
+            }
         }
     }
     // Fall back to the plain path so callers surface a clear "not found" error
@@ -2278,7 +2298,9 @@ pub(crate) fn resolve_gateway_path() -> Option<PathBuf> {
 fn stable_gateway_copy(src: &std::path::Path) -> Option<PathBuf> {
     let dest_dir = crate::registry::conduit_dir()?.join("bin");
     std::fs::create_dir_all(&dest_dir).ok()?;
-    let dest = dest_dir.join("conduit-gateway");
+    // Keep the source's filename so the stable copy matches whichever binary name
+    // (toolport-gateway, or the legacy conduit-gateway) was found next to the app.
+    let dest = dest_dir.join(src.file_name()?);
     let stale = match (std::fs::metadata(&dest), std::fs::metadata(src)) {
         (Ok(d), Ok(s)) => d.len() != s.len(),
         _ => true,
@@ -2299,7 +2321,7 @@ fn stable_gateway_copy(src: &std::path::Path) -> Option<PathBuf> {
 }
 
 fn gateway_entry(profile: Option<&str>) -> Result<ServerEntry, String> {
-    let path = resolve_gateway_path().ok_or("Could not locate the conduit-gateway binary")?;
+    let path = resolve_gateway_path().ok_or("Could not locate the toolport-gateway binary")?;
     let env_var = |k: &str, v: &str| crate::registry::EnvVar {
         key: k.to_string(),
         value: Some(v.to_string()),

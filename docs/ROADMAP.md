@@ -288,7 +288,7 @@ Phase 2 - Client integration
 - [x] Migrate-on-connect: import a client's servers, leave it gateway-only
 - [x] Live propagation (registry mtime bump -> gateway rebuild -> tools/list_changed)
 - [x] Registry path anchored to a non-virtualized home path (MSIX desync fix)
-- [x] Bundle conduit-gateway as a sidecar so the installed path survives in
+- [x] Bundle toolport-gateway as a sidecar so the installed path survives in
       production (externalBin via merge config `tauri.bundle.conf.json`, staged by
       `scripts/prepare-sidecar.mjs`; `resolve_gateway_path` finds the dev name or
       the packaged `-<triple>` name). Shipping in signed releases.

@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEBUG = join(__dirname, "..", "src-tauri", "target", "debug");
 const exe = (n) => join(DEBUG, process.platform === "win32" ? `${n}.exe` : n);
-const GATEWAY = exe("conduit-gateway");
+const GATEWAY = exe("toolport-gateway");
 const MOCK = exe("mock-mcp-server");
 const N = Math.max(20, Number(process.argv[2] || 200));
 

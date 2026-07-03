@@ -12,7 +12,7 @@
 // the mcpico benchmark, so the numbers are directly comparable.
 //
 // Prereqs:
-//   1. Build the gateway:   npm run build:gateway   (or: cargo build --release --bin conduit-gateway)
+//   1. Build the gateway:   npm run build:gateway   (or: cargo build --release --bin toolport-gateway)
 //   2. Connect some servers in Toolport (the tasks below should match what you have).
 //   3. Run a local OpenAI-compatible LLM:
 //        - LM Studio: start the server (default http://localhost:1234)
@@ -52,7 +52,7 @@ const TASKS = [
 ];
 
 function defaultGateway() {
-  const exe = process.platform === "win32" ? "conduit-gateway.exe" : "conduit-gateway";
+  const exe = process.platform === "win32" ? "toolport-gateway.exe" : "toolport-gateway";
   const release = join(ROOT, "src-tauri", "target", "release", exe);
   const debug = join(ROOT, "src-tauri", "target", "debug", exe);
   if (existsSync(release)) return release;

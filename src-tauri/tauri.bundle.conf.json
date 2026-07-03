@@ -5,6 +5,6 @@
   },
   "bundle": {
     "createUpdaterArtifacts": true,
-    "externalBin": ["binaries/conduit-gateway"]
+    "externalBin": ["binaries/toolport-gateway"]
   }
 }

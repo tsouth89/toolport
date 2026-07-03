@@ -451,10 +451,14 @@ export function isEnabled(registry: Registry, serverId: string): boolean {
  * Mirrors `is_gateway_server` in the Rust backend. */
 export function isGatewayServer(server: ServerEntry): boolean {
   const name = server.name.toLowerCase();
+  const command = server.command?.toLowerCase() ?? "";
   return (
     server.id === "conduit" ||
     name === "conduit" ||
-    (server.command?.toLowerCase().includes("conduit-gateway") ?? false)
+    // Current binary name and the pre-rename one, so an entry written by an older
+    // Toolport is still recognized as the gateway.
+    command.includes("toolport-gateway") ||
+    command.includes("conduit-gateway")
   );
 }
 

@@ -306,7 +306,7 @@ export interface HttpBridgeStatus {
   token: string | null;
 }
 
-/** Start the supervised conduit-gateway HTTP/OpenAPI server (Open WebUI etc.). */
+/** Start the supervised toolport-gateway HTTP/OpenAPI server (Open WebUI etc.). */
 export function startHttpBridge(port?: number): Promise<HttpBridgeStatus> {
   return invoke<HttpBridgeStatus>("start_http_bridge", { port: port ?? null });
 }

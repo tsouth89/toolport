@@ -39,7 +39,7 @@ const CONNECT_WAIT_MS = Number(process.env.CONNECT_WAIT_MS || 12000);
 const K = Number(process.env.K || 10); // results to request / rank within
 
 function defaultGateway() {
-  const exe = process.platform === "win32" ? "conduit-gateway.exe" : "conduit-gateway";
+  const exe = process.platform === "win32" ? "toolport-gateway.exe" : "toolport-gateway";
   const release = join(ROOT, "src-tauri", "target", "release", exe);
   const debug = join(ROOT, "src-tauri", "target", "debug", exe);
   return existsSync(release) ? release : debug;
