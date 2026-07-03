@@ -19,6 +19,9 @@ Entries before the rename below shipped under the project's former name, Conduit
   appears, focus moves into the prompt, Escape denies the oldest pending call, and
   the count is announced. Also removed a brief flicker where a just-decided row
   could momentarily reappear.
+- **The approval countdown is now exact.** It counts down to the broker's real
+  fail-closed deadline instead of approximating from when the overlay first appeared,
+  so the timer matches the moment the call actually auto-denies.
 - Large tool results paged via `fetch_result` no longer re-scan the whole cached
   body on each page.
 - A failed confirmation (e.g. removing a server) keeps its dialog open cleanly

@@ -38,6 +38,10 @@ pub struct PendingView {
     pub tool: String,
     pub reason: ApprovalReason,
     pub arguments: serde_json::Value,
+    /// Wall-clock epoch-millis when this call auto-denies (park time + the fail-closed
+    /// timeout). The UI counts down to this exactly, instead of approximating from when
+    /// it first saw the request. App and broker share one clock, so it's accurate.
+    pub deadline_ms: u64,
 }
 
 /// A gateway connection parked waiting for a human decision.
@@ -61,6 +65,17 @@ struct Inner {
 /// Cap on simultaneously-pending approvals, so a misbehaving client can't grow the
 /// queue without bound. Beyond this, new requests are denied immediately.
 const MAX_PENDING: usize = 64;
+
+/// The wall-clock epoch-millis deadline for a newly parked approval: now plus the
+/// fail-closed timeout. Matches the broker's own `recv_timeout` below, so the UI's
+/// countdown to it lands on the same moment the call actually auto-denies.
+fn deadline_ms_from_now() -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    now + DEFAULT_TIMEOUT_SECS * 1000
+}
 
 /// Handle to the broker, managed as Tauri state so the approve/deny commands can reach it.
 #[derive(Clone)]
@@ -250,6 +265,8 @@ fn handle_conn(stream: TcpStream, broker: ApprovalBroker, app: AppHandle) {
         tool: req.tool.clone(),
         reason: req.reason,
         arguments: req.arguments.clone(),
+        // Stamp the deadline now, right before we park on `recv_timeout` below.
+        deadline_ms: deadline_ms_from_now(),
     };
     let (tx, rx) = channel::<ApprovalDecision>();
     {
@@ -352,6 +369,7 @@ mod tests {
             tool: "drop".into(),
             reason: ApprovalReason::Destructive,
             arguments: serde_json::json!({}),
+            deadline_ms: deadline_ms_from_now(),
         };
         b.inner
             .pending
@@ -388,6 +406,21 @@ mod tests {
     #[test]
     fn unknown_id_errs() {
         assert!(broker().decide("nope", true).is_err());
+    }
+
+    #[test]
+    fn deadline_is_about_the_timeout_out() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let d = deadline_ms_from_now();
+        let target = DEFAULT_TIMEOUT_SECS * 1000;
+        // ~timeout out; allow a few seconds of slack for a slow CI scheduler.
+        assert!(
+            d >= now + target - 3_000 && d <= now + target + 3_000,
+            "deadline {d} not ~{target}ms past {now}"
+        );
     }
 
     #[test]

@@ -45,8 +45,8 @@ export function PendingApprovals() {
   // resolved event / poll (NOT optimistically), so a poll landing before the backend
   // reflects the decision can't flicker the row back looking un-decided.
   const [resolving, setResolving] = useState<Set<string>>(new Set());
-  // When we first saw each id, so the countdown starts from first sighting (the broker
-  // deadline is authoritative; this is a close, honest approximation for the UI).
+  // Fallback only: first-sighting time per id, used to drive the countdown if a pending
+  // entry ever lacks the broker's authoritative deadlineMs (older backend / transient).
   const seenAt = useRef<Map<string, number>>(new Map());
   const [now, setNow] = useState(() => Date.now());
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -163,8 +163,11 @@ export function PendingApprovals() {
         <ul className="max-h-[70vh] divide-y divide-border/60 overflow-auto">
           {pending.map((a) => {
             const reason = REASON[a.reason];
-            const started = seenAt.current.get(a.id) ?? now;
-            const remaining = Math.max(0, Math.ceil((TIMEOUT_MS - (now - started)) / 1000));
+            // Count down to the broker's authoritative deadline; fall back to
+            // first-sighting + timeout only if deadlineMs is somehow absent, so the
+            // timer is never blank.
+            const deadline = a.deadlineMs || (seenAt.current.get(a.id) ?? now) + TIMEOUT_MS;
+            const remaining = Math.max(0, Math.ceil((deadline - now) / 1000));
             const pct = Math.max(0, Math.min(100, (remaining / (TIMEOUT_MS / 1000)) * 100));
             const urgent = remaining <= 20;
             const isBusy = resolving.has(a.id);
