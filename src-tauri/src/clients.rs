@@ -185,6 +185,7 @@ fn resolve_client_config_path(
         "claude-desktop" => config.join("Claude").join("claude_desktop_config.json"),
         "cursor" => home.join(".cursor").join("mcp.json"),
         "boltai" => home.join(".boltai").join("mcp.json"),
+        "pi" => home.join(".pi").join("agent").join("mcp.json"),
         "vscode" => config.join("Code").join("User").join("mcp.json"),
         "windsurf" => home
             .join(".codeium")
@@ -258,6 +259,7 @@ fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> 
         "claude-desktop" => config.join("Claude").join("claude_desktop_config.json"),
         "cursor" => home.join(".cursor").join("mcp.json"),
         "boltai" => home.join(".boltai").join("mcp.json"),
+        "pi" => home.join(".pi").join("agent").join("mcp.json"),
         "vscode" => config.join("Code").join("User").join("mcp.json"),
         "windsurf" => home
             .join(".codeium")
@@ -334,6 +336,13 @@ fn cursor_path() -> Option<PathBuf> {
 
 fn boltai_path() -> Option<PathBuf> {
     client_config_path("boltai")
+}
+
+/// Pi coding agent reads its Pi-owned global MCP config from ~/.pi/agent/mcp.json
+/// (standard `mcpServers` shape; pi's optional `lifecycle`/`idleTimeout` keys are
+/// left unset so it uses its defaults). Home-anchored, identical on every OS.
+fn pi_path() -> Option<PathBuf> {
+    client_config_path("pi")
 }
 
 fn vscode_path() -> Option<PathBuf> {
@@ -670,6 +679,14 @@ fn defs() -> Vec<ClientDef> {
             format: Format::JsonMcpServers,
             uses_connectors: false,
             path: boltai_path,
+            plugin_scan: None,
+        },
+        ClientDef {
+            id: "pi",
+            name: "Pi",
+            format: Format::JsonMcpServers,
+            uses_connectors: false,
+            path: pi_path,
             plugin_scan: None,
         },
         ClientDef {
@@ -3084,6 +3101,9 @@ bad = "not-a-table"
     fn client_config_paths_are_stable_across_platforms() {
         let cases: &[(&str, fn(&Path, Platform) -> PathBuf)] = &[
             ("cursor", |home, _| home.join(".cursor").join("mcp.json")),
+            ("pi", |home, _| {
+                home.join(".pi").join("agent").join("mcp.json")
+            }),
             ("vscode", |home, platform| {
                 roaming_config_dir(home, platform)
                     .join("Code")
