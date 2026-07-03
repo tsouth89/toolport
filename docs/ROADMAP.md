@@ -158,13 +158,15 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       publish pending) as the funnel + a demo of lazy discovery + result-shaping.
 
 **Community-requested (2026-07-03, r/LocalLLaMA launch thread):**
-- [ ] **Lazy-discovery search trace / "why this tool" observability.** Capture what a
-      `search_tools` call surfaced - the ranked candidates + their score (lexical, and
-      the semantic blend when on), which won, and the exact input schema returned to the
-      model - and surface it in Activity / the live inspector. Extends live
-      call-inspection from "what the tool returned" to "what the model saw and why it
-      picked this tool." The single most-requested thing in the launch thread
-      (CODE_HEIST), and it reinforces the audit/observability moat. (M)
+- [x] **Lazy-discovery search trace / observability.** Shipped (#114) as the Activity
+      **Discovery** panel: every `toolport_search_tools` call records the query, the
+      matched tool names, which won (top), and the ground-truth per-turn token overhead
+      (returned schemas vs. the full scoped catalog, via `savings::estimate_tokens`).
+      Local, bounded, tool-names-only (no args/results). The in-path angle is the
+      differentiator vs. post-hoc telemetry (e.g. tokentelemetry.com), which reads
+      session logs and doesn't break out MCP tool-schema overhead. Follow-ups still open:
+      per-candidate scores (lexical + semantic blend) and the exact returned input
+      schema, not just names. (M, core done)
 - [ ] **Pinned / prerequisite tools in search (`tool_prereq`).** Let a tool be marked so
       it's always returned (with its schema) regardless of match score - for tools that
       are a hard prerequisite (auth/list-before-act) or whose description doesn't match
