@@ -14,6 +14,8 @@ Reproduce it yourself: [`benchmark/`](benchmark/).
   - **flat**, every downstream tool exposed directly (`CONDUIT_DISCOVERY=full`), the normal MCP setup.
   - **lazy**, Toolport advertises 3 meta-tools (`toolport_status`, `toolport_search_tools`,
     `toolport_call_tool`) and the agent searches/calls on demand (`CONDUIT_DISCOVERY=lazy`).
+    (The current default adds a fourth, `toolport_fetch_result`, ~330 tokens more of
+    always-on overhead. It doesn't change the reduction story below.)
 - **Model:** GPT-5.5 (frontier, via the Vercel AI Gateway), so model capability is not the
   variable, both modes can actually complete every task.
 - **Tasks (5 runs each):** list Stripe products; list Neon projects; list Vercel projects
@@ -75,11 +77,12 @@ The cost is dominated by a few large servers:
 | (5 more) | ... | ... |
 
 At ~165k tokens of definitions *per request*, that catalog barely fits in most
-models' context alongside real work. At 200 agent requests/day it's roughly
-**$3,000/month** in input tokens at Claude Sonnet prices (about $5,000 at Opus),
-spent entirely on re-sending tool schemas. Toolport's meta-tools stay flat at 3 no
-matter how many servers you add, which is why the reduction *grows* with your setup
-(90% at 62 tools, 99.6% at 415).
+models' context alongside real work. On a subscription with usage caps (Claude
+Pro/Max, Cursor, and the like) you feel that directly as runway: cutting ~99% of
+always-on tool tokens is roughly that much more headroom for real work before you
+hit a limit, and prompt caching doesn't stretch a usage cap the way it discounts a
+bill. Toolport's meta-tools stay flat no matter how many servers you add, which is
+why the reduction *grows* with your setup (90% at 62 tools, 99.6% at 415).
 
 The measured average here is ~397 tokens per tool, consistent with the ~387 the
 public [calculator](https://toolport.app/calculator) uses.
