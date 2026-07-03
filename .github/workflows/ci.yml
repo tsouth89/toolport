@@ -57,6 +57,9 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
+      - name: Lint
+        run: npm run lint
+
       # Frontend type-check + build (`build` is `tsc && vite build`). Also produces
       # dist/, which tauri-build expects when compiling the Rust crate below.
       - name: Frontend type-check + build

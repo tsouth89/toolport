@@ -64,6 +64,21 @@ npm run format        # format all files in place
 npm run format:check  # check only (fails without writing — same as CI)
 ```
 
+### Linting
+
+ESLint catches code-quality issues and React anti-patterns. The CI runs it on
+every PR:
+
+```bash
+npm run lint        # check
+npm run lint:fix    # auto-fix what it can
+```
+
+Warnings are non-blocking. If you see a `react-hooks/set-state-in-effect`
+warning, it's usually the standard Tauri pattern of loading data from the Rust
+backend in a `useEffect` — review it for unnecessary re-renders, but it won't
+block the build.
+
 ### Debugging
 
 **Gateway verbose logging:** the gateway writes an always-on log (connection
