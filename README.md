@@ -348,13 +348,20 @@ latency/error stats, resources + prompts proxying, and a tool playground. See
 
 ## Toolport Teams
 
-Want one shared, governed MCP server set across your whole team? **Toolport Teams** is a
-self-hostable server: an admin defines the team's servers once, every member's Toolport
-syncs them, and each member's keys still never leave their own machine.
+Want one shared, governed MCP server set across your whole team? **Toolport Teams** lets
+an admin define the team's servers once, every member's Toolport syncs them, and each
+member's keys still never leave their own machine.
 
-- **Free for up to 4 people**: self-host with one Docker command
-  (`docker pull ghcr.io/tsouth89/conduit-teams`).
-- **$12/seat/month** beyond that; the first 4 seats stay free.
+Run it whichever way you prefer:
+
+- **Hosted:** sign in at [toolport.app/teams](https://toolport.app/teams) and invite your
+  team, no infrastructure to run.
+- **Self-hosted:** one Docker command (`docker pull ghcr.io/tsouth89/conduit-teams`).
+
+Same pricing either way:
+
+- **Free for up to 5 people** (hosted or self-hosted).
+- **$12/seat/month** beyond that; the first 5 seats stay free.
 - Central destructive-tool policy, an exportable audit trail, and per-member opt-in for
   local-command servers (a team config can never silently run code on a member's machine).
 
