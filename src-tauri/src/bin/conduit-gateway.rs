@@ -1928,6 +1928,9 @@ fn build_router(
         .collect();
 
     let mut router = Router::with_policy(policy);
+    // Per-tool exposure overrides (rename / re-describe) must be set before indexing,
+    // since they're applied as each server's tools are added.
+    router.set_overrides(reg.tool_overrides.clone());
     for handle in handles {
         if let Ok(Some(ds)) = handle.join() {
             router.add(ds);

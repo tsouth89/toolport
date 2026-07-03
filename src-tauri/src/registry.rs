@@ -117,6 +117,24 @@ pub fn sha256_hex(s: &str) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// A user override for how one tool is exposed to clients, keyed in the registry by the
+/// tool's exposed (namespaced `server__tool`) name. Lets the user rename a tool or replace
+/// its description - the latter is the security lever: locally neutralize a poisoned or
+/// injection-laden description without waiting on the upstream server. Overrides only touch
+/// the EXPOSED definition; the call still routes to the original downstream tool. (Pinning
+/// input params is a planned follow-up and not in this struct yet.)
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOverride {
+    /// A replacement client-facing name (sanitized to a valid tool name; ignored if it
+    /// would collide with another exposed tool).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A replacement description shown to the client instead of the server's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Registry {
@@ -153,6 +171,11 @@ pub struct Registry {
     /// ephemeral per-session allowlist that is NOT saved here.
     #[serde(default)]
     pub human_approval_allow: Vec<String>,
+    /// Per-tool exposure overrides, keyed by the exposed (`server__tool`) name: rename or
+    /// re-describe a tool as clients see it (e.g. neutralize a poisoned description). The
+    /// call still routes to the original downstream tool.
+    #[serde(default)]
+    pub tool_overrides: HashMap<String, ToolOverride>,
     /// Quarantine-on-drift: when true, a high-risk tool (poisoned definition, or a
     /// destructive tool whose definition changed/appeared) that drifts from its pinned
     /// baseline is hidden and blocked from every client until the user re-approves it.
@@ -287,6 +310,7 @@ impl Default for Registry {
             confirm_destructive: false,
             human_approval: false,
             human_approval_allow: Vec::new(),
+            tool_overrides: HashMap::new(),
             quarantine_on_drift: false,
             lazy_discovery: true,
             allow_agent_control: false,
@@ -495,6 +519,21 @@ impl Registry {
     /// Whether a `server/tool` key is on the persistent always-allow list.
     pub fn is_tool_allowed(&self, key: &str) -> bool {
         self.human_approval_allow.iter().any(|k| k == key)
+    }
+
+    /// Set (or replace) the exposure override for an exposed (`server__tool`) name. An
+    /// override with both fields cleared is removed rather than stored empty.
+    pub fn set_tool_override(&mut self, exposed: String, ov: ToolOverride) {
+        if ov.name.is_none() && ov.description.is_none() {
+            self.tool_overrides.remove(&exposed);
+        } else {
+            self.tool_overrides.insert(exposed, ov);
+        }
+    }
+
+    /// Remove any override for an exposed tool name (restore the server's own definition).
+    pub fn clear_tool_override(&mut self, exposed: &str) {
+        self.tool_overrides.remove(exposed);
     }
 
     /// Set lazy discovery mode (gateway exposes meta-tools vs the full catalog).

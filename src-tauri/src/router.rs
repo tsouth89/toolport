@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use crate::downstream::{
     backoff_delay, DownstreamServer, TransportError, HTTP_MAX_RETRIES, HTTP_RETRY_CAP,
 };
+use crate::registry::ToolOverride;
 
 /// The delay before a retry attempt. Prefers a server-advertised `Retry-After`,
 /// else our exponential backoff, but never longer than `HTTP_RETRY_CAP` so a
@@ -184,6 +185,10 @@ pub struct Router {
     seen: HashSet<String>,
     /// What may be exposed; applied as each server is added.
     policy: ToolPolicy,
+    /// Per-tool exposure overrides (rename / re-describe), keyed by the ORIGINAL exposed
+    /// (`server__tool`) name. Applied while indexing; the route still points at the real
+    /// downstream tool, so a rename never changes where a call goes.
+    overrides: HashMap<String, ToolOverride>,
     /// Exposed name -> why it's hidden, for a clear message if a hidden tool is
     /// still called by name (e.g. via conduit_call_tool).
     blocked: HashMap<String, String>,
@@ -226,6 +231,12 @@ impl Router {
         }
     }
 
+    /// Set the per-tool exposure overrides. Must be called BEFORE `add`/`refresh`, since
+    /// they're applied while indexing each server's tools.
+    pub fn set_overrides(&mut self, overrides: HashMap<String, ToolOverride>) {
+        self.overrides = overrides;
+    }
+
     /// Index one server's advertised tools/resources/prompts into the exposed
     /// aggregation (names, routes, policy). Shared by `add` (a new server) and
     /// `rebuild_aggregation` (after a refresh); the call order is the exposed-name
@@ -249,6 +260,29 @@ impl Router {
                 continue;
             }
             let mut t = tool.clone();
+            // Apply the user's exposure override (keyed by the ORIGINAL exposed name).
+            // Cloned to owned so we don't hold a borrow of `self.overrides` across the
+            // `self.seen` mutation below.
+            let ov_name = self.overrides.get(&exposed).and_then(|o| o.name.clone());
+            let ov_desc = self.overrides.get(&exposed).and_then(|o| o.description.clone());
+            // Rename changes ONLY the client-facing name; the route below still points at
+            // the real downstream tool, so a call never goes anywhere new. A rename that is
+            // empty or would collide with an existing exposed name is ignored (keep the
+            // original) so routing stays unambiguous.
+            let exposed = match ov_name {
+                Some(new) => {
+                    let cand = sanitize_segment(&new);
+                    if !cand.is_empty() && self.seen.insert(cand.clone()) {
+                        cand
+                    } else {
+                        exposed
+                    }
+                }
+                None => exposed,
+            };
+            if let Some(desc) = ov_desc {
+                t["description"] = json!(desc);
+            }
             t["name"] = json!(exposed);
             if let Some(schema) = t.get_mut("inputSchema") {
                 inline_refs(schema);
@@ -647,6 +681,60 @@ mod tests {
         let result = router.route_call("postgres__add", json!({ "a": 1 })).unwrap();
         let text = result["content"][0]["text"].as_str().unwrap();
         assert_eq!(text, "postgres:add");
+    }
+
+    #[test]
+    fn tool_overrides_rename_and_redescribe() {
+        let mut router = Router::new();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "srv__echo".to_string(),
+            ToolOverride { name: Some("say".into()), description: Some("say it back".into()) },
+        );
+        overrides.insert(
+            "srv__add".to_string(),
+            ToolOverride { name: None, description: Some("cleaned".into()) },
+        );
+        router.set_overrides(overrides);
+        router.add(mock_server("srv"));
+
+        let tools = router.aggregated_tools();
+        let by_name: HashMap<&str, &Value> =
+            tools.iter().map(|t| (t["name"].as_str().unwrap(), t)).collect();
+
+        // echo is renamed to "say" (its original exposed name is gone) and re-described.
+        assert!(by_name.contains_key("say"));
+        assert!(!by_name.contains_key("srv__echo"));
+        assert_eq!(by_name["say"]["description"], "say it back");
+        // add keeps its name, description replaced (the poisoned-desc neutralize case).
+        assert_eq!(by_name["srv__add"]["description"], "cleaned");
+
+        // The renamed tool STILL routes to the original downstream tool (echo).
+        let out = router.route_call("say", json!({})).unwrap();
+        assert_eq!(out["content"][0]["text"], "srv:echo");
+        let out = router.route_call("srv__add", json!({})).unwrap();
+        assert_eq!(out["content"][0]["text"], "srv:add");
+    }
+
+    #[test]
+    fn rename_to_an_already_taken_name_is_ignored() {
+        // add is indexed after echo, so renaming add -> "srv__echo" (already taken) must
+        // fall back to add's original name, keeping routing unambiguous.
+        let mut router = Router::new();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "srv__add".to_string(),
+            ToolOverride { name: Some("srv__echo".into()), description: None },
+        );
+        router.set_overrides(overrides);
+        router.add(mock_server("srv"));
+
+        let tools = router.aggregated_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"srv__echo"), "the real echo keeps the name");
+        assert!(names.contains(&"srv__add"), "add fell back to its own name");
+        assert_eq!(router.route_call("srv__echo", json!({})).unwrap()["content"][0]["text"], "srv:echo");
+        assert_eq!(router.route_call("srv__add", json!({})).unwrap()["content"][0]["text"], "srv:add");
     }
 
     #[test]

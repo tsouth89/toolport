@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2,
+  ChevronRight,
   FileText,
   FlaskConical,
   Loader2,
   MessageSquare,
+  Pencil,
   Play,
   ShieldAlert,
   XCircle,
@@ -12,12 +14,14 @@ import {
 import { toastError } from "@/lib/toast";
 import {
   callTool,
+  clearToolOverride,
   getPrompt,
   listServerPrompts,
   listServerResources,
   listServerTools,
   readResource,
   setToolEnabled,
+  setToolOverride,
 } from "@/lib/api";
 import type {
   JsonSchemaProp,
@@ -45,6 +49,137 @@ import {
 /** A tool is destructive if it carries the MCP `destructiveHint` annotation. */
 function isDestructive(tool: McpTool): boolean {
   return tool.annotations?.destructiveHint === true || tool.destructiveHint === true;
+}
+
+/** Mirror of the gateway's `sanitize_segment`: keep [A-Za-z0-9_], everything else -> `_`. */
+function sanitizeSegment(s: string): string {
+  return s.replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+/** The exposed (client-facing) name for a tool, matching the gateway's namespacing. This
+ * is the key the registry stores tool overrides under. */
+function exposedName(serverId: string, tool: string): string {
+  return `${sanitizeSegment(serverId)}__${sanitizeSegment(tool)}`;
+}
+
+/** Editor to rename / re-describe a tool as clients see it (the security lever: locally
+ * neutralize a misleading or injection-laden description). Collapsed by default; the call
+ * still routes to the original downstream tool. */
+function ToolOverrideEditor({
+  serverId,
+  tool,
+  registry,
+  onRegistryChange,
+}: {
+  serverId: string;
+  tool: McpTool;
+  registry: Registry | null;
+  onRegistryChange: (r: Registry) => void;
+}) {
+  const exposed = exposedName(serverId, tool.name);
+  const current = registry?.toolOverrides?.[exposed];
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // Re-sync the fields (and collapse) whenever the selected tool changes.
+  useEffect(() => {
+    setName(current?.name ?? "");
+    setDescription(current?.description ?? "");
+    setOpen(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exposed]);
+
+  const hasOverride = !!current;
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      onRegistryChange(await setToolOverride(exposed, name || null, description || null));
+    } catch (e) {
+      toastError(`Couldn't save override: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const reset = async () => {
+    setBusy(true);
+    try {
+      onRegistryChange(await clearToolOverride(exposed));
+      setName("");
+      setDescription("");
+    } catch (e) {
+      toastError(`Couldn't clear override: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-border/60 bg-muted/20">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-3 py-2 text-xs text-muted-foreground"
+      >
+        <Pencil className="size-3.5 shrink-0" />
+        <span className="font-medium text-foreground/80">Override how clients see this tool</span>
+        {hasOverride && (
+          <span className="rounded-full bg-info/15 px-1.5 py-0.5 text-[10px] font-medium text-info">
+            active
+          </span>
+        )}
+        <ChevronRight
+          className={`ml-auto size-3.5 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+      </button>
+      {open && (
+        <div className="flex flex-col gap-2.5 border-t border-border/60 px-3 py-3">
+          <p className="text-xs text-muted-foreground">
+            Rename the tool or replace its description as every client sees it, e.g. to
+            neutralize a misleading or injection-laden description. The call still runs the
+            original server tool.
+          </p>
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="text-muted-foreground">
+              Name{" "}
+              <span className="text-muted-foreground/60">
+                (blank keeps <span className="font-mono">{exposed}</span>)
+              </span>
+            </span>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={exposed}
+              className="rounded-md border border-input bg-transparent px-2.5 py-1.5 font-mono text-xs shadow-sm focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="text-muted-foreground">Description (blank keeps the server's)</span>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={3}
+              placeholder={tool.description ?? "(server's description)"}
+              className="rounded-md border border-input bg-transparent px-2.5 py-1.5 text-xs shadow-sm focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+            />
+          </label>
+          <div className="flex gap-2">
+            <Button size="sm" onClick={() => void save()} disabled={busy}>
+              Save override
+            </Button>
+            {hasOverride && (
+              <Button size="sm" variant="outline" onClick={() => void reset()} disabled={busy}>
+                Reset to original
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** First declared type of a JSON-schema property (schemas may list several). */
@@ -712,6 +847,15 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
               <ShieldAlert className="size-3.5" />
               Hidden from clients by policy. You can still test it here.
             </p>
+          )}
+
+          {serverId && (
+            <ToolOverrideEditor
+              serverId={serverId}
+              tool={tool}
+              registry={registry}
+              onRegistryChange={onRegistryChange}
+            />
           )}
 
           <div className="flex items-center justify-between">
