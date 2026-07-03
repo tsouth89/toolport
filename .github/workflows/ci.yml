@@ -57,8 +57,9 @@ jobs:
       - name: Frontend type-check + build
         run: npm run build
 
-      # The 100+ Rust unit tests, then confirm the standalone gateway binary compiles.
-      - name: Rust lib tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
-      - name: Gateway binary compiles
-        run: cargo check --manifest-path src-tauri/Cargo.toml --bin conduit-gateway
+      # The Rust unit tests: the library AND the standalone gateway binary's own
+      # tests (dispatch, scoping, HITL, HTTP). `--bins` runs the binary targets'
+      # tests too; checking only that the binary compiled let a gateway test fail
+      # silently, so run them.
+      - name: Rust tests (lib + binaries)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --bins

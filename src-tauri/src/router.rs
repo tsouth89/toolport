@@ -171,7 +171,11 @@ struct ServerSlot {
     inner: Mutex<DownstreamServer>,
 }
 
-#[derive(Default)]
+/// Cloneable so the dispatcher can hold the live router as a `Mutex<Arc<Router>>`,
+/// clone the `Arc` for a request, and release the lock BEFORE the (possibly
+/// long-blocking) downstream call or human-approval hold. Cloning shares the
+/// `Arc<ServerSlot>` connections, so it never re-spawns a server.
+#[derive(Default, Clone)]
 pub struct Router {
     servers: Vec<Arc<ServerSlot>>,
     /// Server id -> index into `servers`, so a call resolves its server without a
@@ -201,27 +205,11 @@ pub struct Router {
     prompts: Vec<Value>,
     /// Exposed prompt name -> (server id, original prompt name).
     prompt_routes: HashMap<String, (String, String)>,
-    /// The client whose request is currently being dispatched (a registered HTTP
-    /// client's label), set per-request by the dispatcher while it holds the router
-    /// lock, so the audit log can attribute each call to who made it. `None` for the
-    /// local stdio client and legacy/open tokens (unattributed).
-    current_client: Option<String>,
 }
 
 impl Router {
     pub fn new() -> Self {
         Router::default()
-    }
-
-    /// Set (or clear) the client attributed to the request about to be dispatched.
-    /// Called under the router lock, so it can't race across concurrent requests.
-    pub fn set_current_client(&mut self, client: Option<&str>) {
-        self.current_client = client.map(str::to_string);
-    }
-
-    /// The client attributed to the in-flight request, for audit attribution.
-    pub fn current_client(&self) -> Option<&str> {
-        self.current_client.as_deref()
     }
 
     /// A router that enforces `policy` as servers are added.

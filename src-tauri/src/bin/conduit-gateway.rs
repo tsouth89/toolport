@@ -1256,16 +1256,21 @@ fn request_human_decision(mut req: approval::ApprovalRequest) -> approval::Appro
     decide_via_broker(desc, &mut req)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_request(
     req: &Value,
     reg: &Registry,
-    router: &mut Router,
+    router: &Router,
     cached: &[Value],
     lazy: bool,
     profile: Option<&str>,
     guard: &mut SearchGuard,
     confirm: &mut ConfirmGuard,
     allowed: Option<&std::collections::HashSet<String>>,
+    // The client this request is attributed to (a registered HTTP client's audit
+    // label), threaded in rather than stored on the shared router so concurrent
+    // requests can't cross-contaminate and dispatch needn't hold the router lock.
+    client: Option<&str>,
 ) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -1684,7 +1689,7 @@ fn handle_request(
                     let decision = request_human_decision(approval::ApprovalRequest {
                         token: String::new(),
                         id: new_correlation_id(),
-                        client: router.current_client().map(str::to_string),
+                        client: client.map(str::to_string),
                         server: srv.to_string(),
                         tool: tool.to_string(),
                         reason,
@@ -1696,7 +1701,7 @@ fn handle_request(
                         } else {
                             "was not approved in time (the Toolport app may be closed)"
                         };
-                        audit::record_held(srv, tool, router.current_client());
+                        audit::record_held(srv, tool, client);
                         return Some(success(
                             id,
                             json!({
@@ -1747,7 +1752,7 @@ fn handle_request(
                     );
                     // Held for confirmation, not a failure: record as held (ok), so the
                     // confirm-destructive feature doesn't inflate the error rate.
-                    audit::record_held(srv, tool, router.current_client());
+                    audit::record_held(srv, tool, client);
                     return Some(success(
                         id,
                         json!({
@@ -1782,14 +1787,14 @@ fn handle_request(
                     } else {
                         Some(content_text(&result))
                     };
-                    audit::record_timed(srv, tool, ok, Some(ms), err.as_deref(), router.current_client());
+                    audit::record_timed(srv, tool, ok, Some(ms), err.as_deref(), client);
                     // Live inspection: capture the RAW result here, before content
                     // defense and shaping rewrite it, so the inspector shows exactly
                     // what the server returned. Only runs when live_inspect is on
                     // (inspect_args is Some only then). Attributed to the same client
                     // as the audit line.
                     if let Some(req) = &inspect_args {
-                        inspect::record(router.current_client(), srv, tool, req, &result, ok, ms);
+                        inspect::record(client, srv, tool, req, &result, ok, ms);
                     }
                     // Content defense: scan this untrusted tool output for injection
                     // and label any flagged text as data before it reaches the agent.
@@ -1823,11 +1828,11 @@ fn handle_request(
                 }
                 Err(e) => {
                     let ms = started.elapsed().as_millis() as u64;
-                    audit::record_timed(srv, tool, false, Some(ms), Some(&e), router.current_client());
+                    audit::record_timed(srv, tool, false, Some(ms), Some(&e), client);
                     // Live inspection: capture the failed call too, with the error
                     // as the response body. Only when live_inspect is on.
                     if let Some(req) = &inspect_args {
-                        inspect::record(router.current_client(), srv, tool, req, &json!({ "error": e }), false, ms);
+                        inspect::record(client, srv, tool, req, &json!({ "error": e }), false, ms);
                     }
                     let recovery = recovery_hint(cached, srv);
                     Some(success(
@@ -2074,14 +2079,18 @@ fn maybe_check_integrity(
 /// (not one rebuild later) and return the re-filtered catalog. Otherwise unchanged.
 fn requarantine_if_needed(
     registry: &Arc<Mutex<Registry>>,
-    router: &Arc<Mutex<Router>>,
+    router: &Arc<Mutex<Arc<Router>>>,
     tools: Vec<Value>,
     profile: Option<&str>,
 ) -> Vec<Value> {
     if maybe_check_integrity(registry, &tools, profile) {
-        let mut r = router
+        let mut guard = router
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // make_mut clones the Router (sharing its Arc<ServerSlot> connections) only if
+        // an in-flight request still holds the old Arc, then re-filters in place and
+        // publishes the result; the old snapshot keeps serving until that request ends.
+        let r = Arc::make_mut(&mut guard);
         r.requarantine(integrity::quarantined(profile));
         r.aggregated_tools()
     } else {
@@ -2207,7 +2216,7 @@ fn save_tool_cache(tools: &[Value], profile: Option<&str>) {
 fn watch_registry(
     path: PathBuf,
     registry: Arc<Mutex<Registry>>,
-    router: Arc<Mutex<Router>>,
+    router: Arc<Mutex<Arc<Router>>>,
     stdout: Arc<Mutex<std::io::Stdout>>,
     cached_tools: Arc<Mutex<Vec<Value>>>,
     profile: Option<String>,
@@ -2252,7 +2261,7 @@ fn watch_registry(
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = new_reg;
             *router
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = new_router;
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(new_router);
             let tools = requarantine_if_needed(&registry, &router, tools, profile.as_deref());
             persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
             eprintln!("conduit: registry changed, sent tools/list_changed");
@@ -2262,9 +2271,12 @@ fn watch_registry(
             // session-scoped change (the usual reason a server sends this) would
             // be lost by a fresh process that never saw it.
             let tools = {
-                let mut r = router
+                let mut guard = router
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Re-query in place on the published router (make_mut forks it only if a
+                // request still holds the prior Arc), keeping live connections.
+                let r = Arc::make_mut(&mut guard);
                 r.refresh_tools();
                 r.aggregated_tools()
             };
@@ -2289,7 +2301,11 @@ fn watch_registry(
 #[derive(Clone)]
 struct GatewayState {
     registry: Arc<Mutex<Registry>>,
-    router: Arc<Mutex<Router>>,
+    // The live router behind a swappable Arc: dispatch clones the Arc and releases the
+    // lock before the (possibly long) downstream call / approval hold, so nothing blocks
+    // behind an in-flight request. Rebuilds swap in a new Arc; refresh/requarantine fork
+    // via Arc::make_mut.
+    router: Arc<Mutex<Arc<Router>>>,
     cached_tools: Arc<Mutex<Vec<Value>>>,
     stdout: Arc<Mutex<std::io::Stdout>>,
     ready: Arc<AtomicBool>,
@@ -2357,7 +2373,7 @@ fn process_request(
             *state
                 .router
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = built;
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(built);
             if !tools.is_empty() {
                 *state
                     .cached_tools
@@ -2378,6 +2394,13 @@ fn process_request(
         }
     }
 
+    // Snapshot everything the dispatch needs, then RELEASE all three locks before
+    // calling handle_request: a tools/call can block on the downstream server or a
+    // human-approval hold (up to 120s), and holding the router/registry lock across
+    // that would wedge config reloads, setting toggles, and every other request. The
+    // cloned Arc<Router> keeps this call on a consistent catalog even if a concurrent
+    // rebuild swaps the live one; the client label is threaded in, not stored on the
+    // shared router.
     let cache_snapshot = state
         .cached_tools
         .lock()
@@ -2386,24 +2409,24 @@ fn process_request(
     let reg = state
         .registry
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut r = state
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let router = state
         .router
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Attribute this request to its client (set under the router lock, so concurrent
-    // HTTP requests can't cross-contaminate) for the audit log.
-    r.set_current_client(client);
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     handle_request(
         req,
         &reg,
-        &mut r,
+        &router,
         &cache_snapshot,
         state.lazy,
         state.profile.as_deref(),
         guard,
         confirm,
         allowed,
+        client,
     )
 }
 
@@ -3034,7 +3057,7 @@ fn main() {
     // LOCK ORDER: when both are held, always lock `registry` before `router`. The
     // request loop, the watcher, and the self-heal path all follow this, so there's
     // no deadlock; keep new code consistent with it.
-    let router = Arc::new(Mutex::new(Router::new()));
+    let router = Arc::new(Mutex::new(Arc::new(Router::new())));
     let cached_tools = Arc::new(Mutex::new(load_tool_cache(profile.as_deref())));
     let stdout = Arc::new(Mutex::new(std::io::stdout()));
     let ready = Arc::new(AtomicBool::new(false));
@@ -3072,7 +3095,7 @@ fn main() {
             ));
             *router
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = built;
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(built);
             // Don't let a transient empty build (registry caught mid-write, or
             // every downstream momentarily unreachable) clobber a good catalog -
             // that's what leaves a client showing only toolport_status.
@@ -3200,10 +3223,53 @@ mod tests {
         Router::new()
     }
 
+    /// A minimal in-memory downstream used to build a *routed* router in tests, so
+    /// paths that resolve a call's server via `route_of` (the scope guard, the HITL
+    /// untrusted-provenance check) see real routes instead of an empty map.
+    struct MockRoute {
+        tools: Vec<Value>,
+    }
+    impl conduit_lib::downstream::Transport for MockRoute {
+        fn request(
+            &mut self,
+            method: &str,
+            _params: Value,
+        ) -> Result<Value, conduit_lib::downstream::TransportError> {
+            match method {
+                "initialize" => Ok(json!({ "protocolVersion": "2025-06-18" })),
+                "tools/list" => Ok(json!({ "tools": self.tools })),
+                other => Err(conduit_lib::downstream::TransportError::Fatal(format!(
+                    "unexpected {other}"
+                ))),
+            }
+        }
+        fn notify(
+            &mut self,
+            _method: &str,
+            _params: Value,
+        ) -> Result<(), conduit_lib::downstream::TransportError> {
+            Ok(())
+        }
+    }
+
+    /// A router with one server `id` exposing one tool `tool` (so `id__tool` routes).
+    fn routed_router(id: &str, tool: &str) -> Router {
+        let ds = DownstreamServer::connect(
+            id.to_string(),
+            Box::new(MockRoute {
+                tools: vec![json!({ "name": tool, "description": "" })],
+            }),
+        )
+        .unwrap();
+        let mut r = Router::new();
+        r.add(ds);
+        r
+    }
+
     fn http_state(lazy: bool) -> GatewayState {
         GatewayState {
             registry: Arc::new(Mutex::new(Registry::default())),
-            router: Arc::new(Mutex::new(Router::new())),
+            router: Arc::new(Mutex::new(Arc::new(Router::new()))),
             cached_tools: Arc::new(Mutex::new(Vec::new())),
             stdout: Arc::new(Mutex::new(std::io::stdout())),
             ready: Arc::new(AtomicBool::new(true)),
@@ -3470,13 +3536,14 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
             Some(&allowed),
+            None,
         )
         .unwrap();
         let result = resp.get("result").unwrap();
@@ -3498,13 +3565,16 @@ mod tests {
         let resp_ok = handle_request(
             &req_ok,
             &reg,
-            &mut router(),
+            // A routed router so `vercel__deploy` resolves to server `vercel` (in scope)
+            // via route_of, rather than an empty map that would mis-refuse it.
+            &routed_router("vercel", "deploy"),
             &catalog(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
             Some(&allowed),
+            None,
         )
         .unwrap();
         let text_ok = resp_ok
@@ -3626,12 +3696,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &[],
             false,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -3647,13 +3718,14 @@ mod tests {
         assert!(handle_request(
             &note,
             &reg,
-            &mut router(),
+            &router(),
             &[],
             false,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
-            None
+            None,
+            None,
         )
         .is_none());
     }
@@ -3665,12 +3737,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &[],
             false,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -3709,12 +3782,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &[],
             false,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -3730,12 +3804,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &[],
             false,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -3758,12 +3833,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -3815,12 +3891,13 @@ mod tests {
                     "params": { "name": nm, "arguments": { "query": "email" } }
                 }),
                 &reg,
-                &mut router(),
+                &router(),
                 &catalog(),
                 true,
                 None,
                 &mut SearchGuard::default(),
                 &mut ConfirmGuard::new(),
+                None,
                 None,
             )
             .unwrap()
@@ -3929,12 +4006,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -3965,12 +4043,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -3993,12 +4072,13 @@ mod tests {
         let resp = handle_request(
             &search_req(query),
             reg,
-            &mut router(),
+            &router(),
             &catalog(),
             true,
             None,
             guard,
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -4035,12 +4115,13 @@ mod tests {
         handle_request(
             &status,
             &reg,
-            &mut router(),
+            &router(),
             &catalog(),
             true,
             None,
             &mut guard,
             &mut ConfirmGuard::new(),
+            None,
             None,
         );
         let text = search_text(&reg, &mut guard, "charges");
@@ -4233,12 +4314,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog_with_destructive(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -4263,12 +4345,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog_with_destructive(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -4291,12 +4374,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog_with_destructive(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -4326,12 +4410,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog_with_destructive(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -4353,12 +4438,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog_with_destructive(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -4380,12 +4466,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog_with_destructive(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -4403,12 +4490,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog_with_destructive(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -4431,12 +4519,13 @@ mod tests {
         let resp = handle_request(
             &req,
             &reg,
-            &mut router(),
+            &router(),
             &catalog_with_destructive(),
             true,
             None,
             &mut SearchGuard::default(),
             &mut ConfirmGuard::new(),
+            None,
             None,
         )
         .unwrap();
@@ -4500,12 +4589,13 @@ mod tests {
         let resp1 = handle_request(
             &req1,
             &reg,
-            &mut router(),
+            &router(),
             &cat,
             true,
             None,
             &mut SearchGuard::default(),
             &mut confirm,
+            None,
             None,
         )
         .unwrap();
@@ -4525,12 +4615,13 @@ mod tests {
         let resp2 = handle_request(
             &req2,
             &reg,
-            &mut router(),
+            &router(),
             &cat,
             true,
             None,
             &mut SearchGuard::default(),
             &mut confirm,
+            None,
             None,
         )
         .unwrap();
