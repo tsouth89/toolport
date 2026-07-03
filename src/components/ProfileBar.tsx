@@ -104,7 +104,7 @@ export function ProfileBar({ registry, onChange }: Props) {
               <Trash2 className="size-4" />
             </Button>
           }
-          title="Delete this profile?"
+          title={`Delete "${registry.profiles.find((p) => p.id === activeId)?.name ?? "this profile"}"?`}
           description="This removes the profile and its server scoping. Your servers and their secrets are not deleted."
           confirmLabel="Delete"
           destructive
