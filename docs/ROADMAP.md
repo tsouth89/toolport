@@ -42,10 +42,19 @@ a per-caller Activity filter is still open). A 2026-07-03 code audit (Teams serv
 desktop app) also drove a **security hardening pass**: HTTP clients are now scoped on
 `resources`/`prompts` too, three tool-poisoning detection gaps closed (outputSchema
 scan, structuredContent co-occurrence, quarantine fail-closed), and gateway
-durability/auth hardening (fsync, empty-bearer, constant-time token). Remaining audit
-items — content-defense DoS byte-cap, HITL/confirm stale-cache gating, Teams session
-reaping + logout revoke, billing webhook event-dedup, seat-count race, secret-strip
-precision — are the live backlog (Teams items tracked in that repo's PRs).
+durability/auth hardening (fsync, empty-bearer, constant-time token). Follow-ups since
+then also landed: the **content-defense DoS byte-cap** (512KB scan bound, #110), the
+**HITL/confirm fail-closed** resolution on a cache miss (#109), a **canonical
+`fmtTokens`** (#111), and, on the Teams server, the full robustness batch — logout
+session revoke, CSV-injection guard, secret-strip precision, Google/GitHub email
+verification, `billing_success` owner-gate + webhook refetch, magic-link rate limit,
+and hourly auth-row reaping (Teams #15-21, all deployed). Still open: the **seat-count
+race** (atomic fix in Teams PR #22, awaiting review) and one deferred desktop item —
+the **registry cross-process cache-coherence** problem (the app persists its in-memory
+`Mutex<Registry>` while the gateway does its own disk load→mutate→save on agent-control
+toggles, so the two can clobber each other; a file lock alone won't fix it, the correct
+fix is reload-under-lock at every app mutation or a gateway→app cache-refresh signal;
+low real exposure since the gateway only writes when `allow_agent_control` is on).
 
 **In flight**
 - ~~Teams **org screening policy** (Phase 1): tighten-only `forceContentDefense` /
