@@ -2829,7 +2829,12 @@ const MAX_HTTP_INFLIGHT: usize = 256;
 /// Parse a `Bearer <token>` Authorization value. Pure, so it's unit-testable.
 fn parse_bearer(auth_value: &str) -> Option<&str> {
     let (scheme, tok) = auth_value.split_once(' ')?;
-    scheme.eq_ignore_ascii_case("bearer").then(|| tok.trim())
+    // Reject an empty token (`Bearer ` with only whitespace): returning Some("") would
+    // otherwise be looked up as a real bearer, a fail-open shape.
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| tok.trim())
+        .filter(|t| !t.is_empty())
 }
 
 /// Strip control characters and bound the length of a header value we reflect
@@ -3862,6 +3867,9 @@ mod tests {
         assert_eq!(parse_bearer("Basic abc"), None);
         assert_eq!(parse_bearer("abc"), None);
         assert_eq!(parse_bearer(""), None);
+        // An empty/whitespace-only token must be rejected, not returned as Some("").
+        assert_eq!(parse_bearer("Bearer "), None);
+        assert_eq!(parse_bearer("Bearer    "), None);
     }
 
     #[test]

@@ -36,11 +36,28 @@ pub fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
         std::process::id(),
         seq
     ));
-    std::fs::write(&tmp, contents).map_err(|e| e.to_string())?;
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        f.write_all(contents.as_bytes()).map_err(|e| e.to_string())?;
+        // Flush the data to stable storage BEFORE the rename, so a crash/power loss
+        // can't make the rename durable while the file's blocks aren't — which would
+        // leave a truncated registry.json. `fs::write` + `rename` alone did not.
+        f.sync_all().map_err(|e| e.to_string())?;
+    }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         e.to_string()
-    })
+    })?;
+    // Best-effort: fsync the containing directory so the rename entry itself is durable
+    // (Unix). Opening a directory as a File fails on Windows, where NTFS journals the
+    // rename anyway, so the error is ignored.
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
 }
 const DEFAULT_PROFILE_ID: &str = "default";
 
@@ -115,6 +132,21 @@ pub fn sha256_hex(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
     format!("{:x}", h.finalize())
+}
+
+/// Constant-time byte equality, so a token-hash comparison can't leak the stored
+/// hash prefix through early-exit timing (consistent with the gateway's other token
+/// checks). A length mismatch short-circuits; length isn't secret for a fixed-width hash.
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// A user override for how one tool is exposed to clients, keyed in the registry by the
@@ -674,7 +706,7 @@ impl Registry {
     /// SHA-256, if any. The bridge uses this to resolve a bearer to its scope.
     pub fn http_client_for_token(&self, token: &str) -> Option<&HttpClient> {
         let h = sha256_hex(token);
-        self.http_clients.iter().find(|c| c.token_sha256 == h)
+        self.http_clients.iter().find(|c| ct_eq(&c.token_sha256, &h))
     }
 }
 
