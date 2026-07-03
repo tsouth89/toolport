@@ -14,6 +14,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { fmtTokens } from "@/lib/utils";
 import { toastError } from "@/lib/toast";
 import {
   getAuditLog,
@@ -45,13 +46,6 @@ import {
 function fmtMs(ms: number | null): string {
   if (ms == null) return "-";
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${ms} ms`;
-}
-
-/** Compact token count: "1.84M", "23.4k", or the raw number when small. */
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return `${n}`;
 }
 
 /** Models for the dollar estimate, input-token list prices ($/1M), grouped by

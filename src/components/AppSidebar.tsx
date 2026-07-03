@@ -30,6 +30,7 @@ import {
   type View,
 } from "@/lib/types";
 import { gatherDiagnostics, getSavingsSummary, openDataDir } from "@/lib/api";
+import { fmtTokens } from "@/lib/utils";
 import { checkForUpdate, installUpdate } from "@/lib/updater";
 import { Button } from "@/components/ui/button";
 import {
@@ -420,12 +421,6 @@ export function AppSidebar({
       clearInterval(id);
     };
   }, []);
-  const fmtTokens = (n: number) =>
-    n >= 1_000_000
-      ? `${(n / 1_000_000).toFixed(1)}M`
-      : n >= 1_000
-        ? `${Math.round(n / 1_000)}K`
-        : `${n}`;
 
   // One sidebar nav row. The active row gets the accent background, a foreground
   // icon (not muted), and aria-current so screen readers announce the selection.
