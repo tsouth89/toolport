@@ -7,6 +7,16 @@ Entries before the rename below shipped under the project's former name, Conduit
 ## [Unreleased]
 
 ### Security
+- **Closed several bypasses in the stdio spawn guard** (the supply-chain check that
+  refuses code-smuggling launch args on a spawned server). An adversarial review found
+  a booby-trapped (team- or registry-sourced) config could still reach code execution
+  through: a wrapper command (`env`/`sudo`/`time`/... run the real program from their
+  args), Deno's `eval` / `run <remote-url>` subcommands, several unlisted interpreters
+  (`osascript`, `elixir`, `lua`, `Rscript`, `julia`, ...) and `cmd /c` on Windows, an
+  attached `node -r./x` preload, and code-injecting env vars in the config
+  (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `BASH_ENV`, `PERL5OPT`, `RUBYOPT`, and
+  preload/eval options inside `NODE_OPTIONS`). The guard now refuses all of these while
+  still allowing the normal launchers (npx/node/python/docker, benign env vars).
 - **Agent-control enable/disable now respects the client's scope.** In HTTP mode a
   registered client could call `toolport_enable_server` / `toolport_disable_server` on
   a server outside its allowed set (toggling another tenant's server), and a "no server

