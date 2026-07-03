@@ -105,9 +105,38 @@ struct AsMeta {
 /// come from a fetched (and attacker-influenceable) metadata document, so a slow or
 /// black-holed host must not hang the worker indefinitely behind a spinner that
 /// never resolves. Bare `ureq::get/post` have no timeout; this does.
+/// Refuse link-local / cloud-metadata addresses (169.254.169.254, the AWS ULA
+/// `fd00:ec2::254`, IPv4-mapped forms). Fail-closed if ANY resolved address is one, so a
+/// DNS answer mixing a public and a metadata IP can't sneak the metadata one through.
+/// Private/loopback are allowed - a self-hosted MCP auth server on the LAN is legitimate.
+fn screen_addrs(addrs: &[std::net::SocketAddr]) -> std::io::Result<()> {
+    for sa in addrs {
+        if ip_is_link_local(&sa.ip()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("OAuth SSRF guard: refusing link-local / cloud-metadata address {}", sa.ip()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A DNS resolver that screens every resolved address (see [`screen_addrs`]). Installed on
+/// the OAuth agents so the check runs INSIDE ureq's resolver - covering the initial connect
+/// AND any redirect target, and closing the resolve-then-connect (DNS-rebind) window that a
+/// separate pre-check has. The OAuth endpoints come from an attacker-influenceable metadata
+/// document, so this is the load-bearing SSRF guard.
+fn screened_resolve(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
+    screen_addrs(&addrs)?;
+    Ok(addrs)
+}
+
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(30))
+        .resolver(screened_resolve)
         .build()
 }
 
@@ -115,11 +144,13 @@ fn agent() -> ureq::Agent {
 /// POSTs (DCR, token exchange, refresh): a hostile authorization-server metadata
 /// document could otherwise 302 the token POST to a host it controls and capture the
 /// auth code or refresh token. Metadata discovery (a read-only GET) keeps following
-/// redirects so providers that redirect their `.well-known` still resolve.
+/// redirects so providers that redirect their `.well-known` still resolve; both agents
+/// screen resolved addresses so a redirect or rebind to cloud metadata is refused.
 fn agent_no_redirect() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(30))
         .redirects(0)
+        .resolver(screened_resolve)
         .build()
 }
 
@@ -709,6 +740,21 @@ pub fn authenticate(mcp_url: &str) -> Result<AuthResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_addrs_refuses_link_local_and_metadata() {
+        use std::net::SocketAddr;
+        let p = |s: &str| s.parse::<SocketAddr>().unwrap();
+        // AWS/GCP/Azure IPv4 metadata, AWS IPv6 ULA metadata, and the IPv4-mapped form.
+        for bad in ["169.254.169.254:80", "[fd00:ec2::254]:80", "[::ffff:169.254.169.254]:80"] {
+            assert!(screen_addrs(&[p(bad)]).is_err(), "must refuse {bad}");
+        }
+        // A public address is allowed; a private/loopback one is allowed (self-hosted AS).
+        assert!(screen_addrs(&[p("140.82.112.3:443")]).is_ok());
+        assert!(screen_addrs(&[p("127.0.0.1:8080")]).is_ok());
+        // Fail-closed: a mixed public+metadata answer is refused whole.
+        assert!(screen_addrs(&[p("8.8.8.8:443"), p("169.254.169.254:80")]).is_err());
+    }
 
     #[test]
     fn pkce_challenge_matches_rfc_vector() {
