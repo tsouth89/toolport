@@ -31,10 +31,26 @@ moats (zero-infra local-first + tool-supply-chain security) and reaching parity 
 a few governance/observability items other gateways have. (Detailed competitive
 notes live in the internal `docs/COMPETITIVE.md`.)
 
+**Shipped since (2026-07-03 update)** — several items below have landed and should be
+read as done: the **human-in-the-loop approval queue** (+ tray/menu-bar background
+run, OS notification, exact fail-closed countdown, and an org-mandated
+`forceHumanApproval` policy), the **multithreaded HTTP loop + released router lock**
+(supersedes "single-threaded accept loop" and "router lock held across the downstream
+call" below), **tool overrides** (rename / re-describe), the **DNS-rebind TOCTOU** and
+**IPv6 cloud-metadata** SSRF guards, and **audit-line client attribution** (the stamp;
+a per-caller Activity filter is still open). A 2026-07-03 code audit (Teams server +
+desktop app) also drove a **security hardening pass**: HTTP clients are now scoped on
+`resources`/`prompts` too, three tool-poisoning detection gaps closed (outputSchema
+scan, structuredContent co-occurrence, quarantine fail-closed), and gateway
+durability/auth hardening (fsync, empty-bearer, constant-time token). Remaining audit
+items — content-defense DoS byte-cap, HITL/confirm stale-cache gating, Teams session
+reaping + logout revoke, billing webhook event-dedup, seat-count race, secret-strip
+precision — are the live backlog (Teams items tracked in that repo's PRs).
+
 **In flight**
-- Teams **org screening policy** (security-governance Phase 1): tighten-only
-  `forceContentDefense` / `forceQuarantineOnDrift` pushed from the org config.
-  Plan in `docs/drafts/parry-teams-plan.md`.
+- ~~Teams **org screening policy** (Phase 1): tighten-only `forceContentDefense` /
+  `forceQuarantineOnDrift`.~~ **Shipped**, and extended with `forceHumanApproval`
+  (org-mandated HITL). Plan in `docs/drafts/parry-teams-plan.md`.
 
 **Tier 1 - security + cheap parity (do first)**
 - [x] **Stdio spawn hardening.** Refuse code-smuggling / container-escape args
@@ -43,13 +59,12 @@ notes live in the internal `docs/COMPETITIVE.md`.)
       booby-trapped (team- or registry-sourced) config can't turn a benign-looking
       launcher into arbitrary code execution. `screen_spawn_command` in
       `downstream.rs`, on every spawn path. (S)
-- [ ] **Identity attribution in the audit line.** The gateway already resolves the
-      calling client/profile (and the HTTP bearer client); stamp it into `audit.rs`
-      records + a per-caller filter in Activity. (S-M)
-- [ ] **Tool overrides (rename / re-describe / param-pin).** Rewrite/append a tool
-      description and pin/override a param default per server. High user value, and
-      it lets a user neutralize a poisoned description in place (reinforces content
-      defense). (M)
+- [~] **Identity attribution in the audit line.** The client label is now threaded
+      through dispatch and stamped into `audit.rs`/`inspect.rs` records (#95). Remaining:
+      a per-caller filter in the Activity view. (S)
+- [x] **Tool overrides (rename / re-describe) SHIPPED (#88, #89):** a user can rename or
+      replace a tool's description as clients see it (neutralizing a poisoned description
+      in place). Param-pin/override defaults is the remaining piece.
 
 **Tier 2 - parity on real gaps**
 - [ ] Tool Groups (cross-server reusable collections) + allow/block ACL with an
@@ -61,9 +76,10 @@ notes live in the internal `docs/COMPETITIVE.md`.)
       ships) so remote/network clients connect natively. (M)
 
 **Strategic**
-- [ ] **Human-in-the-loop approval queue.** Pause a high-stakes / destructive call
-      for an in-app approve/deny, vs today's binary deny-destructive. Fits
-      local-first (gateway blocks, app prompts). (S-M)
+- [x] **Human-in-the-loop approval queue. SHIPPED** (v1.1.0 + follow-ups): the gateway
+      holds a gated call and the app prompts to approve/deny, fail-closed on timeout;
+      plus tray/menu-bar run, OS notification, approve-for-session/always-allow, exact
+      countdown, and an org-mandated `forceHumanApproval` Teams policy.
 - [ ] **Named retention / data-handling statement** (docs + in-app one-liner):
       payloads never leave the machine; we log metadata, not bodies. Structurally
       true today, just never stated. (S)
@@ -80,12 +96,12 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
 - [x] HTTP bridge **bearer token** (required, OPTIONS preflight exempt), fail-closed
       on non-loopback bind, 4 MB body cap, sanitized reflected headers, `catch_unwind`
       per request. Closed the credential-CSRF (a browser tab can reach `localhost`).
-- [ ] Connect-guard misses IPv6 cloud-metadata: `remote.rs` `host_is_link_local` is
-      IPv4-only (169.254.x); reuse the IPv6-aware `ip_is_private`. (S)
-- [ ] DNS-rebind TOCTOU: `host_is_private` resolves once, `connect_remote`
-      re-resolves; pin the validated IP through to the connection. (M)
-- [ ] HTTP per-request read timeout + small worker pool (single-threaded accept
-      loop today, so slowloris / a slow downstream blocks all callers). (M)
+- [x] IPv6 cloud-metadata is covered by the resolver-level `ip_is_private` screen.
+- [x] **DNS-rebind TOCTOU SHIPPED (#81):** SSRF screening moved into the resolver so the
+      validated address set is enforced at connect time (whole-set refusal), closing the
+      resolve-once/connect-later window.
+- [x] Worker-per-request HTTP loop **SHIPPED (#99)** — a slow downstream / held call no
+      longer blocks other callers. (A per-request read timeout for slowloris is still open.)
 
 ### New-user UX (first 10 minutes; scaffolding is strong, these are the sharp edges)
 - [ ] **Backend failures render as innocent empty states.** Gateway down ->
@@ -105,10 +121,9 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       no version tag, so catalog-logic changes don't take effect until a server
       toggles or the cache is deleted. Wrap in `{version, tools}`, discard on
       mismatch. (S)
-- [ ] **Router lock held across the downstream call** (`process_request`):
-      concurrent tool calls serialize, a slow tool blocks all others up to 30 s, and
-      HTTP now advertises concurrency to Open WebUI. Release the lock after resolving
-      the target server. (M)
+- [x] **Router lock held across the downstream call SHIPPED (#95, #99):** the live
+      router is a `Mutex<Arc<Router>>`; dispatch clones the Arc and releases the lock
+      before the (possibly 120s-held) downstream call, and the HTTP loop is multithreaded.
 - [ ] Tests for the new HTTP transport (status mapping, error paths) and
       `semantic.rs` (blend math, embed cache). (M)
 
