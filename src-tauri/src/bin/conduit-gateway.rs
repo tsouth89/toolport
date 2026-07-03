@@ -20,7 +20,7 @@
 
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -901,20 +901,47 @@ fn savings_line() -> String {
 /// to exact-name (each a different, justified result), never trips this. So it fixes
 /// the weak-model loop without ever penalizing Claude, Cursor, or any model doing
 /// real multi-step work. Any non-search action resets it. Per client connection.
+/// Interior-mutable so the HTTP workers can share ONE guard (the anti-thrash signal
+/// is cross-request, so it can't be per-worker) without any of them holding a lock
+/// across a downstream call: `lock()` is taken only for the brief bookkeeping below.
 #[derive(Default)]
 struct SearchGuard {
+    inner: Mutex<SearchState>,
+}
+
+/// The mutable interior of a [`SearchGuard`], guarded by its lock.
+#[derive(Default)]
+struct SearchState {
     /// The top result's name from the previous consecutive search, if any.
     last_top: Option<String>,
     /// How many consecutive searches returned that same top result.
     repeats: u32,
 }
 
+impl SearchGuard {
+    /// Lock the interior. Held only for the short guard update, never across dispatch.
+    fn lock(&self) -> std::sync::MutexGuard<'_, SearchState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Any non-search action means the model committed, so the streak resets.
+    fn reset(&self) {
+        let mut s = self.lock();
+        s.last_top = None;
+        s.repeats = 0;
+    }
+}
+
 /// Per-call confirmation state for destructive tools. When `confirm_destructive`
 /// is on, the first call to a destructive tool returns a preview with a token;
 /// `toolport_confirm { token }` replays the stored call. Entries expire after 60s.
 struct ConfirmGuard {
-    /// Pending confirmations: token → the exact call to replay.
-    pending: std::collections::HashMap<String, PendingCall>,
+    /// Pending confirmations: token → the exact call to replay. Behind a Mutex so the
+    /// HTTP workers share ONE confirm set: a token stored by one request must be
+    /// redeemable by a later `toolport_confirm` that may land on a different worker.
+    pending: Mutex<std::collections::HashMap<String, PendingCall>>,
 }
 
 /// A stored destructive call awaiting confirmation.
@@ -932,7 +959,7 @@ const CONFIRM_TTL: Duration = Duration::from_secs(60);
 impl ConfirmGuard {
     fn new() -> Self {
         Self {
-            pending: std::collections::HashMap::new(),
+            pending: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -946,13 +973,21 @@ impl ConfirmGuard {
         buf.iter().map(|b| format!("{b:02x}")).collect()
     }
 
+    /// Lock the pending set. Held only for the brief store/take, never across dispatch.
+    fn pending(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, PendingCall>> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Store a pending call and return its confirmation token.
-    fn store(&mut self, name: String, arguments: Value) -> String {
+    fn store(&self, name: String, arguments: Value) -> String {
+        let mut pending = self.pending();
         // Evict expired entries to prevent unbounded growth.
         let cutoff = Instant::now() - CONFIRM_TTL;
-        self.pending.retain(|_, v| v.created > cutoff);
+        pending.retain(|_, v| v.created > cutoff);
         let token = Self::new_token();
-        self.pending.insert(
+        pending.insert(
             token.clone(),
             PendingCall {
                 name,
@@ -965,8 +1000,8 @@ impl ConfirmGuard {
 
     /// Consume a confirmation token, returning the stored call if valid.
     /// Returns None if the token doesn't exist or has expired.
-    fn take(&mut self, token: &str) -> Option<(String, Value)> {
-        let entry = self.pending.remove(token)?;
+    fn take(&self, token: &str) -> Option<(String, Value)> {
+        let entry = self.pending().remove(token)?;
         if entry.created.elapsed() > CONFIRM_TTL {
             return None; // expired
         }
@@ -1264,8 +1299,8 @@ fn handle_request(
     cached: &[Value],
     lazy: bool,
     profile: Option<&str>,
-    guard: &mut SearchGuard,
-    confirm: &mut ConfirmGuard,
+    guard: &SearchGuard,
+    confirm: &ConfirmGuard,
     allowed: Option<&std::collections::HashSet<String>>,
     // The client this request is attributed to (a registered HTTP client's audit
     // label), threaded in rather than stored on the shared router so concurrent
@@ -1395,8 +1430,7 @@ fn handle_request(
 
             // Anything other than a search breaks the search-thrash streak.
             if name != "toolport_search_tools" {
-                guard.last_top = None;
-                guard.repeats = 0;
+                guard.reset();
             }
 
             if name == "toolport_fetch_result" {
@@ -1505,13 +1539,19 @@ fn handle_request(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                if !matches.is_empty() && guard.last_top.as_deref() == Some(top.as_str()) {
-                    guard.repeats += 1;
-                } else {
-                    guard.repeats = 1;
-                    guard.last_top = (!matches.is_empty()).then(|| top.clone());
-                }
-                let escalate = guard.repeats >= SEARCH_REPEAT_LIMIT && !matches.is_empty();
+                // Lock only for the streak bookkeeping; capture `repeats` so nothing
+                // holds the guard lock past this point.
+                let repeats = {
+                    let mut s = guard.lock();
+                    if !matches.is_empty() && s.last_top.as_deref() == Some(top.as_str()) {
+                        s.repeats += 1;
+                    } else {
+                        s.repeats = 1;
+                        s.last_top = (!matches.is_empty()).then(|| top.clone());
+                    }
+                    s.repeats
+                };
+                let escalate = repeats >= SEARCH_REPEAT_LIMIT && !matches.is_empty();
                 if escalate {
                     matches.truncate(1); // only the best match, no distractions
                 }
@@ -1557,7 +1597,7 @@ fn handle_request(
                          is the best match and its full input schema is below - call toolport_call_tool \
                          now with name \"{top}\". Searching again will keep returning this. Only if \
                          `{top}` genuinely cannot do the task, call toolport_status to see other servers.",
-                        guard.repeats
+                        repeats
                     )
                 } else {
                     // Lead with a single, named, ready-to-call directive so the model
@@ -2323,8 +2363,8 @@ struct GatewayState {
 fn process_request(
     state: &GatewayState,
     req: &Value,
-    guard: &mut SearchGuard,
-    confirm: &mut ConfirmGuard,
+    guard: &SearchGuard,
+    confirm: &ConfirmGuard,
     allowed: Option<&std::collections::HashSet<String>>,
     client: Option<&str>,
 ) -> Option<Value> {
@@ -2648,10 +2688,11 @@ fn result_text(resp: &Value) -> String {
 }
 
 /// Map one HTTP request to (status, content-type, body).
+#[allow(clippy::too_many_arguments)]
 fn handle_http(
     state: &GatewayState,
-    guard: &mut SearchGuard,
-    confirm: &mut ConfirmGuard,
+    guard: &SearchGuard,
+    confirm: &ConfirmGuard,
     method: &str,
     path: &str,
     body: &str,
@@ -2734,6 +2775,13 @@ fn handle_http(
 /// an unauthenticated caller from forcing the gateway to buffer a huge body.
 const MAX_HTTP_BODY: u64 = 4 * 1024 * 1024;
 
+/// Cap on concurrently-handled HTTP requests (across both loopback listeners). Each
+/// in-flight request runs on its own worker thread; past this many, new requests are
+/// handled inline (serially) rather than spawning without bound. Sized well above any
+/// realistic local concurrency: the approval broker caps simultaneous holds at 64, and
+/// non-held calls finish in milliseconds, so this backstop is only ever a flood guard.
+const MAX_HTTP_INFLIGHT: usize = 256;
+
 /// Parse a `Bearer <token>` Authorization value. Pure, so it's unit-testable.
 fn parse_bearer(auth_value: &str) -> Option<&str> {
     let (scheme, tok) = auth_value.split_once(' ')?;
@@ -2792,15 +2840,22 @@ fn serve_http(state: GatewayState, port: u16) {
         );
     }
 
+    // Two guards shared by every worker thread on BOTH loopback listeners: the
+    // anti-thrash SearchGuard and the destructive-confirm ConfirmGuard each hold
+    // cross-request state (a confirm token stored by one request is redeemed by a
+    // later one), so they must be a single shared instance, not per-thread.
+    let search = Arc::new(SearchGuard::default());
+    let confirm = Arc::new(ConfirmGuard::new());
+
     // When binding the default IPv4 loopback, ALSO listen on the IPv6 loopback
     // (best-effort). Many systems resolve "localhost" to ::1 first, and clients
     // like Open WebUI try ::1 and don't fall back to 127.0.0.1, so an IPv4-only
     // listener makes `http://localhost:<port>` fail even though 127.0.0.1 works.
     if host == "127.0.0.1" {
         if let Ok(server6) = tiny_http::Server::http(("::1", port)) {
-            let state6 = state.clone();
-            let token6 = token.clone();
-            std::thread::spawn(move || serve_http_loop(server6, state6, token6));
+            let (state6, token6, search6, confirm6) =
+                (state.clone(), token.clone(), search.clone(), confirm.clone());
+            std::thread::spawn(move || serve_http_loop(server6, state6, token6, search6, confirm6));
             glog(&format!(
                 "HTTP/OpenAPI also listening on http://[::1]:{port}"
             ));
@@ -2821,16 +2876,68 @@ fn serve_http(state: GatewayState, port: u16) {
     eprintln!(
         "conduit-gateway: HTTP/OpenAPI on http://localhost:{port}  (OpenAPI spec at /openapi.json)"
     );
-    serve_http_loop(server, state, token);
+    serve_http_loop(server, state, token, search, confirm);
 }
 
-/// The blocking accept loop for one listener. Each listener keeps its own
-/// SearchGuard; they share the gateway state, so the IPv4 and IPv6 loopback
-/// sockets serve identically.
-fn serve_http_loop(server: tiny_http::Server, state: GatewayState, token: Option<String>) {
-    let mut guard = SearchGuard::default();
-    let mut confirm = ConfirmGuard::new();
-    for mut request in server.incoming_requests() {
+/// The accept loop for one listener. Each accepted request is handed to its own
+/// worker thread, so a slow downstream call or a (up to two-minute) human-approval
+/// hold never blocks the next request. The gateway state and the two guards are
+/// shared across every worker and both loopback listeners. An in-flight cap bounds
+/// the worst case; the approval broker already caps concurrent holds (MAX_PENDING),
+/// so held calls can't starve request handling below that cap.
+/// Decrements the in-flight counter when a worker thread finishes, panic or not.
+struct InflightGuard(Arc<AtomicUsize>);
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn serve_http_loop(
+    server: tiny_http::Server,
+    state: GatewayState,
+    token: Option<String>,
+    search: Arc<SearchGuard>,
+    confirm: Arc<ConfirmGuard>,
+) {
+    let inflight = Arc::new(AtomicUsize::new(0));
+    for request in server.incoming_requests() {
+        // Backstop against a pathological flood: never exceed the cap. At the cap we
+        // handle inline (degrading to serial for the overflow) rather than spawn
+        // unbounded threads or drop the request. Realistic local concurrency, bounded
+        // by the broker's own hold cap plus a handful of fast calls, stays far below it.
+        if inflight.load(Ordering::Relaxed) >= MAX_HTTP_INFLIGHT {
+            handle_connection(request, &state, &token, &search, &confirm);
+            continue;
+        }
+        inflight.fetch_add(1, Ordering::Relaxed);
+        let (state, token, search, confirm, inflight) = (
+            state.clone(),
+            token.clone(),
+            Arc::clone(&search),
+            Arc::clone(&confirm),
+            Arc::clone(&inflight),
+        );
+        std::thread::spawn(move || {
+            // Decrement on the way out even if a handler panics before the response
+            // (a panic outside handle_http's catch_unwind), so the count can't leak
+            // and wedge the pool at the cap.
+            let _dec = InflightGuard(inflight);
+            handle_connection(request, &state, &token, &search, &confirm);
+        });
+    }
+}
+
+/// Handle one accepted HTTP request end to end: parse, CORS, auth/scope, dispatch,
+/// and respond. A pure function of the request plus the shared state and guards, so
+/// it is safe to run on many worker threads concurrently.
+fn handle_connection(
+    mut request: tiny_http::Request,
+    state: &GatewayState,
+    token: &Option<String>,
+    search: &SearchGuard,
+    confirm: &ConfirmGuard,
+) {
         let method = request.method().to_string().to_uppercase();
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or("/").to_string();
@@ -2907,9 +3014,9 @@ fn serve_http_loop(server: tiny_http::Server, state: GatewayState, token: Option
                     // A panic in a handler must return 500, not kill the listener.
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         handle_http(
-                            &state,
-                            &mut guard,
-                            &mut confirm,
+                            state,
+                            search,
+                            confirm,
                             &method,
                             &path,
                             &body,
@@ -2944,7 +3051,6 @@ fn serve_http_loop(server: tiny_http::Server, state: GatewayState, token: Option
             }
         }
         let _ = request.respond(response);
-    }
 }
 
 fn main() {
@@ -3155,8 +3261,10 @@ fn main() {
     }
 
     let stdin = std::io::stdin();
-    let mut search_guard = SearchGuard::default();
-    let mut confirm_guard = ConfirmGuard::new();
+    // stdio serves one client on one thread, so no sharing is needed, but the guards
+    // are now interior-mutable (&self methods) to match the shared HTTP path.
+    let search_guard = SearchGuard::default();
+    let confirm_guard = ConfirmGuard::new();
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
@@ -3175,7 +3283,7 @@ fn main() {
             req.get("method").and_then(|m| m.as_str()).unwrap_or("")
         ));
         let response =
-            process_request(&state, &req, &mut search_guard, &mut confirm_guard, None, None);
+            process_request(&state, &req, &search_guard, &confirm_guard, None, None);
         if let Some(resp) = response {
             let mut out = state
                 .stdout
@@ -3278,6 +3386,102 @@ mod tests {
             profile: None,
             http: true,
         }
+    }
+
+    /// Minimal raw HTTP/1.1 client for the concurrency test: one request per
+    /// connection, `Connection: close` so the server closes and we read to EOF.
+    fn http_get(port: u16, path: &str) -> String {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        s.write_all(req.as_bytes()).unwrap();
+        let mut buf = String::new();
+        let _ = s.read_to_string(&mut buf);
+        buf
+    }
+
+    fn http_post(port: u16, path: &str, body: &str) -> String {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let req = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        s.write_all(req.as_bytes()).unwrap();
+        let mut buf = String::new();
+        let _ = s.read_to_string(&mut buf);
+        buf
+    }
+
+    /// The live proof of the multithreaded HTTP loop: a call blocked in dispatch (a
+    /// slow downstream, or the moral equivalent of a 120s approval hold) must NOT stall
+    /// an unrelated request. A single-threaded accept loop would serialize them.
+    #[test]
+    fn http_slow_call_does_not_block_other_requests() {
+        // A downstream whose tools/call blocks ~800ms; initialize/tools/list stay fast
+        // so the connect handshake and routing (`s__wait`) work normally.
+        struct SlowRoute;
+        impl conduit_lib::downstream::Transport for SlowRoute {
+            fn request(
+                &mut self,
+                method: &str,
+                _params: Value,
+            ) -> Result<Value, conduit_lib::downstream::TransportError> {
+                match method {
+                    "initialize" => Ok(json!({ "protocolVersion": "2025-06-18" })),
+                    "tools/list" => Ok(json!({ "tools": [{ "name": "wait", "description": "" }] })),
+                    "tools/call" => {
+                        std::thread::sleep(Duration::from_millis(800));
+                        Ok(json!({ "content": [{ "type": "text", "text": "done" }] }))
+                    }
+                    other => Err(conduit_lib::downstream::TransportError::Fatal(format!(
+                        "unexpected {other}"
+                    ))),
+                }
+            }
+            fn notify(
+                &mut self,
+                _method: &str,
+                _params: Value,
+            ) -> Result<(), conduit_lib::downstream::TransportError> {
+                Ok(())
+            }
+        }
+
+        let ds = DownstreamServer::connect("s".into(), Box::new(SlowRoute)).unwrap();
+        let mut router = Router::new();
+        router.add(ds);
+        let mut state = http_state(false);
+        state.router = Arc::new(Mutex::new(Arc::new(router)));
+
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let search = Arc::new(SearchGuard::default());
+        let confirm = Arc::new(ConfirmGuard::new());
+        std::thread::spawn(move || serve_http_loop(server, state, None, search, confirm));
+        std::thread::sleep(Duration::from_millis(50)); // let the listener come up
+
+        // Kick off the slow (blocking) call on its own thread, then let it get parked
+        // in dispatch before timing the fast request.
+        let slow = std::thread::spawn(move || http_post(port, "/s__wait", "{}"));
+        std::thread::sleep(Duration::from_millis(150));
+
+        // A concurrent fast request must return well before the slow call's 800ms sleep.
+        let t0 = Instant::now();
+        let fast = http_get(port, "/");
+        let elapsed = t0.elapsed();
+        assert!(fast.contains("Toolport gateway"), "fast response was: {fast}");
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "fast request was blocked behind the slow call ({elapsed:?}); the loop serialized"
+        );
+
+        // The slow call still completes correctly.
+        let slow_resp = slow.join().unwrap();
+        assert!(slow_resp.contains("done"), "slow response was: {slow_resp}");
     }
 
     #[test]
@@ -3540,8 +3744,8 @@ mod tests {
             &catalog(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             Some(&allowed),
             None,
         )
@@ -3571,8 +3775,8 @@ mod tests {
             &catalog(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             Some(&allowed),
             None,
         )
@@ -3637,8 +3841,8 @@ mod tests {
         let state = http_state(true);
         let (status, _, body) = handle_http(
             &state,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             "OPTIONS",
             "/toolport_search_tools",
             "",
@@ -3700,8 +3904,8 @@ mod tests {
             &[],
             false,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -3722,8 +3926,8 @@ mod tests {
             &[],
             false,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -3741,8 +3945,8 @@ mod tests {
             &[],
             false,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -3786,8 +3990,8 @@ mod tests {
             &[],
             false,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -3808,8 +4012,8 @@ mod tests {
             &[],
             false,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -3837,8 +4041,8 @@ mod tests {
             &catalog(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -3895,8 +4099,8 @@ mod tests {
                 &catalog(),
                 true,
                 None,
-                &mut SearchGuard::default(),
-                &mut ConfirmGuard::new(),
+                &SearchGuard::default(),
+                &ConfirmGuard::new(),
                 None,
                 None,
             )
@@ -4010,8 +4214,8 @@ mod tests {
             &catalog(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -4047,8 +4251,8 @@ mod tests {
             &catalog(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -4068,7 +4272,7 @@ mod tests {
         })
     }
 
-    fn search_text(reg: &Registry, guard: &mut SearchGuard, query: &str) -> String {
+    fn search_text(reg: &Registry, guard: &SearchGuard, query: &str) -> String {
         let resp = handle_request(
             &search_req(query),
             reg,
@@ -4077,7 +4281,7 @@ mod tests {
             true,
             None,
             guard,
-            &mut ConfirmGuard::new(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -4091,16 +4295,16 @@ mod tests {
     #[test]
     fn repeated_same_need_escalates_then_resets() {
         let reg = Registry::default();
-        let mut guard = SearchGuard::default();
+        let guard = SearchGuard::default();
 
         // Same query keeps returning the same top tool; first two stay polite.
         for _ in 0..2 {
-            let text = search_text(&reg, &mut guard, "charges");
+            let text = search_text(&reg, &guard, "charges");
             assert!(text.contains("Top match:"));
             assert!(!text.contains(ESCALATION_MARK));
         }
         // Third repeat of the same top tool trips the loop-breaker.
-        let text = search_text(&reg, &mut guard, "charges");
+        let text = search_text(&reg, &guard, "charges");
         assert!(
             text.contains(ESCALATION_MARK),
             "3rd same-result search must escalate"
@@ -4119,12 +4323,12 @@ mod tests {
             &catalog(),
             true,
             None,
-            &mut guard,
-            &mut ConfirmGuard::new(),
+            &guard,
+            &ConfirmGuard::new(),
             None,
             None,
         );
-        let text = search_text(&reg, &mut guard, "charges");
+        let text = search_text(&reg, &guard, "charges");
         assert!(
             !text.contains(ESCALATION_MARK),
             "non-search action should reset the streak"
@@ -4138,7 +4342,7 @@ mod tests {
         // in a row (different top tool each time) is never cut off, no matter how many
         // searches. This is what keeps Claude/Cursor's exploration unaffected.
         let reg = Registry::default();
-        let mut guard = SearchGuard::default();
+        let guard = SearchGuard::default();
         for q in [
             "charges",
             "offerings",
@@ -4147,7 +4351,7 @@ mod tests {
             "offerings",
             "send",
         ] {
-            let text = search_text(&reg, &mut guard, q);
+            let text = search_text(&reg, &guard, q);
             assert!(text.contains("Top match:"), "query {q} should stay polite");
             assert!(
                 !text.contains(ESCALATION_MARK),
@@ -4318,8 +4522,8 @@ mod tests {
             &catalog_with_destructive(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -4349,8 +4553,8 @@ mod tests {
             &catalog_with_destructive(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -4378,8 +4582,8 @@ mod tests {
             &catalog_with_destructive(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -4414,8 +4618,8 @@ mod tests {
             &catalog_with_destructive(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -4442,8 +4646,8 @@ mod tests {
             &catalog_with_destructive(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -4470,8 +4674,8 @@ mod tests {
             &catalog_with_destructive(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -4494,8 +4698,8 @@ mod tests {
             &catalog_with_destructive(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -4523,8 +4727,8 @@ mod tests {
             &catalog_with_destructive(),
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut ConfirmGuard::new(),
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
             None,
             None,
         )
@@ -4562,7 +4766,7 @@ mod tests {
 
     #[test]
     fn confirm_guard_token_is_consumed_on_use() {
-        let mut guard = ConfirmGuard::new();
+        let guard = ConfirmGuard::new();
         let token = guard.store("srv__delete".into(), json!({"id": "x"}));
         // First take succeeds.
         let (name, args) = guard.take(&token).unwrap();
@@ -4578,7 +4782,7 @@ mod tests {
         // via toolport_confirm. The confirmed call must NOT be re-intercepted
         // (which would create an infinite loop).
         let reg = registry_with_confirm();
-        let mut confirm = ConfirmGuard::new();
+        let confirm = ConfirmGuard::new();
         let cat = catalog_with_destructive();
 
         // Step 1: destructive call is intercepted.
@@ -4593,8 +4797,8 @@ mod tests {
             &cat,
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut confirm,
+            &SearchGuard::default(),
+            &confirm,
             None,
             None,
         )
@@ -4619,8 +4823,8 @@ mod tests {
             &cat,
             true,
             None,
-            &mut SearchGuard::default(),
-            &mut confirm,
+            &SearchGuard::default(),
+            &confirm,
             None,
             None,
         )

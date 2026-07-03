@@ -7,10 +7,12 @@ Entries before the rename below shipped under the project's former name, Conduit
 ## [Unreleased]
 
 ### Changed
-- **The gateway stays responsive while a tool call is held for approval.** A call
-  awaiting human approval (up to two minutes) no longer blocks other requests,
-  live setting toggles, or server-config reloads: the dispatcher now releases its
-  locks before the downstream call and the approval wait.
+- **The HTTP gateway now handles requests concurrently.** Each request runs on its
+  own worker, so a slow downstream server or a tool call held for human approval (up
+  to two minutes) no longer blocks other requests, live setting toggles, or
+  server-config reloads. The dispatcher already released its locks before the
+  downstream call and the approval wait; the accept loop now hands each request to a
+  worker instead of serving them one at a time.
 
 ### Fixed
 - **Approval prompt is keyboard- and screen-reader-accessible.** When a held call
