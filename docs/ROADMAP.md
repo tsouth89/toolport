@@ -148,6 +148,21 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
 - [ ] Showcase server (`conduit-openapi-mcp`: any OpenAPI spec -> an MCP server; npm
       publish pending) as the funnel + a demo of lazy discovery + result-shaping.
 
+**Community-requested (2026-07-03, r/LocalLLaMA launch thread):**
+- [ ] **Lazy-discovery search trace / "why this tool" observability.** Capture what a
+      `search_tools` call surfaced - the ranked candidates + their score (lexical, and
+      the semantic blend when on), which won, and the exact input schema returned to the
+      model - and surface it in Activity / the live inspector. Extends live
+      call-inspection from "what the tool returned" to "what the model saw and why it
+      picked this tool." The single most-requested thing in the launch thread
+      (CODE_HEIST), and it reinforces the audit/observability moat. (M)
+- [ ] **Pinned / prerequisite tools in search (`tool_prereq`).** Let a tool be marked so
+      it's always returned (with its schema) regardless of match score - for tools that
+      are a hard prerequisite (auth/list-before-act) or whose description doesn't match
+      the user's query keywords, so lazy discovery never hides a load-bearing tool.
+      Fits alongside tool overrides (same per-tool config surface). Suggested by kevrex5,
+      who built the same pattern. (S-M)
+
 ## The core decision: Toolport is a gateway, not a file editor
 
 A tool that only edits each client's MCP JSON config is a dead end:
