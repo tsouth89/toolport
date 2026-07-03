@@ -6,6 +6,7 @@ import {
   ChevronRight,
   History,
   ScrollText,
+  Search,
   Share2,
   ShieldAlert,
   ShieldCheck,
@@ -21,6 +22,7 @@ import {
   getAuditStats,
   getInspectLog,
   getSavingsSummary,
+  getSearchTraces,
   getSecurityEvents,
   type SecurityEvent,
 } from "@/lib/api";
@@ -30,6 +32,7 @@ import type {
   InspectEntry,
   Registry,
   SavingsSummary,
+  SearchTrace,
   ServerStat,
 } from "@/lib/types";
 import {
@@ -698,6 +701,137 @@ function InspectRow({ e }: { e: InspectEntry }) {
   );
 }
 
+/** One recorded search: the query, what matched, and how much tool-definition context
+ * this search put into the model vs. loading the whole catalog. Expands to the full
+ * list of returned tool names. */
+function DiscoveryRow({ t }: { t: SearchTrace }) {
+  const [open, setOpen] = useState(false);
+  const pct = t.flatTokens > 0 ? Math.round((t.savedTokens / t.flatTokens) * 100) : 0;
+  const hit = t.returned > 0;
+  return (
+    <div className="rounded-md border border-border/50 text-sm">
+      <div
+        className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/30"
+        onClick={() => setOpen((o) => !o)}
+        role="button"
+        aria-expanded={open}
+        tabIndex={0}
+      >
+        <ChevronRight
+          className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${
+            open ? "rotate-90" : ""
+          }`}
+        />
+        <Search className="size-4 shrink-0 text-owned" />
+        <span className="min-w-0 truncate font-mono text-xs">
+          &ldquo;{t.query || "(empty)"}&rdquo;
+        </span>
+        {t.client && (
+          <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+            {t.client}
+          </span>
+        )}
+        {t.escalated && (
+          <span className="shrink-0 rounded bg-warning/15 px-1.5 py-0.5 text-[11px] text-warning">
+            loop-broken
+          </span>
+        )}
+        <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
+          {hit ? `${t.returned} of ${t.total}` : "no match"}
+        </span>
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {new Date(t.ts).toLocaleTimeString()}
+        </span>
+      </div>
+      {open && (
+        <div className="border-t border-border/50 bg-muted/20 px-3 py-2 pl-9 text-xs">
+          {hit ? (
+            <div className="mb-2 flex flex-wrap gap-1">
+              {t.names.map((n) => (
+                <span
+                  key={n}
+                  className={`rounded px-1.5 py-0.5 font-mono text-[11px] ${
+                    n === t.top ? "bg-owned/15 text-owned" : "bg-muted text-muted-foreground"
+                  }`}
+                >
+                  {n}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div className="mb-2 text-muted-foreground">No tools matched this query.</div>
+          )}
+          <div className="text-muted-foreground">
+            Put{" "}
+            <span className="font-medium text-foreground">≈{fmtTokens(t.returnedTokens)}</span>{" "}
+            tokens of tool schemas into context, vs{" "}
+            <span className="font-medium text-foreground">≈{fmtTokens(t.flatTokens)}</span> to load
+            the whole catalog
+            {t.flatTokens > 0 ? <> ({pct}% less this turn).</> : "."}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Collapsible discovery panel: the in-path proof that lazy discovery is working.
+ * Lists recent toolport_search_tools calls with what matched and the exact per-turn
+ * tool-definition token overhead. Self-hides until something has searched. Always-on,
+ * local, bounded. */
+function DiscoveryTraces({ refreshKey }: { refreshKey: number }) {
+  const [entries, setEntries] = useState<SearchTrace[]>([]);
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    getSearchTraces(100)
+      .then((e) => alive && setEntries(e))
+      .catch(() => alive && setEntries([]));
+    return () => {
+      alive = false;
+    };
+  }, [refreshKey]);
+
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="mb-6 rounded-lg border border-owned/30 bg-owned/[0.04] p-4">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <Search className="size-4 shrink-0 text-owned" />
+        <h3 className="text-sm font-medium">Discovery</h3>
+        <span className="rounded-full bg-owned/15 px-1.5 py-0.5 text-xs font-medium text-owned">
+          {entries.length}
+        </span>
+        <ChevronRight
+          className={`ml-auto size-4 text-muted-foreground transition-transform ${
+            open ? "rotate-90" : ""
+          }`}
+        />
+      </button>
+      {open && (
+        <>
+          <p className="mt-2 mb-3 max-w-2xl text-xs text-muted-foreground">
+            What the model searched for and what Toolport handed back. Each search returns
+            only the matching tools, so just those schemas enter context instead of every
+            tool on every turn. Match counts are exact; token figures are an ≈ estimate.
+            Local and bounded: tool names only, never arguments or results.
+          </p>
+          <div className="flex flex-col gap-1">
+            {entries.map((t, i) => (
+              <DiscoveryRow key={`${t.ts}-${i}`} t={t} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** Collapsible live inspector: a local "network tab" for MCP. Only rendered while
  * live inspection is on. Lists recent captured calls, each expandable to its raw
  * request + response JSON. Ephemeral, local, opt-in. */
@@ -834,6 +968,7 @@ export function ActivityView({
       {infoSecurity.length > 0 ? (
         <QuietDriftHistory events={infoSecurity} onDismiss={dismissSecurity} />
       ) : null}
+      <DiscoveryTraces refreshKey={refreshKey} />
       {registry?.liveInspect ? <LiveInspector refreshKey={refreshKey} /> : null}
       {savings && savings.tokensSaved > 0 ? (
         <SavingsBanner savings={savings} />

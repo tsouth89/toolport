@@ -36,6 +36,7 @@ use conduit_lib::remote;
 use conduit_lib::router::{is_destructive, sanitize_segment, Router, ToolPolicy};
 use conduit_lib::approval;
 use conduit_lib::savings;
+use conduit_lib::searchtrace;
 use conduit_lib::secrets;
 use conduit_lib::semantic;
 use conduit_lib::shaping;
@@ -1635,6 +1636,25 @@ fn handle_request(
                 let text = format!(
                     "{lead}\n\n{}",
                     serde_json::to_string_pretty(&matches).unwrap_or_default()
+                );
+                // Record the trace: the ground-truth cost of what THIS search returned
+                // vs. what advertising the whole (scoped) catalog would cost per turn.
+                // Being in-path, we know both exactly rather than estimating from logs.
+                let returned_names: Vec<String> = matches
+                    .iter()
+                    .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(str::to_string))
+                    .collect();
+                searchtrace::record(
+                    client,
+                    query,
+                    server,
+                    &top,
+                    &returned_names,
+                    matches.len(),
+                    total,
+                    savings::estimate_tokens(&matches),
+                    savings::estimate_tokens(source),
+                    escalate,
                 );
                 return Some(success(
                     id,
