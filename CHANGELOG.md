@@ -19,12 +19,24 @@ Entries before the rename below shipped under the project's former name, Conduit
 - **Gateway durability + auth hardening:** the registry is fsync'd before its atomic
   rename (no truncated file on a crash), an empty `Bearer` token is rejected instead of
   looked up, and the per-client token check is constant-time.
+- **The approval / confirm gate now fails closed on an unresolved tool.** If the gateway
+  can't tell from its cached catalog whether a tool is destructive, it re-checks the
+  live tool list and, if the tool is still unknown, treats it as destructive (held for
+  approval or confirmation) instead of letting it through unheld.
+- **The injection scan is bounded.** Content-defense now caps the bytes it inspects per
+  tool result (512 KB), so a hostile server returning a huge payload can't pin CPU.
+  Realistic results are far under the cap, so detection is unaffected in practice.
 
 ### Added
 - **Teams can require human approval org-wide.** A team admin can turn on "Require
   human approval" in the Teams policy, and every member's gateway then holds gated
   tool calls for a person to approve. Like the other org policies, it's tighten-only:
   it can force approval on for the team but can never turn a member's own setting off.
+- **Discovery panel: see what lazy discovery searched, and what it saved.** Activity now
+  records each tool search the model ran: the query, which tools matched, and the
+  tool-definition tokens the results cost that turn versus loading the whole catalog.
+  Because Toolport is in the request path, those figures are measured, not estimated.
+  Local and bounded, and it stores tool names only (never arguments or results).
 
 ### Changed
 - **The HTTP gateway now handles requests concurrently.** Each request runs on its
@@ -46,6 +58,16 @@ Entries before the rename below shipped under the project's former name, Conduit
   body on each page.
 - A failed confirmation (e.g. removing a server) keeps its dialog open cleanly
   instead of surfacing an unhandled error.
+- **Enable-all / Disable-all respects the current filter.** With a search filter active,
+  the bulk toggle now acts only on the servers you can see instead of every server, and
+  it's gated on its own busy state so it can't be double-fired. The profile delete dialog
+  also names the profile it's about to remove.
+- **Activity and the sidebar now report the same tokens-saved figure.** They each had a
+  separate formatter that rounded differently, so the same number could read as, say,
+  "1.2M" in one place and "1.23M" in another; both now use one shared formatter.
+- **A failed health probe no longer shows a green "Refreshed".** If the manual refresh
+  reloads your servers but the health check itself throws, it now says so instead of
+  reporting success.
 
 ## [1.1.0] - 2026-07-02
 
