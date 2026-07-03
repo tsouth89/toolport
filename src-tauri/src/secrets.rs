@@ -146,7 +146,7 @@ mod platform {
     }
 
     /// Create a generic-password item in the **legacy** keychain that BOTH the
-    /// Toolport app and the `conduit-gateway` binary can read with no keychain
+    /// Toolport app and the `toolport-gateway` binary can read with no keychain
     /// prompt: build a legacy `SecAccess` whose trusted-applications list names
     /// both binaries and pass it as `kSecAttrAccess` on `SecItemAdd`. Setting the
     /// ACL atomically at creation avoids the keychain-password prompt that a

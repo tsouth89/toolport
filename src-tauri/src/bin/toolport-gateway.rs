@@ -1462,7 +1462,7 @@ fn handle_request(
                         "resources": { "listChanged": true },
                         "prompts": { "listChanged": true }
                     },
-                    "serverInfo": { "name": "conduit-gateway", "version": env!("CARGO_PKG_VERSION") }
+                    "serverInfo": { "name": "toolport-gateway", "version": env!("CARGO_PKG_VERSION") }
                 }),
             ))
         }
@@ -2721,7 +2721,7 @@ fn process_request(
 /// `CONDUIT_HTTP=<port>` is the direct env form, and a truthy `CONDUIT_HTTP`
 /// falls back to `CONDUIT_HTTP_PORT` or 8765. Absent everywhere -> stdio mode.
 fn http_port() -> Option<u16> {
-    // CLI flag: `conduit-gateway --http` (default 8765) or `--http 9000`.
+    // CLI flag: `toolport-gateway --http` (default 8765) or `--http 9000`.
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--http") {
         let port = args
@@ -3080,14 +3080,14 @@ fn serve_http(state: GatewayState, port: u16) {
     // anyone who can reach the port, so refuse to bind one without a token.
     if !loopback && token.is_none() {
         eprintln!(
-            "conduit-gateway: refusing to bind {host}:{port} without CONDUIT_HTTP_TOKEN. \
+            "toolport-gateway: refusing to bind {host}:{port} without CONDUIT_HTTP_TOKEN. \
              A non-loopback HTTP endpoint would be unauthenticated. Set a token, or bind 127.0.0.1."
         );
         std::process::exit(1);
     }
     if token.is_none() {
         eprintln!(
-            "conduit-gateway: WARNING - HTTP endpoint has no token; any local process (including a \
+            "toolport-gateway: WARNING - HTTP endpoint has no token; any local process (including a \
              web page open in your browser) can call your tools. Set CONDUIT_HTTP_TOKEN to require auth."
         );
     }
@@ -3117,7 +3117,7 @@ fn serve_http(state: GatewayState, port: u16) {
     let server = match tiny_http::Server::http((host.as_str(), port)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("conduit-gateway: could not bind HTTP {host}:{port}: {e}");
+            eprintln!("toolport-gateway: could not bind HTTP {host}:{port}: {e}");
             std::process::exit(1);
         }
     };
@@ -3126,7 +3126,7 @@ fn serve_http(state: GatewayState, port: u16) {
         token.is_some()
     ));
     eprintln!(
-        "conduit-gateway: HTTP/OpenAPI on http://localhost:{port}  (OpenAPI spec at /openapi.json)"
+        "toolport-gateway: HTTP/OpenAPI on http://localhost:{port}  (OpenAPI spec at /openapi.json)"
     );
     serve_http_loop(server, state, token, search, confirm);
 }
@@ -3306,7 +3306,7 @@ fn handle_connection(
 }
 
 fn main() {
-    // Diagnostic: `conduit-gateway --selftest-secrets` reads every vaulted secret
+    // Diagnostic: `toolport-gateway --selftest-secrets` reads every vaulted secret
     // from THIS (gateway) process and reports. Used to validate the macOS keychain
     // shared-access ACL: this runs as a separate process from the app, exactly the
     // cross-process read path. If it reads the secrets with NO keychain prompt, the
@@ -3400,7 +3400,7 @@ fn main() {
             // We keep running on a default so the gateway stays up, and the on-disk
             // tool cache still answers tools/list from the last good build.
             eprintln!(
-                "conduit-gateway: could not load registry ({e}); serving cached tools only. \
+                "toolport-gateway: could not load registry ({e}); serving cached tools only. \
                  Fix or recreate the registry to restore full functionality."
             );
             glog(&format!("load_resolved ERR: {e}"));

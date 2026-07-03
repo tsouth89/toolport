@@ -12,7 +12,7 @@ Integrations -> "Open WebUI / HTTP endpoint"**, flip it on, and copy the **URL**
 (`http://localhost:8765`) and the **token** it shows. The app supervises the
 gateway for you and shuts it down when you quit.
 
-> Prefer the command line? `conduit-gateway --http 8765` (or `CONDUIT_HTTP=8765`)
+> Prefer the command line? `toolport-gateway --http 8765` (or `CONDUIT_HTTP=8765`)
 > does the same thing; set `CONDUIT_HTTP_TOKEN=<your-token>` to require auth (the
 > app does this automatically). It serves an OpenAPI spec at
 > `http://localhost:8765/openapi.json` and a POST endpoint per tool.

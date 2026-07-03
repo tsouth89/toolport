@@ -120,7 +120,7 @@ Toolport has two pieces:
 
 1. **The desktop app** (Tauri + React) where you manage servers, profiles,
    credentials, and which clients are connected.
-2. **The gateway binary** (`conduit-gateway`) that each AI client launches over
+2. **The gateway binary** (`toolport-gateway`) that each AI client launches over
    stdio. It reads Toolport's registry, connects to the enabled downstream servers
    (stdio or remote HTTP/SSE), and routes tool calls to the right one. Tool names
    are namespaced per server (`stripe__list_charges`) so they never collide.
@@ -129,7 +129,7 @@ Toolport has two pieces:
 AI client (Cursor / Claude / Codex / Antigravity / ...)
         │  stdio MCP
         ▼
-  conduit-gateway  ──reads──►  registry.json + OS keychain
+  toolport-gateway  ──reads──►  registry.json + OS keychain
         │  routes tools/calls
         ▼
   downstream MCP servers (Stripe, Supabase, GitHub, ...)
@@ -177,7 +177,7 @@ Use this when Codex has already created its `~/.codex/` directory.
 
 1. In Toolport, add or enable the MCP servers you want Codex to use.
 2. Open **Clients**, select **Codex**, optionally choose a profile, and click **Connect to Toolport**.
-3. Toolport updates `~/.codex/config.toml` with a single `[mcp_servers.conduit]` entry. That entry runs the resolved `conduit-gateway` binary; existing Codex TOML keys and other MCP servers are preserved, and an existing config is backed up before the write.
+3. Toolport updates `~/.codex/config.toml` with a single `[mcp_servers.conduit]` entry. That entry runs the resolved `toolport-gateway` binary; existing Codex TOML keys and other MCP servers are preserved, and an existing config is backed up before the write.
 4. Start a new Codex session so it re-reads the config. In Toolport, the Codex row changes to **connected to Toolport**; in Codex, Toolport-managed tools are served through the one `conduit` MCP server. With lazy discovery enabled, Codex gets Toolport's compact search tools instead of every downstream tool up front.
 
 Gotcha: when running Toolport from source, build the gateway first with `npm run build:gateway`. The desktop dev server does not build the separate binary that Codex spawns, so Codex will report the gateway as missing until that binary exists.
@@ -187,7 +187,7 @@ Gotcha: when running Toolport from source, build the gateway first with `npm run
 The gateway speaks HTTP/OpenAPI natively, so Open WebUI (and any OpenAPI tool
 client) connects straight to Toolport, no bridge or proxy. Flip on **Settings ->
 Integrations -> Open WebUI / HTTP endpoint** in the app (or run
-`conduit-gateway --http 8765`), then add `http://localhost:8765` as an OpenAPI
+`toolport-gateway --http 8765`), then add `http://localhost:8765` as an OpenAPI
 tool server. See [docs/openwebui.md](docs/openwebui.md). The same endpoint serves
 any HTTP/OpenAPI MCP consumer (n8n, LibreChat, custom agents).
 
@@ -296,7 +296,7 @@ The frontend is typechecked with `npx tsc --noEmit`.
   attempt keeps the callback port reserved for a few minutes and can cause a
   "state mismatch" on the next try.
 - **A client reports the gateway "was not found" (running from source).** Build
-  the gateway binary once: `cd src-tauri && cargo build --bin conduit-gateway`.
+  the gateway binary once: `cd src-tauri && cargo build --bin toolport-gateway`.
   `npm run tauri dev` builds the app but not this separate binary; packaged
   releases bundle it, so installed users never hit this.
 - **Repeated macOS keychain prompts / "could not read secret from the keychain"
@@ -371,6 +371,6 @@ Pricing, the self-host quickstart, and checkout are all at
 ## License
 
 [MIT](LICENSE), and the local app and gateway always will be. Toolport follows an
-open-core model: the desktop app and `conduit-gateway` are free and open source, and
+open-core model: the desktop app and `toolport-gateway` are free and open source, and
 Toolport Teams (above) funds the free app. Anything you contribute here is MIT and
 benefits everyone, see [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -31,7 +31,7 @@ npx tauri build --config src-tauri/tauri.bundle.conf.json
 ```
 
 This produces `src-tauri/target/release/bundle/macos/Toolport.app` with the bare
-gateway at `Toolport.app/Contents/MacOS/conduit-gateway`.
+gateway at `Toolport.app/Contents/MacOS/toolport-gateway`.
 
 ## (b) Sign + package (wrap the gateway as a nested .app)
 
@@ -49,7 +49,7 @@ APP=/path/to/Toolport.app ./scripts/macos-sign-local.sh
 
 The script:
 
-- moves the gateway into `Toolport.app/Contents/Helpers/ConduitGateway.app`,
+- moves the gateway into `Toolport.app/Contents/Helpers/ToolportGateway.app`,
 - embeds the gateway provisioning profile there,
 - leaves a symlink at the old bare path for backward compat,
 - signs inside-out and prints the `keychain-access-groups` entitlement plus each
@@ -60,10 +60,10 @@ It is idempotent: re-running rebuilds the helper bundle and re-signs.
 Confirm the layout:
 
 ```
-ls -l "src-tauri/target/release/bundle/macos/Toolport.app/Contents/MacOS/conduit-gateway"
-# -> a symlink: conduit-gateway -> ../Helpers/ConduitGateway.app/Contents/MacOS/conduit-gateway
+ls -l "src-tauri/target/release/bundle/macos/Toolport.app/Contents/MacOS/toolport-gateway"
+# -> a symlink: toolport-gateway -> ../Helpers/ToolportGateway.app/Contents/MacOS/toolport-gateway
 
-file "src-tauri/target/release/bundle/macos/Toolport.app/Contents/Helpers/ConduitGateway.app/Contents/MacOS/conduit-gateway"
+file "src-tauri/target/release/bundle/macos/Toolport.app/Contents/Helpers/ToolportGateway.app/Contents/MacOS/toolport-gateway"
 # -> Mach-O ... (the real binary)
 ```
 
@@ -90,7 +90,7 @@ entitlements + embedded profile that authorize the same access group, the read
 must succeed silently (no keychain password dialog).
 
 ```
-GW="src-tauri/target/release/bundle/macos/Toolport.app/Contents/Helpers/ConduitGateway.app/Contents/MacOS/conduit-gateway"
+GW="src-tauri/target/release/bundle/macos/Toolport.app/Contents/Helpers/ToolportGateway.app/Contents/MacOS/toolport-gateway"
 
 # Spawn it the way a client does (stdio MCP). Either point a real client at it,
 # or drive a quick MCP handshake. The point is that the gateway resolves the
@@ -102,7 +102,7 @@ To exercise the actual secret read, start the gateway so it proxies the server y
 configured in step (c) (it resolves that server's API key from the shared keychain
 group), then issue a tool call that requires the key. Watch for:
 
-- NO keychain "conduit-gateway wants to use your confidential information" prompt.
+- NO keychain "toolport-gateway wants to use your confidential information" prompt.
 - The proxied call succeeds (the gateway found and used the secret).
 
 You can also confirm the value round-trips with `security` IF you know the service
@@ -142,12 +142,12 @@ Prove that a binary WITHOUT the team's access-group entitlement cannot read the
 secret. Copy the gateway out and re-sign it ad-hoc (no entitlements, no team):
 
 ```
-cp "$GW" /tmp/conduit-gateway-adhoc
-codesign --force -s - /tmp/conduit-gateway-adhoc   # ad-hoc, strips entitlements
-codesign -d --entitlements - /tmp/conduit-gateway-adhoc 2>&1 | grep -i keychain || echo "no keychain-access-groups (expected)"
+cp "$GW" /tmp/toolport-gateway-adhoc
+codesign --force -s - /tmp/toolport-gateway-adhoc   # ad-hoc, strips entitlements
+codesign -d --entitlements - /tmp/toolport-gateway-adhoc 2>&1 | grep -i keychain || echo "no keychain-access-groups (expected)"
 
 # Now try to read the same secret with the ad-hoc binary's identity.
-/tmp/conduit-gateway-adhoc ...   # attempt the same secret-backed proxied call
+/tmp/toolport-gateway-adhoc ...   # attempt the same secret-backed proxied call
 ```
 
 Expected result: the read is DENIED. You should see either:

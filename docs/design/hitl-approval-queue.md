@@ -14,14 +14,14 @@ it is worth building to a high bar rather than the minimal one.
 ## Architecture constraints (verified against the code)
 
 1. **Many gateway processes, not one.** Each stdio client (Claude Desktop, Cursor, Claude
-   Code) spawns its own `conduit-gateway` over stdio; the app also supervises one in
+   Code) spawns its own `toolport-gateway` over stdio; the app also supervises one in
    `--http` mode (`lib.rs:1470-1541`). `ConfirmGuard` is in-memory **per process**
-   (`conduit-gateway.rs:914-974`).
+   (`toolport-gateway.rs:914-974`).
 2. **No inbound control channel to a gateway** today; app->gateway is one-way via files
-   under `~/.conduit/`, polled by mtime every ~1000ms (`conduit-gateway.rs:2073-2142`).
+   under `~/.conduit/`, polled by mtime every ~1000ms (`toolport-gateway.rs:2073-2142`).
 3. Observability today = shared JSONL the app polls (`inspect.jsonl` ring-50,
    `audit.jsonl`).
-4. Existing destructive interception in `process_request` (`conduit-gateway.rs:1599-1642`):
+4. Existing destructive interception in `process_request` (`toolport-gateway.rs:1599-1642`):
    token stored in `ConfirmGuard`, returned to the model as an `isError` preview, replayed
    via `toolport_confirm` (`:1362-1389`), 60s TTL, `is_destructive` = `annotations.destructiveHint`.
 5. Frontend (`src/components/`): `ActivityView.tsx` + `SettingsView.tsx`; the quarantine

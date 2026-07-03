@@ -31,7 +31,7 @@ use registry::{Profile, Registry, ServerEntry};
 
 type RegistryState = Mutex<Registry>;
 
-/// Tracks the optional `conduit-gateway --http` child the app supervises so
+/// Tracks the optional `toolport-gateway --http` child the app supervises so
 /// HTTP/OpenAPI clients (Open WebUI and the like) can connect with one click,
 /// no terminal. Only one runs at a time; the app kills it on exit.
 #[derive(Default)]
@@ -1751,7 +1751,7 @@ fn http_bridge_alive(bridge: &mut HttpBridge) -> bool {
     alive
 }
 
-/// Start `conduit-gateway --http <port>` as a supervised child so HTTP/OpenAPI
+/// Start `toolport-gateway --http <port>` as a supervised child so HTTP/OpenAPI
 /// clients can connect. Idempotent: if it's already running, returns the current
 /// status; otherwise spawns the bundled gateway binary and tracks it.
 #[tauri::command]
@@ -1774,7 +1774,7 @@ fn start_http_bridge(
         ));
     }
     let bin = clients::resolve_gateway_path()
-        .ok_or_else(|| "conduit-gateway binary not found next to the app".to_string())?;
+        .ok_or_else(|| "toolport-gateway binary not found next to the app".to_string())?;
     // Auto-generate a bearer token the client must send on every request.
     // Without it, any local process (including a web page open in the user's
     // browser) could POST to the port and run their tools.

@@ -140,7 +140,7 @@ fall back to the right-click → Open workaround in the README).
 ## Gotcha: the bundled gateway must be signed too
 
 Notarization rejects any unsigned executable in the bundle, including the
-`conduit-gateway` sidecar. Tauri signs bundled binaries during `tauri build` when
+`toolport-gateway` sidecar. Tauri signs bundled binaries during `tauri build` when
 signing is configured, so this should be automatic. If the first notarization run
 fails citing an unsigned binary, that's the gateway, we'll add an explicit sign
 step for it in the workflow.

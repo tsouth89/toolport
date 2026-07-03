@@ -1,9 +1,9 @@
 //! App-side HITL approval broker.
 //!
-//! The Toolport app hosts this broker; every `conduit-gateway` process (one per stdio
+//! The Toolport app hosts this broker; every `toolport-gateway` process (one per stdio
 //! client, plus the app's `--http` bridge) dials OUT to it when it holds a gated tool
 //! call, and blocks reading for the decision. This is the counterpart to the gateway's
-//! `request_human_decision` (see `bin/conduit-gateway.rs`).
+//! `request_human_decision` (see `bin/toolport-gateway.rs`).
 //!
 //! Protocol: the gateway connects over loopback TCP, sends one JSON line
 //! ([`ApprovalRequest`]) carrying the shared token, and reads one JSON line back

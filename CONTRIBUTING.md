@@ -2,7 +2,7 @@
 
 Thanks for your interest. Toolport is a local-first MCP gateway and manager: a
 Tauri desktop app (Rust backend + React/TypeScript frontend) plus a separate
-`conduit-gateway` binary that AI clients spawn.
+`toolport-gateway` binary that AI clients spawn.
 
 Want to ask a question, float an idea, or talk through a change before you build
 it? Join the [Discord](https://discord.gg/Xsn27MxdBA). New contributors welcome,
@@ -24,11 +24,11 @@ On macOS/Linux, see the platform notes in the [README troubleshooting](README.md
 
 ### What hot-reloads vs what needs a rebuild
 
-| You changed                                             | What happens                                                                                                                                |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| React/TS frontend (`src/`)                              | Vite hot-reloads instantly — no restart needed                                                                                              |
-| Rust backend (`src-tauri/src/`)                         | `npm run tauri dev` recompiles and restarts the app automatically                                                                           |
-| Gateway binary (`src-tauri/src/bin/conduit-gateway.rs`) | **Not rebuilt by `tauri dev`.** Run `npm run build:gateway` after changes, then restart any connected clients so they re-spawn the gateway. |
+| You changed                                              | What happens                                                                                                                                |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| React/TS frontend (`src/`)                               | Vite hot-reloads instantly — no restart needed                                                                                              |
+| Rust backend (`src-tauri/src/`)                          | `npm run tauri dev` recompiles and restarts the app automatically                                                                           |
+| Gateway binary (`src-tauri/src/bin/toolport-gateway.rs`) | **Not rebuilt by `tauri dev`.** Run `npm run build:gateway` after changes, then restart any connected clients so they re-spawn the gateway. |
 
 The gateway is a separate binary that AI clients spawn as a subprocess. Packaged
 releases bundle it, but when running from source you must build it manually:
@@ -112,7 +112,7 @@ server in the UI takes effect without restarting the client.
 
 - **Gateway "not found" when running from source.** `npm run tauri dev` builds
   the app but not the gateway sidecar. Run `npm run build:gateway` once (and
-  again after any change to `conduit-gateway.rs`).
+  again after any change to `toolport-gateway.rs`).
 
 - **macOS keychain prompts in dev.** An unsigned dev build gets an unstable
   code-signing identity, so the keychain re-prompts or denies reads. A signed
@@ -137,7 +137,7 @@ For end-user troubleshooting (OAuth, AppImage, VS Code), see the
   - `router.rs` - aggregating tools/resources and routing calls.
   - `oauth.rs` / `secrets.rs` / `remote.rs` - auth and the OS keychain.
   - `catalog.rs` - the curated + registry server catalog.
-  - `bin/conduit-gateway.rs` - the gateway binary clients connect to.
+  - `bin/toolport-gateway.rs` - the gateway binary clients connect to.
 
 ## Before you open a PR
 

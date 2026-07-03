@@ -1,5 +1,5 @@
-// Build the conduit-gateway binary and stage it where Tauri's `externalBin`
-// bundler expects it: `src-tauri/binaries/conduit-gateway-<target-triple><ext>`.
+// Build the toolport-gateway binary and stage it where Tauri's `externalBin`
+// bundler expects it: `src-tauri/binaries/toolport-gateway-<target-triple><ext>`.
 // Runs as part of `beforeBuildCommand`, so a packaged app always ships a gateway
 // matching the target.
 //
@@ -34,15 +34,15 @@ mkdirSync(destDir, { recursive: true });
 
 function gatewayPathFor(triple) {
   const sub = triple ? join(triple, profile) : profile;
-  return join("src-tauri", "target", sub, `conduit-gateway${ext}`);
+  return join("src-tauri", "target", sub, `toolport-gateway${ext}`);
 }
 
 function buildGateway(triple) {
   const targetArg = triple ? `--target ${triple} ` : "";
   console.log(
-    `[sidecar] building conduit-gateway (${profile}) ${triple ? "for " + triple : "(host)"}`,
+    `[sidecar] building toolport-gateway (${profile}) ${triple ? "for " + triple : "(host)"}`,
   );
-  execSync(`cargo build ${debug ? "" : "--release "}${targetArg}--bin conduit-gateway`, {
+  execSync(`cargo build ${debug ? "" : "--release "}${targetArg}--bin toolport-gateway`, {
     cwd: "src-tauri",
     stdio: "inherit",
   });
@@ -53,7 +53,7 @@ function buildGateway(triple) {
 
 // The staged file must carry the triple Tauri will look for at bundle time.
 const stagedTriple = requested || hostTriple();
-const dest = join(destDir, `conduit-gateway-${stagedTriple}${ext}`);
+const dest = join(destDir, `toolport-gateway-${stagedTriple}${ext}`);
 
 // Break the chicken-and-egg: the gateway's own build (via the shared build.rs ->
 // tauri_build) validates this externalBin path exists at compile time. Seed a
