@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+early_access: false
+reviews:
+  # "chill" keeps it to substantive findings instead of nitpicking every line.
+  profile: chill
+  # Advisory only — CodeRabbit should never block a merge with a change request.
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+  # Skip generated / vendored / build output so reviews stay signal-heavy.
+  path_filters:
+    - "!**/package-lock.json"
+    - "!**/*.lock"
+    - "!dist/**"
+    - "!src-tauri/target/**"
+    - "!**/*.min.*"
+  path_instructions:
+    - path: "src/**/*.{ts,tsx}"
+      instructions: >-
+        React + TypeScript frontend. Formatting and lint style are enforced by
+        Prettier and ESLint in CI, so do NOT comment on formatting, semicolons,
+        quotes, or import order. Focus on logic correctness, React hooks
+        dependencies, state handling, and accessibility.
+    - path: "src-tauri/**/*.rs"
+      instructions: >-
+        Rust (Tauri app + MCP gateway). rustfmt/clippy own style, so skip it.
+        Focus on correctness, panics/unwraps, and the security guards
+        (spawn-guard, client scoping, tool-supply-chain checks) where a
+        regression is high-impact.
+    - path: "**/*.test.ts"
+      instructions: >-
+        Vitest tests. Prefer flagging missing edge cases or incorrect
+        expectations over stylistic suggestions.
+chat:
+  auto_reply: true

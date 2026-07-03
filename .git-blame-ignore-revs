@@ -1,0 +1,7 @@
+# Revisions listed here are skipped by `git blame` (bulk reformats, not real
+# authorship changes). Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub honors this file automatically.
+
+# Tree-wide Prettier reformat of the frontend (#132).
+1649252581513d87fa200e4a52e03a81f4ab9a4c
