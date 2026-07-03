@@ -171,11 +171,12 @@ pub struct Registry {
     /// ephemeral per-session allowlist that is NOT saved here.
     #[serde(default)]
     pub human_approval_allow: Vec<String>,
-    /// Per-tool exposure overrides, keyed by the exposed (`server__tool`) name: rename or
+    /// Per-tool exposure overrides, keyed by server id then ORIGINAL tool name (not the
+    /// exposed name, so a rename or `_2` collision suffix can't misalign the key): rename or
     /// re-describe a tool as clients see it (e.g. neutralize a poisoned description). The
     /// call still routes to the original downstream tool.
     #[serde(default)]
-    pub tool_overrides: HashMap<String, ToolOverride>,
+    pub tool_overrides: HashMap<String, HashMap<String, ToolOverride>>,
     /// Quarantine-on-drift: when true, a high-risk tool (poisoned definition, or a
     /// destructive tool whose definition changed/appeared) that drifts from its pinned
     /// baseline is hidden and blocked from every client until the user re-approves it.
@@ -521,19 +522,26 @@ impl Registry {
         self.human_approval_allow.iter().any(|k| k == key)
     }
 
-    /// Set (or replace) the exposure override for an exposed (`server__tool`) name. An
-    /// override with both fields cleared is removed rather than stored empty.
-    pub fn set_tool_override(&mut self, exposed: String, ov: ToolOverride) {
+    /// Set (or replace) the exposure override for a `(server, original tool)`. An override
+    /// with both fields cleared is removed rather than stored empty (and the server's map is
+    /// dropped when it becomes empty).
+    pub fn set_tool_override(&mut self, server: String, tool: String, ov: ToolOverride) {
         if ov.name.is_none() && ov.description.is_none() {
-            self.tool_overrides.remove(&exposed);
+            self.clear_tool_override(&server, &tool);
         } else {
-            self.tool_overrides.insert(exposed, ov);
+            self.tool_overrides.entry(server).or_default().insert(tool, ov);
         }
     }
 
-    /// Remove any override for an exposed tool name (restore the server's own definition).
-    pub fn clear_tool_override(&mut self, exposed: &str) {
-        self.tool_overrides.remove(exposed);
+    /// Remove any override for a `(server, original tool)` (restore the server's own
+    /// definition), dropping the server's map when it becomes empty.
+    pub fn clear_tool_override(&mut self, server: &str, tool: &str) {
+        if let Some(m) = self.tool_overrides.get_mut(server) {
+            m.remove(tool);
+            if m.is_empty() {
+                self.tool_overrides.remove(server);
+            }
+        }
     }
 
     /// Set lazy discovery mode (gateway exposes meta-tools vs the full catalog).

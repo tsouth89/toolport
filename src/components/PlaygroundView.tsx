@@ -51,20 +51,10 @@ function isDestructive(tool: McpTool): boolean {
   return tool.annotations?.destructiveHint === true || tool.destructiveHint === true;
 }
 
-/** Mirror of the gateway's `sanitize_segment`: keep [A-Za-z0-9_], everything else -> `_`. */
-function sanitizeSegment(s: string): string {
-  return s.replace(/[^A-Za-z0-9_]/g, "_");
-}
-
-/** The exposed (client-facing) name for a tool, matching the gateway's namespacing. This
- * is the key the registry stores tool overrides under. */
-function exposedName(serverId: string, tool: string): string {
-  return `${sanitizeSegment(serverId)}__${sanitizeSegment(tool)}`;
-}
-
 /** Editor to rename / re-describe a tool as clients see it (the security lever: locally
  * neutralize a misleading or injection-laden description). Collapsed by default; the call
- * still routes to the original downstream tool. */
+ * still routes to the original downstream tool. Overrides are keyed by (server, original
+ * tool name), so they're stable across renames and collision suffixes. */
 function ToolOverrideEditor({
   serverId,
   tool,
@@ -76,8 +66,7 @@ function ToolOverrideEditor({
   registry: Registry | null;
   onRegistryChange: (r: Registry) => void;
 }) {
-  const exposed = exposedName(serverId, tool.name);
-  const current = registry?.toolOverrides?.[exposed];
+  const current = registry?.toolOverrides?.[serverId]?.[tool.name];
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -89,14 +78,16 @@ function ToolOverrideEditor({
     setDescription(current?.description ?? "");
     setOpen(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [exposed]);
+  }, [serverId, tool.name]);
 
   const hasOverride = !!current;
 
   const save = async () => {
     setBusy(true);
     try {
-      onRegistryChange(await setToolOverride(exposed, name || null, description || null));
+      onRegistryChange(
+        await setToolOverride(serverId, tool.name, name || null, description || null),
+      );
     } catch (e) {
       toastError(`Couldn't save override: ${e}`);
     } finally {
@@ -106,7 +97,7 @@ function ToolOverrideEditor({
   const reset = async () => {
     setBusy(true);
     try {
-      onRegistryChange(await clearToolOverride(exposed));
+      onRegistryChange(await clearToolOverride(serverId, tool.name));
       setName("");
       setDescription("");
     } catch (e) {
@@ -146,13 +137,13 @@ function ToolOverrideEditor({
             <span className="text-muted-foreground">
               Name{" "}
               <span className="text-muted-foreground/60">
-                (blank keeps <span className="font-mono">{exposed}</span>)
+                (blank keeps <span className="font-mono">{tool.name}</span>)
               </span>
             </span>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder={exposed}
+              placeholder={tool.name}
               className="rounded-md border border-input bg-transparent px-2.5 py-1.5 font-mono text-xs shadow-sm focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
             />
           </label>

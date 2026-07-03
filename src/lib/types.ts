@@ -318,8 +318,8 @@ export interface AllowedTool {
   persistent: boolean;
 }
 
-/** A per-tool exposure override, keyed in `Registry.toolOverrides` by the exposed
- * (`server__tool`) name. Rename and/or replace the description clients see; the call still
+/** A per-tool exposure override, keyed in `Registry.toolOverrides` by server id then
+ * original tool name. Rename and/or replace the description clients see; the call still
  * routes to the original downstream tool. */
 export interface ToolOverride {
   name?: string;
@@ -331,8 +331,8 @@ export interface Registry {
   servers: ServerEntry[];
   profiles: Profile[];
   activeProfileId: string | null;
-  /** Per-tool exposure overrides (rename / re-describe), keyed by exposed `server__tool` name. */
-  toolOverrides?: Record<string, ToolOverride>;
+  /** Per-tool exposure overrides (rename / re-describe), keyed by server id then original tool name. */
+  toolOverrides?: Record<string, Record<string, ToolOverride>>;
   /** Global switch: hide and block every destructive-hinted tool. */
   denyDestructive?: boolean;
   /** Per-call confirmation: intercept destructive tools with a preview + token. */

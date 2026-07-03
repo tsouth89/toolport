@@ -185,10 +185,11 @@ pub struct Router {
     seen: HashSet<String>,
     /// What may be exposed; applied as each server is added.
     policy: ToolPolicy,
-    /// Per-tool exposure overrides (rename / re-describe), keyed by the ORIGINAL exposed
-    /// (`server__tool`) name. Applied while indexing; the route still points at the real
+    /// Per-tool exposure overrides (rename / re-describe), keyed by server id then ORIGINAL
+    /// tool name (NOT the exposed name, so a rename or a `_2` collision suffix can't
+    /// misalign the key). Applied while indexing; the route still points at the real
     /// downstream tool, so a rename never changes where a call goes.
-    overrides: HashMap<String, ToolOverride>,
+    overrides: HashMap<String, HashMap<String, ToolOverride>>,
     /// Exposed name -> why it's hidden, for a clear message if a hidden tool is
     /// still called by name (e.g. via conduit_call_tool).
     blocked: HashMap<String, String>,
@@ -233,8 +234,16 @@ impl Router {
 
     /// Set the per-tool exposure overrides. Must be called BEFORE `add`/`refresh`, since
     /// they're applied while indexing each server's tools.
-    pub fn set_overrides(&mut self, overrides: HashMap<String, ToolOverride>) {
+    pub fn set_overrides(&mut self, overrides: HashMap<String, HashMap<String, ToolOverride>>) {
         self.overrides = overrides;
+    }
+
+    /// The real `(server id, original tool name)` an exposed name routes to, or `None` if
+    /// unknown. Callers that need a call's provenance or server-scoping MUST use this rather
+    /// than string-splitting the exposed name on `__` — that split silently mis-derives the
+    /// server for a renamed tool (overrides) or any server id containing `__`.
+    pub fn route_of(&self, exposed: &str) -> Option<(&str, &str)> {
+        self.routes.get(exposed).map(|(s, t)| (s.as_str(), t.as_str()))
     }
 
     /// Index one server's advertised tools/resources/prompts into the exposed
@@ -263,8 +272,9 @@ impl Router {
             // Apply the user's exposure override (keyed by the ORIGINAL exposed name).
             // Cloned to owned so we don't hold a borrow of `self.overrides` across the
             // `self.seen` mutation below.
-            let ov_name = self.overrides.get(&exposed).and_then(|o| o.name.clone());
-            let ov_desc = self.overrides.get(&exposed).and_then(|o| o.description.clone());
+            let ov = self.overrides.get(server_id).and_then(|m| m.get(orig));
+            let ov_name = ov.and_then(|o| o.name.clone());
+            let ov_desc = ov.and_then(|o| o.description.clone());
             // Rename changes ONLY the client-facing name; the route below still points at
             // the real downstream tool, so a call never goes anywhere new. A rename that is
             // empty or would collide with an existing exposed name is ignored (keep the
@@ -686,16 +696,17 @@ mod tests {
     #[test]
     fn tool_overrides_rename_and_redescribe() {
         let mut router = Router::new();
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "srv__echo".to_string(),
+        // Keyed by (server id, ORIGINAL tool name), not the exposed name.
+        let mut srv = HashMap::new();
+        srv.insert(
+            "echo".to_string(),
             ToolOverride { name: Some("say".into()), description: Some("say it back".into()) },
         );
-        overrides.insert(
-            "srv__add".to_string(),
+        srv.insert(
+            "add".to_string(),
             ToolOverride { name: None, description: Some("cleaned".into()) },
         );
-        router.set_overrides(overrides);
+        router.set_overrides(HashMap::from([("srv".to_string(), srv)]));
         router.add(mock_server("srv"));
 
         let tools = router.aggregated_tools();
@@ -721,12 +732,11 @@ mod tests {
         // add is indexed after echo, so renaming add -> "srv__echo" (already taken) must
         // fall back to add's original name, keeping routing unambiguous.
         let mut router = Router::new();
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "srv__add".to_string(),
+        let srv = HashMap::from([(
+            "add".to_string(),
             ToolOverride { name: Some("srv__echo".into()), description: None },
-        );
-        router.set_overrides(overrides);
+        )]);
+        router.set_overrides(HashMap::from([("srv".to_string(), srv)]));
         router.add(mock_server("srv"));
 
         let tools = router.aggregated_tools();
@@ -735,6 +745,24 @@ mod tests {
         assert!(names.contains(&"srv__add"), "add fell back to its own name");
         assert_eq!(router.route_call("srv__echo", json!({})).unwrap()["content"][0]["text"], "srv:echo");
         assert_eq!(router.route_call("srv__add", json!({})).unwrap()["content"][0]["text"], "srv:add");
+    }
+
+    #[test]
+    fn route_of_resolves_renamed_tool_to_real_server_and_original_tool() {
+        // The gate derives provenance/scoping from route_of, NOT by splitting the exposed
+        // name. A renamed tool must still resolve to its real (server, original tool) so the
+        // untrusted-source HITL check and per-client scoping aren't silently bypassed.
+        let mut router = Router::new();
+        let srv = HashMap::from([(
+            "echo".to_string(),
+            ToolOverride { name: Some("say".into()), description: None },
+        )]);
+        router.set_overrides(HashMap::from([("srv".to_string(), srv)]));
+        router.add(mock_server("srv"));
+
+        assert_eq!(router.route_of("say"), Some(("srv", "echo")), "renamed tool resolves to origin");
+        assert_eq!(router.route_of("srv__add"), Some(("srv", "add")), "normal tool resolves");
+        assert_eq!(router.route_of("nope"), None, "unknown name resolves to nothing");
     }
 
     #[test]
