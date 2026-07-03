@@ -55,6 +55,12 @@ Entries before the rename below shipped under the project's former name, Conduit
   Realistic results are far under the cap, so detection is unaffected in practice.
 
 ### Added
+- **Tool identities (capability provenance).** A new Activity panel shows what each
+  model-visible tool name actually maps to: its source server and the profiles that
+  enable it, the pinned definition fingerprint drift detection checks against, and when
+  the tool was first seen / last changed. Prefixing helps the model pick a tool; this
+  lets a human verify what crossed the boundary. (The integrity baseline now tracks
+  first-seen / last-changed per tool to power it.)
 - **Teams can require human approval org-wide.** A team admin can turn on "Require
   human approval" in the Teams policy, and every member's gateway then holds gated
   tool calls for a person to approve. Like the other org policies, it's tighten-only:
