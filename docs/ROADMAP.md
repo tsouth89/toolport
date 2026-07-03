@@ -172,7 +172,11 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       are a hard prerequisite (auth/list-before-act) or whose description doesn't match
       the user's query keywords, so lazy discovery never hides a load-bearing tool.
       Fits alongside tool overrides (same per-tool config surface). Suggested by kevrex5,
-      who built the same pattern. (S-M)
+      who built the same pattern. (S-M) **SHIPPED (#126)** as the PlaygroundView pin toggle.
+- [x] **Client support: pi coding agent. SHIPPED (#128):** requested on the launch thread
+      ("a lot of users here use pi for local agent coding"). Registered pi as a
+      `JsonMcpServers` client writing its Pi-owned global config at `~/.pi/agent/mcp.json`
+      (home-anchored), mirroring the Cursor/BoltAI writers. Bound for the next release.
 
 ## The core decision: Toolport is a gateway, not a file editor
 
