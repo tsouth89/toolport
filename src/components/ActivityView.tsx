@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronRight,
+  Fingerprint,
   History,
   ScrollText,
   Search,
@@ -24,6 +25,7 @@ import {
   getSavingsSummary,
   getSearchTraces,
   getSecurityEvents,
+  getToolIdentities,
   type SecurityEvent,
 } from "@/lib/api";
 import type {
@@ -34,6 +36,7 @@ import type {
   SavingsSummary,
   SearchTrace,
   ServerStat,
+  ToolIdentity,
 } from "@/lib/types";
 import {
   Select,
@@ -832,6 +835,120 @@ function DiscoveryTraces({ refreshKey }: { refreshKey: number }) {
   );
 }
 
+/** One tool's identity card: the model-visible alias joined to its source server +
+ * profiles, with the pinned definition fingerprint and first-seen / last-changed. */
+function ToolIdentityRow({ t }: { t: ToolIdentity }) {
+  const [open, setOpen] = useState(false);
+  const fpShort = t.fingerprint.replace(/^v\d+:/, "").slice(0, 12) || "-";
+  const fmtDate = (ms: number) => (ms > 0 ? new Date(ms).toLocaleDateString() : "-");
+  return (
+    <div className="rounded-md border border-border/50 text-sm">
+      <div
+        className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/30"
+        onClick={() => setOpen((o) => !o)}
+        role="button"
+        aria-expanded={open}
+        tabIndex={0}
+      >
+        <ChevronRight
+          className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${
+            open ? "rotate-90" : ""
+          }`}
+        />
+        <span className="min-w-0 truncate font-mono text-xs">{t.alias}</span>
+        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+          {t.serverName || t.serverId || "unattributed"}
+        </span>
+        {t.quarantined && (
+          <span className="shrink-0 rounded bg-warning/15 px-1.5 py-0.5 text-[11px] text-warning">
+            quarantined
+          </span>
+        )}
+        <span
+          className="ml-auto shrink-0 font-mono text-[11px] text-muted-foreground"
+          title={t.fingerprint}
+        >
+          {fpShort}
+        </span>
+      </div>
+      {open && (
+        <div className="border-t border-border/50 bg-muted/20 px-3 py-2 pl-9 text-xs">
+          <dl className="grid grid-cols-[7rem_1fr] gap-x-3 gap-y-1">
+            <dt className="text-muted-foreground">Upstream tool</dt>
+            <dd className="font-mono break-all">{t.upstream || "-"}</dd>
+            <dt className="text-muted-foreground">Source server</dt>
+            <dd>{t.serverName ? `${t.serverName} (${t.serverId})` : "unattributed"}</dd>
+            <dt className="text-muted-foreground">Profiles</dt>
+            <dd>{t.profiles.length ? t.profiles.join(", ") : "-"}</dd>
+            <dt className="text-muted-foreground">Fingerprint</dt>
+            <dd className="font-mono break-all">{t.fingerprint || "-"}</dd>
+            <dt className="text-muted-foreground">First seen</dt>
+            <dd>{fmtDate(t.firstSeen)}</dd>
+            <dt className="text-muted-foreground">Last changed</dt>
+            <dd>{fmtDate(t.lastChanged)}</dd>
+          </dl>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Collapsible capability-provenance panel: every pinned tool's identity, so a human
+ * can verify which server/profile an alias maps to and whether its definition drifted.
+ * Self-hides until the gateway has pinned a baseline. */
+function ToolIdentities({ refreshKey }: { refreshKey: number }) {
+  const [rows, setRows] = useState<ToolIdentity[]>([]);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    getToolIdentities()
+      .then((r) => alive && setRows(r))
+      .catch(() => alive && setRows([]));
+    return () => {
+      alive = false;
+    };
+  }, [refreshKey]);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="mb-6 rounded-lg border border-border/60 bg-muted/[0.04] p-4">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <Fingerprint className="size-4 shrink-0 text-muted-foreground" />
+        <h3 className="text-sm font-medium">Tool identities</h3>
+        <span className="rounded-full bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground">
+          {rows.length}
+        </span>
+        <ChevronRight
+          className={`ml-auto size-4 text-muted-foreground transition-transform ${
+            open ? "rotate-90" : ""
+          }`}
+        />
+      </button>
+      {open && (
+        <>
+          <p className="mt-2 mb-3 max-w-2xl text-xs text-muted-foreground">
+            What each model-visible tool name actually maps to: its source server and
+            profiles, the pinned definition fingerprint drift detection checks against, and
+            when it was first seen or last changed. Prefixing helps the model pick a tool;
+            this helps you verify what crossed the boundary.
+          </p>
+          <div className="flex flex-col gap-1">
+            {rows.map((t) => (
+              <ToolIdentityRow key={t.alias} t={t} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** Collapsible live inspector: a local "network tab" for MCP. Only rendered while
  * live inspection is on. Lists recent captured calls, each expandable to its raw
  * request + response JSON. Ephemeral, local, opt-in. */
@@ -969,6 +1086,7 @@ export function ActivityView({
         <QuietDriftHistory events={infoSecurity} onDismiss={dismissSecurity} />
       ) : null}
       <DiscoveryTraces refreshKey={refreshKey} />
+      <ToolIdentities refreshKey={refreshKey} />
       {registry?.liveInspect ? <LiveInspector refreshKey={refreshKey} /> : null}
       {savings && savings.tokensSaved > 0 ? (
         <SavingsBanner savings={savings} />

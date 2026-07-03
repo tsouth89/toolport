@@ -18,6 +18,7 @@ import type {
   Registry,
   SavingsSummary,
   SearchTrace,
+  ToolIdentity,
   ServerEntry,
   ToolCallResult,
   Stack,
@@ -250,6 +251,12 @@ export function getSearchTraces(limit = 100): Promise<SearchTrace[]> {
 /** Clear the search-trace log. */
 export function clearSearchTraces(): Promise<void> {
   return invoke<void>("clear_search_traces");
+}
+
+/** Every pinned tool's verifiable identity (alias -> server/profiles + fingerprint +
+ * first-seen/last-changed) for the active profile. Empty until a baseline is pinned. */
+export function getToolIdentities(): Promise<ToolIdentity[]> {
+  return invoke<ToolIdentity[]>("list_tool_identities");
 }
 
 /** Toggle quarantine-on-drift: block a high-risk tool that drifted until re-approved. */

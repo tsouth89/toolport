@@ -107,6 +107,20 @@ export interface SearchTrace {
   escalated: boolean;
 }
 
+/** One exposed tool's verifiable identity: the model-visible alias joined back to its
+ * source server + profiles, with the integrity fingerprint and first-seen/last-changed. */
+export interface ToolIdentity {
+  alias: string;
+  serverId: string;
+  serverName: string;
+  profiles: string[];
+  upstream: string;
+  fingerprint: string;
+  firstSeen: number;
+  lastChanged: number;
+  quarantined: boolean;
+}
+
 export interface ProbeResult {
   serverId: string;
   ok: boolean;

@@ -7,6 +7,19 @@ Entries before the rename below shipped under the project's former name, Conduit
 ## [Unreleased]
 
 ### Security
+- **Closed several bypasses in the stdio spawn guard** (the supply-chain check that
+  refuses code-smuggling launch args on a spawned server). Two rounds of adversarial
+  review found a booby-trapped (team- or registry-sourced) config could still reach code
+  execution through: wrapper programs (`sudo`/`time`/`flock`/`busybox`/... run the real
+  program from their args); Deno/Bun remote execution (`deno eval`, `deno run`/`serve`
+  and `bun run` of an `http(s)://` / `npm:` / `jsr:` target); several unlisted
+  interpreters (`osascript`, `elixir`, `lua`, `Rscript`, `julia`, `awk`, ...) and
+  `cmd /c` on Windows; an attached `node -r./x` preload; and code-injecting env vars in
+  the config (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `BASH_ENV`, and preload/eval options
+  inside `NODE_OPTIONS` / `RUBYOPT` / `JAVA_TOOL_OPTIONS`). The guard now catches all of
+  these. `env VAR=val <cmd>` still works (the assignments are screened and the real
+  command is checked), and normal launchers (npx/node/python/docker, benign env/tuning
+  vars) are unaffected.
 - **Agent-control enable/disable now respects the client's scope.** In HTTP mode a
   registered client could call `toolport_enable_server` / `toolport_disable_server` on
   a server outside its allowed set (toggling another tenant's server), and a "no server
@@ -55,6 +68,12 @@ Entries before the rename below shipped under the project's former name, Conduit
   Realistic results are far under the cap, so detection is unaffected in practice.
 
 ### Added
+- **Tool identities (capability provenance).** A new Activity panel shows what each
+  model-visible tool name actually maps to: its source server and the profiles that
+  enable it, the pinned definition fingerprint drift detection checks against, and when
+  the tool was first seen / last changed. Prefixing helps the model pick a tool; this
+  lets a human verify what crossed the boundary. (The integrity baseline now tracks
+  first-seen / last-changed per tool to power it.)
 - **Teams can require human approval org-wide.** A team admin can turn on "Require
   human approval" in the Teams policy, and every member's gateway then holds gated
   tool calls for a person to approve. Like the other org policies, it's tighten-only:

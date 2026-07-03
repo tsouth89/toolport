@@ -27,7 +27,7 @@ pub mod teams;
 pub mod vendors;
 
 use downstream::{DownstreamServer, StdioTransport};
-use registry::{Registry, ServerEntry};
+use registry::{Profile, Registry, ServerEntry};
 
 type RegistryState = Mutex<Registry>;
 
@@ -1013,6 +1013,110 @@ fn clear_search_traces() -> Result<(), String> {
     Ok(())
 }
 
+/// One exposed tool's verifiable identity: the model-visible alias joined back to its
+/// source server + the profiles that enable it, plus the integrity fingerprint and
+/// when the definition was first seen / last changed. This is the "capability
+/// provenance" view: prefixing helps the model pick a tool, this helps a human verify
+/// what actually crossed the boundary.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ToolIdentity {
+    /// Model-visible exposed name (the integrity pin key).
+    alias: String,
+    /// Resolved source server id, or empty if the alias couldn't be attributed (a
+    /// renamed tool whose alias no longer carries its `server__` prefix; its exact
+    /// provenance needs the deeper gateway integration, tracked separately).
+    server_id: String,
+    server_name: String,
+    /// Names of the profiles whose enabled set includes this server.
+    profiles: Vec<String>,
+    /// Upstream tool name, taken as the alias suffix after `server__`.
+    upstream: String,
+    /// Version-prefixed fingerprint of the pinned definition (drift detection compares
+    /// against this exact value).
+    fingerprint: String,
+    first_seen: u64,
+    last_changed: u64,
+    quarantined: bool,
+}
+
+/// Assemble the identity rows. Pure (no state/IO) so the alias->server attribution is
+/// unit-testable.
+fn build_tool_identities(
+    baselines: &std::collections::BTreeMap<String, integrity::ToolBaseline>,
+    quarantined: &std::collections::BTreeSet<String>,
+    servers: &[ServerEntry],
+    profiles: &[Profile],
+) -> Vec<ToolIdentity> {
+    // Exposed prefix (sanitize_segment(id)) -> server. Matching by the KNOWN prefixes
+    // (longest wins) is robust against a server id that itself contains `__`, unlike a
+    // naive split on the first separator.
+    let prefixed: Vec<(String, &ServerEntry)> = servers
+        .iter()
+        .map(|s| (router::sanitize_segment(&s.id), s))
+        .collect();
+    baselines
+        .iter()
+        .map(|(alias, base)| {
+            let mut server: Option<&ServerEntry> = None;
+            let mut upstream = String::new();
+            let mut best_len = 0usize;
+            for (prefix, srv) in &prefixed {
+                if let Some(rest) = alias
+                    .strip_prefix(prefix.as_str())
+                    .and_then(|r| r.strip_prefix("__"))
+                {
+                    if prefix.len() > best_len || server.is_none() {
+                        best_len = prefix.len();
+                        server = Some(srv);
+                        upstream = rest.to_string();
+                    }
+                }
+            }
+            let (server_id, server_name) =
+                server.map(|s| (s.id.clone(), s.name.clone())).unwrap_or_default();
+            let profile_names = if server_id.is_empty() {
+                Vec::new()
+            } else {
+                profiles
+                    .iter()
+                    .filter(|p| p.enabled_server_ids.contains(&server_id))
+                    .map(|p| p.name.clone())
+                    .collect()
+            };
+            ToolIdentity {
+                alias: alias.clone(),
+                server_id,
+                server_name,
+                profiles: profile_names,
+                upstream,
+                fingerprint: base.fingerprint.clone(),
+                first_seen: base.first_seen,
+                last_changed: base.last_changed,
+                quarantined: quarantined.contains(alias),
+            }
+        })
+        .collect()
+}
+
+/// The capability-provenance table: every pinned tool's identity for the active
+/// profile, newest-changed first. Empty until the gateway has pinned a baseline.
+#[tauri::command]
+fn list_tool_identities(state: State<RegistryState>) -> Vec<ToolIdentity> {
+    let reg = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let profile = reg.active_profile_id.as_deref();
+    let mut ids = build_tool_identities(
+        &integrity::baselines(profile),
+        &integrity::quarantined(profile),
+        &reg.servers,
+        &reg.profiles,
+    );
+    ids.sort_by(|a, b| b.last_changed.cmp(&a.last_changed).then(a.alias.cmp(&b.alias)));
+    ids
+}
+
 /// Toggle quarantine-on-drift. When enabled, the gateway hides and blocks a high-risk
 /// tool (poisoned definition, or a destructive tool whose definition changed/appeared)
 /// that drifts from its pinned baseline, until the user re-approves it.
@@ -1934,6 +2038,7 @@ pub fn run() {
             clear_inspect_log,
             get_search_traces,
             clear_search_traces,
+            list_tool_identities,
             set_quarantine_on_drift,
             list_quarantined,
             release_quarantine,
@@ -2083,6 +2188,67 @@ mod tests {
             source: None,
             disabled_tools: vec![],
         }
+    }
+
+    fn plain_server(id: &str, name: &str) -> ServerEntry {
+        ServerEntry {
+            id: id.into(),
+            name: name.into(),
+            transport: "stdio".into(),
+            command: Some("x".into()),
+            args: vec![],
+            env: vec![],
+            url: None,
+            source: None,
+            disabled_tools: vec![],
+        }
+    }
+
+    #[test]
+    fn tool_identities_attribute_alias_to_server_and_profiles() {
+        use std::collections::{BTreeMap, BTreeSet};
+        let servers = vec![plain_server("gh", "GitHub"), plain_server("my-server", "My Server")];
+        let profiles = vec![Profile {
+            id: "default".into(),
+            name: "Default".into(),
+            enabled_server_ids: vec!["gh".into()],
+        }];
+        let mut baselines = BTreeMap::new();
+        let bl = |fp: &str, fs: u64, lc: u64| integrity::ToolBaseline {
+            fingerprint: fp.into(),
+            first_seen: fs,
+            last_changed: lc,
+        };
+        baselines.insert("gh__create_issue".to_string(), bl("v2:abc", 100, 200));
+        baselines.insert("my_server__do_thing".to_string(), bl("v2:def", 50, 60));
+        baselines.insert("orphan_alias".to_string(), bl("v2:ghi", 1, 2));
+        let quarantined: BTreeSet<String> =
+            ["gh__create_issue".to_string()].into_iter().collect();
+
+        let ids = build_tool_identities(&baselines, &quarantined, &servers, &profiles);
+        let get = |a: &str| ids.iter().find(|i| i.alias == a).cloned().unwrap();
+
+        let gh = get("gh__create_issue");
+        assert_eq!(gh.server_id, "gh");
+        assert_eq!(gh.server_name, "GitHub");
+        assert_eq!(gh.upstream, "create_issue");
+        assert_eq!(gh.profiles, vec!["Default".to_string()]);
+        assert_eq!(gh.fingerprint, "v2:abc");
+        assert!(gh.quarantined);
+
+        // The REAL server id ("my-server") is recovered even though its exposed prefix
+        // is the sanitized "my_server". Not enabled in any profile -> empty profiles.
+        let my = get("my_server__do_thing");
+        assert_eq!(my.server_id, "my-server");
+        assert_eq!(my.upstream, "do_thing");
+        assert!(my.profiles.is_empty());
+        assert!(!my.quarantined);
+
+        // An alias matching no server prefix is honestly left unattributed, not guessed.
+        let orphan = get("orphan_alias");
+        assert_eq!(orphan.server_id, "");
+        assert_eq!(orphan.server_name, "");
+        assert!(orphan.profiles.is_empty());
     }
 
     #[test]
