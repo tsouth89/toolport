@@ -4,6 +4,7 @@ import {
   ChevronRight,
   ClipboardList,
   Compass,
+  Download,
   FlaskConical,
   FolderOpen,
   Layers,
@@ -297,7 +298,9 @@ function statusOf(client: DetectedClient): ClientStatus {
 }
 
 const dotClass: Record<ClientStatus, string> = {
-  active: "bg-success",
+  // These dots only render for NOT-connected clients (connected ones use the
+  // green chain icon), so none of them should be green - green means connected.
+  active: "bg-muted-foreground/50",
   empty: "bg-muted-foreground/40",
   error: "bg-warning",
   missing: "bg-muted-foreground/20",
@@ -318,16 +321,20 @@ function ClientRow({ client, importCount, selected, onSelect }: RowProps) {
   const missing = status === "missing";
   const connected = client.gatewayInstalled;
 
-  const right =
+  // Label the exception, not the rule. The green chain icon already says
+  // "connected", so we don't repeat the word on every row - that just buries the
+  // one row that isn't connected under a wall of green. Only non-connected /
+  // error / missing states get a status word, so "not connected" actually stands
+  // out. The import backlog is a separate, secondary badge either way.
+  const statusWord =
     status === "error"
       ? "error"
       : status === "missing"
         ? "not found"
-        : importCount > 0
-          ? `${importCount} to import`
-          : connected
-            ? "connected"
-            : "ready";
+        : connected
+          ? null
+          : "not connected";
+  const showBadge = importCount > 0 && status !== "error" && status !== "missing";
 
   return (
     <Tooltip>
@@ -348,12 +355,22 @@ function ClientRow({ client, importCount, selected, onSelect }: RowProps) {
             />
           )}
           <span className="truncate">{client.name}</span>
-          <span
-            className={`ml-auto shrink-0 text-xs ${
-              importCount > 0 ? "text-owned" : "text-muted-foreground"
-            }`}
-          >
-            {right}
+          <span className="ml-auto flex shrink-0 items-center gap-1.5">
+            {showBadge && (
+              <span className="inline-flex items-center gap-0.5 rounded-full bg-owned/15 px-1.5 text-[10px] font-medium text-owned">
+                <Download className="size-2.5" />
+                {importCount}
+              </span>
+            )}
+            {statusWord && (
+              <span
+                className={`text-xs ${
+                  status === "error" ? "text-warning" : "text-muted-foreground"
+                }`}
+              >
+                {statusWord}
+              </span>
+            )}
           </span>
         </button>
       </TooltipTrigger>

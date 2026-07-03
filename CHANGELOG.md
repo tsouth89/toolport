@@ -97,6 +97,15 @@ Entries before the rename below shipped under the project's former name, Conduit
   server-config reloads. The dispatcher already released its locks before the
   downstream call and the approval wait; the accept loop now hands each request to a
   worker instead of serving them one at a time.
+- **Clearer client list and import view.** The client sidebar now surfaces connection
+  state as the signal instead of the import backlog: connected clients read as a plain
+  status (the count of importable servers moved to a small badge), and only
+  not-connected / not-found / error clients carry a status word, so the one client that
+  isn't wired up stands out instead of being buried under a wall of "connected". In a
+  client's detail, "Move config in" is now the emphasized action (it's the real cutover
+  that saves context), "Import" is clearly framed as a copy, and a note warns when
+  importing into an already-connected client would load its tools twice. The profile
+  scope dropdown was also widened so "All enabled servers" is no longer clipped.
 
 ### Fixed
 - **Approval prompt is keyboard- and screen-reader-accessible.** When a held call

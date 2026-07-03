@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowRight, Check, Download, Link2, Plug, PlugZap, Puzzle, Shuffle } from "lucide-react";
+import { ArrowRight, Check, Download, Link2, Plug, PlugZap, Puzzle, Shuffle, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
 import { addServer, installGateway, migrateClient, uninstallGateway } from "@/lib/api";
@@ -248,7 +248,7 @@ export function ClientDetail({
         <div className="flex shrink-0 items-center gap-2">
           {profiles.length > 1 && (
             <Select value={profile || "__all__"} onValueChange={(v) => setProfile(v === "__all__" ? "" : v)}>
-              <SelectTrigger size="sm" className="w-40">
+              <SelectTrigger size="sm" className="w-52">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -327,7 +327,7 @@ export function ClientDetail({
             {toImport.length > 0 && (
               <Button
                 size="sm"
-                variant="outline"
+                variant="ghost"
                 className="h-7 px-2 text-xs"
                 onClick={handleImportAll}
                 disabled={busy}
@@ -339,7 +339,7 @@ export function ClientDetail({
             {movable.length > 0 && (
               <Button
                 size="sm"
-                variant="outline"
+                variant="default"
                 className="h-7 px-2 text-xs"
                 onClick={() => setMigrateOpen(true)}
                 disabled={busy}
@@ -350,13 +350,33 @@ export function ClientDetail({
             )}
           </div>
         </div>
-        <p className="mb-3 text-xs text-muted-foreground">
+        <p className="mb-1 text-xs text-muted-foreground">
           The servers {client.name} already has, from its config and any plugins
-          (tagged below). Import what you want Toolport to manage; it becomes the
-          source of truth and serves them back through the gateway. "Move config in"
-          also clears the config-file ones out of {client.name}, plugin servers stay
-          (only {client.name} can remove those).
+          (tagged below).
         </p>
+        <ul className="mb-3 space-y-0.5 text-xs text-muted-foreground">
+          <li>
+            <span className="font-medium text-foreground">Import</span> copies a
+            server into Toolport; {client.name} keeps its own copy.
+          </li>
+          <li>
+            <span className="font-medium text-foreground">Move config in</span>{" "}
+            copies it, then removes it from {client.name}'s config so the gateway is
+            the only source (plugin servers stay, only {client.name} can remove
+            those). This is the cutover that actually saves context.
+          </li>
+        </ul>
+        {installed && toImport.length > 0 && movable.length > 0 && (
+          <p className="mb-3 -mt-1 inline-flex items-start gap-1.5 rounded-md bg-warning/10 px-2 py-1 text-xs text-warning">
+            <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+            <span>
+              {client.name} is already connected to Toolport. Import on its own
+              leaves a copy here too, so these tools load twice, once directly and
+              once through the gateway. Use <span className="font-medium">Move
+              config in</span> to avoid that.
+            </span>
+          </p>
+        )}
 
         {allServers.length === 0 ? (
           <p className="text-sm text-muted-foreground">
@@ -429,7 +449,7 @@ export function ClientDetail({
                   value={profile || "__all__"}
                   onValueChange={(v) => setProfile(v === "__all__" ? "" : v)}
                 >
-                  <SelectTrigger size="sm" className="w-40">
+                  <SelectTrigger size="sm" className="w-52">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
