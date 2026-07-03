@@ -1886,7 +1886,18 @@ fn handle_request(
             }
         }
         "resources/list" => {
-            let resources = router.aggregated_resources();
+            let mut resources = router.aggregated_resources();
+            // Scope to the client's allowed servers (a no-op when unscoped), so a
+            // registered HTTP client can't list another server's resources.
+            if let Some(set) = allowed {
+                resources.retain(|r| {
+                    r.get("uri")
+                        .and_then(|u| u.as_str())
+                        .and_then(|uri| router.resource_server(uri))
+                        .map(|srv| set.contains(srv))
+                        .unwrap_or(false)
+                });
+            }
             gtrace(&format!("resources/list -> {} resources", resources.len()));
             Some(success(id, json!({ "resources": resources })))
         }
@@ -1896,6 +1907,18 @@ fn handle_request(
                 .and_then(|p| p.get("uri"))
                 .and_then(|u| u.as_str())
                 .unwrap_or("");
+            // Scope guard: a registered HTTP client may only read resources on servers
+            // its token allows. Out-of-scope is reported as not-found so a scoped client
+            // can't probe another server's resource names.
+            if let Some(set) = allowed {
+                let in_scope = router
+                    .resource_server(uri)
+                    .map(|srv| set.contains(srv))
+                    .unwrap_or(false);
+                if !in_scope {
+                    return Some(error(id, -32602, &format!("Toolport: no server owns resource '{uri}'")));
+                }
+            }
             match router.read_resource(uri) {
                 Ok(mut result) => {
                     // Content defense: a resource is as attacker-controllable as a tool
@@ -1909,7 +1932,17 @@ fn handle_request(
             }
         }
         "prompts/list" => {
-            let prompts = router.aggregated_prompts();
+            let mut prompts = router.aggregated_prompts();
+            // Scope to the client's allowed servers (a no-op when unscoped).
+            if let Some(set) = allowed {
+                prompts.retain(|p| {
+                    p.get("name")
+                        .and_then(|n| n.as_str())
+                        .and_then(|name| router.prompt_server(name))
+                        .map(|srv| set.contains(srv))
+                        .unwrap_or(false)
+                });
+            }
             gtrace(&format!("prompts/list -> {} prompts", prompts.len()));
             Some(success(id, json!({ "prompts": prompts })))
         }
@@ -1923,6 +1956,17 @@ fn handle_request(
                 .and_then(|p| p.get("arguments"))
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            // Scope guard: a registered HTTP client may only fetch prompts on servers
+            // its token allows. Out-of-scope is reported as no-route (no name leak).
+            if let Some(set) = allowed {
+                let in_scope = router
+                    .prompt_server(name)
+                    .map(|srv| set.contains(srv))
+                    .unwrap_or(false);
+                if !in_scope {
+                    return Some(error(id, -32602, &format!("Toolport: no route for prompt '{name}'")));
+                }
+            }
             match router.get_prompt(name, arguments) {
                 Ok(mut result) => {
                     // Content defense: a prompt's messages are attacker-controllable too;
