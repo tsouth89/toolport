@@ -31,10 +31,7 @@ export default tseslint.config(
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
-      "react-refresh/only-export-components": [
-        "warn",
-        { allowConstantExport: true },
-      ],
+      "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
       // React 19's hooks plugin added set-state-in-effect and refs-during-render
       // as errors. In a Tauri desktop app there's no Suspense or RSC, so loading
       // data from the Rust backend via setState-in-useEffect is the standard

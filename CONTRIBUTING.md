@@ -45,6 +45,9 @@ If a client reports the gateway "was not found," you forgot this step.
 # Backend (Rust)
 cargo test --manifest-path src-tauri/Cargo.toml
 
+# Frontend unit tests (Vitest)
+npm run test
+
 # Frontend type-check + build
 npx tsc --noEmit && npm run build
 ```
@@ -52,7 +55,8 @@ npx tsc --noEmit && npm run build
 The Rust suite includes unit tests in each module (`clients`, `catalog`,
 `registry`, `router`, `oauth`, etc.) and an integration test
 (`tests/list_changed.rs`) that exercises the gateway's live tool-change
-notification path.
+notification path. Frontend tests use [Vitest](https://vitest.dev) and live
+alongside the code as `*.test.ts` files inside `src/`.
 
 ### Formatting
 

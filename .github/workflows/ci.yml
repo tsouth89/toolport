@@ -65,6 +65,9 @@ jobs:
       - name: Frontend type-check + build
         run: npm run build
 
+      - name: Frontend tests
+        run: npm run test
+
       # The Rust unit tests: the library AND the standalone gateway binary's own
       # tests (dispatch, scoping, HITL, HTTP). `--bins` runs the binary targets'
       # tests too; checking only that the binary compiled let a gateway test fail

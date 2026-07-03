@@ -16,6 +16,12 @@ export default defineConfig(async () => ({
     },
   },
 
+  // Vitest config: reuses the alias above so tests can import via "@/lib/...".
+  test: {
+    environment: "node",
+    include: ["src/**/*.test.ts"],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
