@@ -219,8 +219,25 @@ fn set_server_enabled_via_agent(
     // "Known servers" list is filtered to it, so agent control can't toggle another
     // tenant's server or enumerate the full registry across tenants.
     allowed: Option<&std::collections::HashSet<String>>,
+    // The calling client (a registered HTTP client's label), for the audit record.
+    client: Option<&str>,
 ) -> Result<String, String> {
+    // Every resolved outcome is stamped into the audit log so it carries proof of the
+    // scope decision, not just the resulting behavior (see audit::record_agent_toggle).
+    let action = if enable { "enable" } else { "disable" };
+    let scoped = allowed.is_some();
+    let toggle_profile = || profile.or(reg.active_profile_id.as_deref()).unwrap_or("");
+
     if !reg.allow_agent_control {
+        audit::record_agent_toggle(
+            client,
+            toggle_profile(),
+            action,
+            target.trim(),
+            None,
+            "agent_control_off",
+            scoped,
+        );
         return Err(
             "Toolport: agent control is off. The user must turn on \"Allow agent control\" \
             in Toolport before an agent can enable or disable servers."
@@ -238,24 +255,34 @@ fn set_server_enabled_via_agent(
     // out-of-scope server is indistinguishable from a non-existent one.
     let in_scope =
         |s: &ServerEntry| allowed.map_or(true, |set| set.contains(&sanitize_segment(&s.id)));
-    let server = reg
-        .servers
-        .iter()
-        .find(|s| {
-            in_scope(s) && (s.id.eq_ignore_ascii_case(target) || s.name.eq_ignore_ascii_case(target))
-        })
-        .ok_or_else(|| {
+    let server = match reg.servers.iter().find(|s| {
+        in_scope(s) && (s.id.eq_ignore_ascii_case(target) || s.name.eq_ignore_ascii_case(target))
+    }) {
+        Some(s) => s,
+        None => {
+            // Denied/not-found: resolved_server_id stays null, so the record can't
+            // reveal whether an out-of-scope server with this name exists.
+            audit::record_agent_toggle(
+                client,
+                toggle_profile(),
+                action,
+                target,
+                None,
+                "unresolved",
+                scoped,
+            );
             let known: Vec<&str> = reg
                 .servers
                 .iter()
                 .filter(|s| in_scope(s))
                 .map(|s| s.name.as_str())
                 .collect();
-            format!(
+            return Err(format!(
                 "Toolport: no server matches \"{target}\". Known servers: {}.",
                 known.join(", ")
-            )
-        })?;
+            ));
+        }
+    };
     let server_id = server.id.clone();
     let server_name = server.name.clone();
     let profile_id = profile
@@ -268,9 +295,27 @@ fn set_server_enabled_via_agent(
     let mut fresh = registry::load_from(path)
         .map_err(|e| format!("Toolport: could not read the registry ({e})."))?;
     if !fresh.allow_agent_control {
+        audit::record_agent_toggle(
+            client,
+            &profile_id,
+            action,
+            target,
+            Some(&server_id),
+            "agent_control_off",
+            scoped,
+        );
         return Err("Toolport: agent control is off.".to_string());
     }
     if fresh.is_enabled(&profile_id, &server_id) == enable {
+        audit::record_agent_toggle(
+            client,
+            &profile_id,
+            action,
+            target,
+            Some(&server_id),
+            "noop_already",
+            scoped,
+        );
         return Ok(format!(
             "{server_name} is already {}.",
             if enable { "on" } else { "off" }
@@ -279,6 +324,15 @@ fn set_server_enabled_via_agent(
     fresh.set_server_enabled(&profile_id, &server_id, enable)?;
     registry::save_to(path, &fresh)
         .map_err(|e| format!("Toolport: could not save the registry ({e})."))?;
+    audit::record_agent_toggle(
+        client,
+        &profile_id,
+        action,
+        target,
+        Some(&server_id),
+        if enable { "enabled" } else { "disabled" },
+        scoped,
+    );
     glog(&format!(
         "agent control: {} server '{server_id}' in profile '{profile_id}'",
         if enable { "ENABLED" } else { "DISABLED" }
@@ -1687,9 +1741,9 @@ fn handle_request(
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let result = match registry::resolved_path() {
-                    Some(p) => {
-                        set_server_enabled_via_agent(reg, profile, &p, target, enable, allowed)
-                    }
+                    Some(p) => set_server_enabled_via_agent(
+                        reg, profile, &p, target, enable, allowed, client,
+                    ),
                     None => Err("Toolport: could not locate the registry file.".to_string()),
                 };
                 let (text, is_error) = match result {
@@ -3997,7 +4051,7 @@ mod tests {
         let reg = registry::load_from(&path).unwrap();
 
         // Gated off: refused, and nothing on disk changes.
-        assert!(set_server_enabled_via_agent(&reg, Some("p"), &path, "Beta", true, None).is_err());
+        assert!(set_server_enabled_via_agent(&reg, Some("p"), &path, "Beta", true, None, None).is_err());
         assert!(!registry::load_from(&path).unwrap().is_enabled("p", "b"));
 
         // Opt in (persisting it so the fresh-copy re-check passes), then enable
@@ -4005,14 +4059,14 @@ mod tests {
         let mut reg2 = reg.clone();
         reg2.allow_agent_control = true;
         registry::save_to(&path, &reg2).unwrap();
-        let ok = set_server_enabled_via_agent(&reg2, Some("p"), &path, "beta", true, None);
+        let ok = set_server_enabled_via_agent(&reg2, Some("p"), &path, "beta", true, None, None);
         assert!(ok.is_ok(), "enable should succeed: {ok:?}");
         assert!(registry::load_from(&path).unwrap().is_enabled("p", "b"));
         // The destructive-tool safety switch is never reachable from agent control.
         assert!(!registry::load_from(&path).unwrap().deny_destructive);
 
         // Unknown server: helpful error naming the known ones.
-        let bad = set_server_enabled_via_agent(&reg2, Some("p"), &path, "nope", true, None);
+        let bad = set_server_enabled_via_agent(&reg2, Some("p"), &path, "nope", true, None, None);
         assert!(bad.as_ref().is_err());
         assert!(bad.unwrap_err().contains("Alpha"));
 
@@ -4037,7 +4091,7 @@ mod tests {
 
         // Toggling Beta (out of scope) by name is refused, and Beta stays untouched.
         let refused =
-            set_server_enabled_via_agent(&reg, Some("p"), &path, "Beta", true, Some(&allowed));
+            set_server_enabled_via_agent(&reg, Some("p"), &path, "Beta", true, Some(&allowed), None);
         assert!(refused.is_err(), "out-of-scope toggle must be refused");
         assert!(
             !registry::load_from(&path).unwrap().is_enabled("p", "b"),
@@ -4046,13 +4100,13 @@ mod tests {
 
         // The "Known servers" list on a miss must not enumerate out-of-scope servers:
         // a non-matching target so Beta only appears if it leaked from the list.
-        let miss = set_server_enabled_via_agent(&reg, Some("p"), &path, "zzz", true, Some(&allowed));
+        let miss = set_server_enabled_via_agent(&reg, Some("p"), &path, "zzz", true, Some(&allowed), None);
         let msg = miss.unwrap_err();
         assert!(msg.contains("Alpha"), "in-scope server should be listed: {msg}");
         assert!(!msg.contains("Beta"), "out-of-scope name leaked in Known servers: {msg}");
 
         // An in-scope server still resolves (Alpha is already on -> idempotent OK).
-        let ok = set_server_enabled_via_agent(&reg, Some("p"), &path, "Alpha", true, Some(&allowed));
+        let ok = set_server_enabled_via_agent(&reg, Some("p"), &path, "Alpha", true, Some(&allowed), None);
         assert!(ok.is_ok(), "in-scope toggle should resolve: {ok:?}");
 
         let _ = std::fs::remove_file(&path);

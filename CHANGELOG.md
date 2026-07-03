@@ -14,6 +14,12 @@ Entries before the rename below shipped under the project's former name, Conduit
   that "Known servers" list are now filtered to the client's scope, so an out-of-scope
   server is indistinguishable from a non-existent one. (Only reachable when the global
   "Allow agent control" opt-in is on.)
+- **Agent-control toggles are audited with proof of the scope decision.** Each
+  `enable_server` / `disable_server` attempt writes an `agent_control.server_toggle`
+  audit record (client, profile, requested target, decision, and whether the lookup was
+  scoped). A denied out-of-scope attempt records `resolvedServerId: null`, so the audit
+  itself carries the guarantee that the denial never resolved or named an out-of-scope
+  server.
 - **`fetch_result` is now scoped to the client that produced the result.** In HTTP mode
   one gateway serves every registered client from a shared result cache with sequential
   `r{n}` cursors, so a scoped client could read another client's large-result body by

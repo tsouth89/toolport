@@ -87,6 +87,64 @@ pub fn record_held(server: &str, tool: &str, client: Option<&str>) {
     write_line(&entry);
 }
 
+/// Build the audit entry for an agent-control server toggle. Pure (no I/O) so the
+/// scope-proof invariant is unit-testable: on a denied out-of-scope attempt the lookup
+/// never resolves the target, so `resolvedServerId` is null and the record can't reveal
+/// whether an out-of-scope server exists. `decision` is one of `enabled`, `disabled`,
+/// `noop_already`, `unresolved`, `agent_control_off`.
+fn agent_toggle_entry(
+    client: Option<&str>,
+    profile: &str,
+    action: &str,
+    requested_target: &str,
+    resolved_server_id: Option<&str>,
+    decision: &str,
+    scoped: bool,
+) -> Value {
+    let ok = matches!(decision, "enabled" | "disabled" | "noop_already");
+    let mut entry = json!({
+        "ts": epoch_millis() as u64,
+        // A synthetic server/tool pair so the audit table renders this like any row.
+        "server": "agent-control",
+        "tool": action,
+        "ok": ok,
+        "event": "agent_control.server_toggle",
+        "requestedTarget": requested_target,
+        // Null on a scoped miss: the whole point is that a denial doesn't name (or even
+        // confirm the existence of) an out-of-scope server.
+        "resolvedServerId": resolved_server_id,
+        "decision": decision,
+        "knownListScope": if scoped { "client_allowed_only" } else { "all" },
+        "profile": profile,
+    });
+    if let Some(c) = client.filter(|c| !c.is_empty()) {
+        entry["client"] = json!(c);
+    }
+    entry
+}
+
+/// Record an agent-control server toggle (toolport_enable_server / _disable_server) to
+/// the audit log, so the log carries proof of the scope decision, not just the behavior.
+pub fn record_agent_toggle(
+    client: Option<&str>,
+    profile: &str,
+    action: &str,
+    requested_target: &str,
+    resolved_server_id: Option<&str>,
+    decision: &str,
+    scoped: bool,
+) {
+    write_line(&agent_toggle_entry(
+        client,
+        profile,
+        action,
+        requested_target,
+        resolved_server_id,
+        decision,
+        scoped,
+    ));
+}
+
 /// Append one entry as a single JSON line. A single `write_all` (not `writeln!`, which
 /// can issue several write syscalls) keeps the many client-spawned gateways that share
 /// this file from interleaving each other's bytes into corrupt JSON.
@@ -292,6 +350,37 @@ fn aggregate(entries: &[Value]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_toggle_denial_record_proves_scope_without_leaking() {
+        // A scoped client's out-of-scope toggle: the lookup never resolves the target,
+        // so the record must carry resolvedServerId=null, decision=unresolved, and a
+        // client-scoped known-list flag, and must NOT name any out-of-scope server.
+        let e = agent_toggle_entry(
+            Some("cursor-work"),
+            "coding",
+            "enable",
+            "Beta",
+            None,
+            "unresolved",
+            true,
+        );
+        assert_eq!(e["event"], "agent_control.server_toggle");
+        assert!(e["resolvedServerId"].is_null(), "a scoped miss must not resolve a server");
+        assert_eq!(e["decision"], "unresolved");
+        assert_eq!(e["knownListScope"], "client_allowed_only");
+        assert_eq!(e["ok"], false);
+        assert_eq!(e["requestedTarget"], "Beta");
+        assert_eq!(e["client"], "cursor-work");
+
+        // A successful in-scope toggle resolves the real server id and reads as ok.
+        let ok = agent_toggle_entry(None, "coding", "disable", "gh", Some("gh"), "disabled", true);
+        assert_eq!(ok["resolvedServerId"], "gh");
+        assert_eq!(ok["decision"], "disabled");
+        assert_eq!(ok["ok"], true);
+        // Unattributed (local/stdio) call omits the client field entirely.
+        assert!(ok.get("client").is_none());
+    }
 
     #[test]
     fn latency_avg_and_p95() {
