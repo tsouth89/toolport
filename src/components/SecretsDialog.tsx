@@ -15,6 +15,7 @@ import {
 } from "@/lib/api";
 import type { AuthInfo, Registry, ServerEntry } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
   Dialog,
   DialogContent,
@@ -328,20 +329,28 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                         )}
                       </Button>
                       {authSet && (
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
-                          aria-label="Clear auth token"
-                          disabled={busyKey !== null}
-                          onClick={clearAuth}
-                        >
-                          {busyKey === "auth-clear" ? (
-                            <Loader2 className="size-4 animate-spin" />
-                          ) : (
-                            <Trash2 className="size-4" />
-                          )}
-                        </Button>
+                        <ConfirmDialog
+                          destructive
+                          title="Remove this credential?"
+                          description="The saved credential is deleted from your keychain. You'll need to authenticate this server again before it works."
+                          confirmLabel="Remove"
+                          onConfirm={clearAuth}
+                          trigger={
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                              aria-label="Clear auth token"
+                              disabled={busyKey !== null}
+                            >
+                              {busyKey === "auth-clear" ? (
+                                <Loader2 className="size-4 animate-spin" />
+                              ) : (
+                                <Trash2 className="size-4" />
+                              )}
+                            </Button>
+                          }
+                        />
                       )}
                     </div>
                   </div>
@@ -461,20 +470,28 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                       )}
                     </Button>
                     {vaulted[key] && (
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
-                        aria-label={`Remove ${key}`}
-                        disabled={busyKey !== null}
-                        onClick={() => remove(key)}
-                      >
-                        {busyKey === `remove:${key}` ? (
-                          <Loader2 className="size-4 animate-spin" />
-                        ) : (
-                          <Trash2 className="size-4" />
-                        )}
-                      </Button>
+                      <ConfirmDialog
+                        destructive
+                        title={`Remove the ${vendorFromKey(key)} API key?`}
+                        description="The saved key is deleted from your keychain. You'll need to paste it again before this server works."
+                        confirmLabel="Remove"
+                        onConfirm={() => remove(key)}
+                        trigger={
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                            aria-label={`Remove ${key}`}
+                            disabled={busyKey !== null}
+                          >
+                            {busyKey === `remove:${key}` ? (
+                              <Loader2 className="size-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="size-4" />
+                            )}
+                          </Button>
+                        }
+                      />
                     )}
                   </div>
                 </div>

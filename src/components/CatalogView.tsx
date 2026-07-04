@@ -34,6 +34,10 @@ export function CatalogView({ registry, onAdded }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [popularLoading, setPopularLoading] = useState(true);
   const [popularError, setPopularError] = useState(false);
+  // A failed live search is distinct from a genuinely empty result: without this a
+  // network/registry failure would render as an innocent "no results for …".
+  const [searchError, setSearchError] = useState(false);
+  const [searchNonce, setSearchNonce] = useState(0);
   const [stacks, setStacks] = useState<Stack[]>([]);
   const [stackBusy, setStackBusy] = useState<string | null>(null);
   const [configEntry, setConfigEntry] = useState<CatalogEntry | null>(null);
@@ -65,10 +69,12 @@ export function CatalogView({ registry, onAdded }: Props) {
     const q = query.trim();
     if (!q) {
       setResults(null);
+      setSearchError(false);
       setLoading(false);
       return;
     }
     setLoading(true);
+    setSearchError(false);
     let cancelled = false;
     const t = setTimeout(() => {
       searchCatalog(q)
@@ -76,7 +82,12 @@ export function CatalogView({ registry, onAdded }: Props) {
           if (!cancelled) setResults(r);
         })
         .catch(() => {
-          if (!cancelled) setResults([]);
+          // Distinguish a failed search from an empty one so we can offer a retry
+          // instead of implying the registry has nothing for this query.
+          if (!cancelled) {
+            setResults([]);
+            setSearchError(true);
+          }
         })
         .finally(() => {
           if (!cancelled) setLoading(false);
@@ -86,7 +97,7 @@ export function CatalogView({ registry, onAdded }: Props) {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [query]);
+  }, [query, searchNonce]);
 
   /** Returns true if the entry needs the ServerDialog (has credentials, a
    * user-supplied URL, or args the user should review). False = safe to
@@ -249,6 +260,27 @@ export function CatalogView({ registry, onAdded }: Props) {
               </p>
             </div>
             <Button variant="outline" size="sm" onClick={reloadPopular}>
+              Try again
+            </Button>
+          </div>
+        ) : !browsing && searchError ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex flex-col items-center gap-3 py-20 text-center"
+          >
+            <div>
+              <p className="font-medium">Search failed</p>
+              <p className="max-w-md text-sm text-muted-foreground">
+                Toolport couldn't reach the MCP Registry. Check your connection, then
+                retry.
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSearchNonce((n) => n + 1)}
+            >
               Try again
             </Button>
           </div>

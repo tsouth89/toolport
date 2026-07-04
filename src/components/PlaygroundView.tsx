@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   CheckCircle2,
@@ -13,6 +13,7 @@ import {
   Play,
   Search,
   ShieldAlert,
+  X,
   XCircle,
 } from "lucide-react";
 import { toastError } from "@/lib/toast";
@@ -619,6 +620,22 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
   const [calling, setCalling] = useState(false);
   const [result, setResult] = useState<ToolCallResult | null>(null);
   const [callError, setCallError] = useState<string | null>(null);
+  // Seconds elapsed while a call is in flight, and a monotonically-increasing id used
+  // to invalidate a call the user cancelled or superseded (a Tauri invoke can't be
+  // aborted, so we stop waiting on it and ignore its eventual result).
+  const [elapsed, setElapsed] = useState(0);
+  const callSeq = useRef(0);
+  const tickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // If the call hasn't returned in this long, stop waiting and tell the user rather
+  // than spinning forever on a slow or wedged server.
+  const CALL_TIMEOUT_MS = 60_000;
+
+  useEffect(() => {
+    // Stop the elapsed-time ticker if the view unmounts mid-call.
+    return () => {
+      if (tickerRef.current) clearInterval(tickerRef.current);
+    };
+  }, []);
 
   // Connect to the chosen server and pull its tool list.
   useEffect(() => {
@@ -752,17 +769,47 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
       setResult(null);
       return;
     }
+    const myId = ++callSeq.current;
     setCalling(true);
     setResult(null);
     setCallError(null);
+    setElapsed(0);
+    const started = Date.now();
+    if (tickerRef.current) clearInterval(tickerRef.current);
+    tickerRef.current = setInterval(() => {
+      if (callSeq.current === myId) setElapsed(Math.floor((Date.now() - started) / 1000));
+    }, 1000);
     try {
-      const r = await callTool(serverId, selectedTool, built as Record<string, unknown>);
-      setResult(r);
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("__timeout__")), CALL_TIMEOUT_MS),
+      );
+      const r = await Promise.race([
+        callTool(serverId, selectedTool, built as Record<string, unknown>),
+        timeout,
+      ]);
+      if (callSeq.current !== myId) return; // cancelled or superseded by a newer call
+      setResult(r as ToolCallResult);
     } catch (e) {
-      setCallError(String(e));
+      if (callSeq.current !== myId) return;
+      setCallError(
+        e instanceof Error && e.message === "__timeout__"
+          ? `No response after ${CALL_TIMEOUT_MS / 1000}s. The server may be slow or unreachable; check its status under Servers, then retry.`
+          : String(e),
+      );
     } finally {
-      setCalling(false);
+      if (tickerRef.current) clearInterval(tickerRef.current);
+      if (callSeq.current === myId) setCalling(false);
     }
+  }
+
+  // Stop waiting on an in-flight call: invalidate its id so the eventual result is
+  // dropped, and reset the UI. The downstream call still has its own server-side
+  // timeout; this just frees the user from a stuck "Calling…" state.
+  function cancelCall() {
+    callSeq.current++;
+    if (tickerRef.current) clearInterval(tickerRef.current);
+    setCalling(false);
+    setCallError("Call cancelled.");
   }
 
   if (servers.length === 0) {
@@ -996,15 +1043,21 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
                 </div>
               )}
 
-              <div>
+              <div className="flex items-center gap-2">
                 <Button onClick={run} disabled={calling} size="sm">
                   {calling ? (
                     <Loader2 className="size-4 animate-spin" />
                   ) : (
                     <Play className="size-4" />
                   )}
-                  {calling ? "Calling…" : "Call tool"}
+                  {calling ? `Calling… ${elapsed}s` : "Call tool"}
                 </Button>
+                {calling && (
+                  <Button onClick={cancelCall} variant="outline" size="sm">
+                    <X className="size-4" />
+                    Cancel
+                  </Button>
+                )}
               </div>
             </div>
           )}
