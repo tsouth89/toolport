@@ -24,6 +24,10 @@ Entries before the rename below shipped under the project's former name, Conduit
 - **A security posture summary in Settings.** The Security section opens with a
   one-line read of whether you're protected (guarded / partly / unprotected) and what's
   active, so you don't have to decode every toggle.
+- **Pinned lazy-discovery tools now have a home.** When lazy discovery is on, Settings
+  shows a Pinned prerequisites list of every tool you've pinned (with its server) and a
+  one-click unpin, so the pin set is visible and manageable instead of being buried
+  per-tool in Playground.
 - **Tool-poison flags now show the matched text.** A flagged tool definition surfaces a
   short, de-obfuscated excerpt of exactly what tripped the scan, so the alert is
   verifiable instead of an opaque label.
