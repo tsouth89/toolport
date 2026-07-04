@@ -488,15 +488,28 @@ function Done({
   // failure). Auth-pending servers are an expected next step, not a fault, so they're
   // excluded from the warning.
   const [health, setHealth] = useState<ProbeResult[] | null>(null);
+  // The probe itself can fail (gateway not up yet). That's distinct from "all
+  // servers healthy": swallowing it to health=[] would show a confident "you're
+  // set up" over servers we never actually checked, so track it separately.
+  const [probeFailed, setProbeFailed] = useState(false);
   useEffect(() => {
     if (serverCount === 0) {
       setHealth([]);
+      setProbeFailed(false);
       return;
     }
     let alive = true;
     onProbe()
-      .then((r) => alive && setHealth(r))
-      .catch(() => alive && setHealth([]));
+      .then((r) => {
+        if (!alive) return;
+        setHealth(r);
+        setProbeFailed(false);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setHealth([]);
+        setProbeFailed(true);
+      });
     return () => {
       alive = false;
     };
@@ -559,6 +572,13 @@ function Done({
             command that needs a fix. Sort it out, then retry from that server's card (the
             button below takes you to the main screen).
           </span>
+        </div>
+      )}
+
+      {probeFailed && (
+        <div className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          Couldn&apos;t verify your servers started, the health check didn&apos;t run.
+          Open the main screen to see each server&apos;s live status.
         </div>
       )}
 
