@@ -292,34 +292,44 @@ function SecurityNotices({
 function QuietDriftHistory({
   events,
   onDismiss,
+  onDismissAll,
 }: {
   events: SecurityEvent[];
   onDismiss: (e: SecurityEvent) => void;
+  onDismissAll: () => void;
 }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="mb-4 rounded-lg border border-border/60 bg-muted/20 p-3">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 text-left text-xs text-muted-foreground"
-      >
-        <History className="size-3.5 shrink-0" />
-        <span className="font-medium text-foreground/80">Recent tool changes</span>
-        <span className="rounded-full bg-muted px-1.5 py-0.5 font-medium">
-          {events.length}
-        </span>
-        <ChevronRight
-          className={`ml-auto size-3.5 transition-transform ${open ? "rotate-90" : ""}`}
-        />
-      </button>
+      <div className="flex w-full items-center gap-2 text-xs text-muted-foreground">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="flex flex-1 items-center gap-2 text-left"
+        >
+          <History className="size-3.5 shrink-0" />
+          <span className="font-medium text-foreground/80">New &amp; changed tools</span>
+          <span className="rounded-full bg-muted px-1.5 py-0.5 font-medium">
+            {events.length}
+          </span>
+          <ChevronRight
+            className={`ml-auto size-3.5 transition-transform ${open ? "rotate-90" : ""}`}
+          />
+        </button>
+        <button
+          onClick={onDismissAll}
+          className="shrink-0 rounded px-2 py-0.5 font-medium text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border"
+        >
+          Dismiss all
+        </button>
+      </div>
       {open && (
         <>
           <p className="mt-2 mb-2 max-w-2xl text-xs text-muted-foreground">
-            Benign, non-destructive definition changes on tools you've already approved
-            (vendors revise beta tools server-side). Kept for the record, not flagged as a
-            risk. Dismiss any you've reviewed, they'll stay quiet if the same change
-            recurs.
+            New tools first seen, and benign, non-destructive changes to tools you've
+            already approved (vendors revise beta tools server-side). Kept for the record,
+            not flagged as a risk, the approval and destructive-tool gates still guard
+            every call. Dismiss any you've reviewed.
           </p>
           <ul className="space-y-1 text-xs">
             {events.slice(0, 20).map((e) => (
@@ -821,7 +831,18 @@ function DiscoveryTraces({ refreshKey }: { refreshKey: number }) {
     };
   }, [refreshKey]);
 
-  if (entries.length === 0) return null;
+  if (entries.length === 0)
+    return (
+      <div className="mb-6 rounded-lg border border-border/60 bg-muted/20 p-4 text-xs text-muted-foreground">
+        <div className="mb-1 flex items-center gap-2">
+          <Search className="size-4 shrink-0 text-owned" />
+          <span className="font-medium text-foreground/80">Discovery</span>
+        </div>
+        With lazy discovery on, this shows every tool search your agents run, what
+        matched, why it ranked, and the context tokens it kept out of the model. Nothing
+        searched yet.
+      </div>
+    );
 
   return (
     <div className="mb-6 rounded-lg border border-owned/30 bg-owned/[0.04] p-4">
@@ -1087,12 +1108,41 @@ export function ActivityView({
   );
   // Split loud/actionable signal from benign churn so vendor revisions don't bury a real
   // poison or privilege-escalation flag (the failure this whole surface exists to avoid).
-  const highSecurity = liveSecurity.filter((e) => eventSeverity(e) === "high");
-  const infoSecurity = liveSecurity.filter((e) => eventSeverity(e) === "info");
+  //
+  // A tool FIRST APPEARING is inventory, not a rug-pull: you never approved it, so it
+  // can't have changed under you, and the destructive-tool + approval gates still guard
+  // the actual call. So "added" always goes to the quiet lane, even when the new tool is
+  // destructive (e.g. a server exposing `delete_*`). That keeps a bulk first-baseline
+  // from masquerading as a wall of alarms. The loud lane stays for what genuinely needs
+  // a human: poison, injected results, and a tool you already approved CHANGING.
+  const isNewTool = (e: SecurityEvent) =>
+    e.change === "added" &&
+    e.type !== "tool_poison_flag" &&
+    e.type !== "result_injection";
+  const highSecurity = liveSecurity.filter(
+    (e) => eventSeverity(e) === "high" && !isNewTool(e),
+  );
+  const infoSecurity = liveSecurity.filter(
+    (e) => eventSeverity(e) !== "high" || isNewTool(e),
+  );
   const dismissSecurity = (e: SecurityEvent) => {
     setDismissed((prev) => {
       const next = new Set(prev);
       next.add(securityKey(e));
+      try {
+        localStorage.setItem(SECURITY_DISMISSED_KEY, JSON.stringify([...next]));
+      } catch {
+        // ignore storage failures; the dismissal just won't persist
+      }
+      return next;
+    });
+  };
+  // Clear a whole batch at once (the quiet lane can hold dozens of first-sightings after
+  // a re-baseline; making the user dismiss each would just recreate the noise problem).
+  const dismissAllSecurity = (events: SecurityEvent[]) => {
+    setDismissed((prev) => {
+      const next = new Set(prev);
+      for (const e of events) next.add(securityKey(e));
       try {
         localStorage.setItem(SECURITY_DISMISSED_KEY, JSON.stringify([...next]));
       } catch {
@@ -1110,7 +1160,11 @@ export function ActivityView({
         <SecurityResting />
       )}
       {infoSecurity.length > 0 ? (
-        <QuietDriftHistory events={infoSecurity} onDismiss={dismissSecurity} />
+        <QuietDriftHistory
+          events={infoSecurity}
+          onDismiss={dismissSecurity}
+          onDismissAll={() => dismissAllSecurity(infoSecurity)}
+        />
       ) : null}
       <DiscoveryTraces refreshKey={refreshKey} />
       <ToolIdentities refreshKey={refreshKey} />
