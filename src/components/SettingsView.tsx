@@ -224,6 +224,11 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
 
   const httpClients = registry?.httpClients ?? [];
   const profiles = registry?.profiles ?? [];
+  const serverName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of registry?.servers ?? []) m.set(s.id, s.name);
+    return m;
+  }, [registry?.servers]);
 
   // Launch-at-login is OS-level (managed by the autostart plugin), not registry state.
   useEffect(() => {
@@ -395,6 +400,48 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           toggleAutostart,
         )}
       </section>
+      {profiles.length > 0 && (
+        <section className="flex flex-col gap-2">
+          <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+            Profiles
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            A profile is a named subset of servers you can scope a client to. Here's what
+            each one exposes.
+          </p>
+          <div className="flex flex-col divide-y rounded-lg border">
+            {profiles.map((p) => {
+              const names = p.enabledServerIds
+                .map((id) => serverName.get(id))
+                .filter((n): n is string => !!n)
+                .sort((a, b) => a.localeCompare(b));
+              const active = p.id === registry?.activeProfileId;
+              return (
+                <div key={p.id} className="flex flex-col gap-1 px-3 py-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">{p.name}</span>
+                    {active && (
+                      <span className="rounded-full bg-info/15 px-1.5 py-0.5 text-[10px] font-medium text-info">
+                        active
+                      </span>
+                    )}
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {names.length} {names.length === 1 ? "server" : "servers"}
+                    </span>
+                  </div>
+                  {names.length > 0 ? (
+                    <p className="text-xs text-muted-foreground">{names.join(", ")}</p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground italic">
+                      No servers in this profile.
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
       <section className="flex flex-col gap-2">
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Discovery
