@@ -6,13 +6,18 @@ reviews:
   profile: chill
   # Advisory only — CodeRabbit should never block a merge with a change request.
   request_changes_workflow: false
-  high_level_summary: true
+  # Keep the per-PR inbox noise down for anyone watching the repo: drop the boilerplate
+  # summary + review-status comments so CodeRabbit only speaks up when it has an actual
+  # finding, and don't re-review on every push (the initial review still runs).
+  high_level_summary: false
   poem: false
-  review_status: true
+  review_status: false
   collapse_walkthrough: true
   auto_review:
     enabled: true
     drafts: false
+    # Review once when the PR opens, not again on each subsequent commit.
+    auto_incremental_review: false
   # Skip generated / vendored / build output so reviews stay signal-heavy.
   path_filters:
     - "!**/package-lock.json"
