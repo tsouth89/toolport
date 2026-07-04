@@ -6,6 +6,42 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-04
+
+A robustness release: the gateway, app, and Teams client now recover cleanly from
+failure modes that used to fail silently.
+
+### Added
+
+- **Playground: cancel a stuck call.** A tool call that hangs now shows a live elapsed
+  timer and a Cancel button, with a clear timeout message, instead of spinning on
+  "Calling…" indefinitely.
+- **Teams: automatic background sync.** A member's shared server set and security policy
+  now stay current on their own (on launch and on a modest interval), so an admin's
+  change reaches every member, not just those who click "Sync now".
+
+### Changed
+
+- **Confirm before deleting saved credentials.** Clearing an OAuth token or removing an
+  API key now asks first, matching every other destructive action in the app.
+- **Catalog search failures are distinguishable from empty.** A registry or network
+  error during a catalog search now shows an error with a retry, not a misleading
+  "no results".
+
+### Fixed
+
+- **Crashed downstream servers recover automatically.** A stdio server that crashes or
+  exits mid-session is now re-spawned on the circuit breaker's probe instead of staying
+  dead until the client restarts (self-heal previously only fired when every server was
+  down).
+- **Teams: removed members are actually cut off.** A removed or demoted member's app now
+  disconnects the team locally and refreshes their role on sync, instead of quietly
+  keeping the team's servers and stale security policy.
+- Under-the-hood hardening: the embeddings endpoint is time-boxed so a hung model falls
+  back to lexical search, stdio reads are size-bounded, the tool cache is versioned so a
+  stale cache from an older build is rebuilt, and shaped-result messaging no longer
+  over-promises that a paged result is permanently retained.
+
 ## [1.4.0] - 2026-07-04
 
 ### Added
