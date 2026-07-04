@@ -424,3 +424,28 @@ Tier 4 - teams / enterprise (paid)
   client config.
 - Snapshot every client config before modifying it; modifications are reversible.
 - Never read or decrypt another app's OAuth tokens.
+
+## Strategic idea: Toolport Full-API Servers (curated OpenAPI catalog)
+
+A curated catalog of MCP servers generated from OpenAPI specs that expose the COMPLETE API
+of services whose official MCP is read-only / partial / missing (e.g. Stripe's official MCP
+is read-only; a full one can create prices, payment links, everything).
+
+**Why only Toolport does this well:** a complete-API server is 100s-of-tools huge and would
+blow up any agent's context — which is why nobody ships one. Lazy discovery (3 meta-tools +
+search-on-demand, flat context) is the one thing that makes it usable. This reframes lazy
+discovery from "saves tokens" to "unlocks otherwise-impossible servers." Plus Toolport's
+governance (HITL + destructive-tool gating) is what makes handing an agent a full billing
+API _safe_ — safety is the selling point, not a risk.
+
+**Already built:** `toolport-openapi-mcp` (OpenAPI→MCP; Stripe spec = 587 tools), secret
+injection, OAuth, curated catalog. New work = per-service CURATION (clean tool names/descs,
+grouping, auth config), publish, catalog entries, maintenance.
+
+**Dependency (important):** this makes search recall load-bearing — a 587-tool server is only
+as good as the search that surfaces the right tool. Ties directly to the hybrid-search +
+recall-escape-hatch items above; do those alongside.
+
+**Start:** Stripe first (weak official MCP, high-value API, killer demo). Then Linear/Notion/
+Shopify/Twilio. Position: "the official X MCP only reads; Toolport's does everything X's API
+can — governed, and without bloating your context."
