@@ -39,6 +39,16 @@ pub fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        // Restrict to owner-only (0600) BEFORE writing, so secrets.enc, the registry,
+        // pins, and the audit log are never world-readable, not even for the brief
+        // window before the content lands, under a permissive umask on a shared or
+        // headless host. No-op on Windows (NTFS ACLs inherit from the parent dir).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
+        }
         f.write_all(contents.as_bytes()).map_err(|e| e.to_string())?;
         // Flush the data to stable storage BEFORE the rename, so a crash/power loss
         // can't make the rename durable while the file's blocks aren't — which would
@@ -1158,6 +1168,22 @@ mod tests {
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().starts_with(&prefix));
         assert!(!leftover, "temp file left behind after a successful write");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-perm-{}.json", std::process::id()));
+        atomic_write(&path, "secret").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "atomic_write must produce an owner-only file");
+        // Re-writing an existing file keeps it owner-only.
+        atomic_write(&path, "secret2").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "overwrite must stay owner-only");
         std::fs::remove_file(&path).ok();
     }
 

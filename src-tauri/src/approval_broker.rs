@@ -190,9 +190,12 @@ pub fn start(app: AppHandle) -> ApprovalBroker {
                     };
                     // A stale descriptor (app crashed) points at a dead port, so a gateway
                     // connect fails and denies - fail-closed either way.
-                    let _ = std::fs::write(
-                        dir.join(ENDPOINT_FILE),
-                        serde_json::to_string(&desc).unwrap_or_default(),
+                    // Written via atomic_write so the HITL endpoint + auth token land
+                    // owner-only (0600) on Unix rather than world-readable: a same-user
+                    // process reading the token could otherwise spoof approval decisions.
+                    let _ = crate::registry::atomic_write(
+                        &dir.join(ENDPOINT_FILE),
+                        &serde_json::to_string(&desc).unwrap_or_default(),
                     );
                 }
                 let accept_broker = broker.clone();
