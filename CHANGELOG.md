@@ -6,6 +6,26 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-04
+
+### Added
+
+- **Discovery now shows why each tool ranked.** The lazy-discovery search trace
+  (Activity → Discovery) records, per result, its rank, the query terms it matched
+  (name vs description), whether it was a pinned prerequisite, and the ranker used
+  (lexical vs semantic). You can now see not just which tools a search returned, but
+  why, and what the model was handed.
+
+### Changed
+
+- **The gateway binary is now `toolport-gateway`** (was `conduit-gateway`; the macOS
+  helper bundle is `ToolportGateway.app`). Existing client integrations keep working:
+  detection and path resolution accept both names, macOS ships a compatibility symlink,
+  and on launch Toolport re-points any client config still naming the old binary to the
+  new one (each config is backed up first). Keychain and stored data are untouched: the
+  keychain service, access group, master key, bundle id, and data directory are all
+  unchanged, so no secrets or servers are lost across the update.
+
 ## [1.2.0] - 2026-07-03
 
 ### Security
