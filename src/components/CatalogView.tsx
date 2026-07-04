@@ -233,7 +233,7 @@ export function CatalogView({ registry, onAdded }: Props) {
             ? `${shown.length} result${shown.length === 1 ? "" : "s"} (popular picks first, then the MCP Registry)`
             : "Popular servers"}
         </span>
-        {results !== null && (
+        {results !== null && shown.length > 0 && (
           <button className="hover:text-foreground" onClick={() => setQuery("")}>
             Clear search
           </button>

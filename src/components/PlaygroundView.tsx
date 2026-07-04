@@ -306,7 +306,7 @@ function ArgField({ name, schema, required, value, onChange }: FieldProps) {
  * (missing/expired credentials, 401/403) rather than a generic transport error? If so
  * we point the user at the server's Secrets dialog instead of showing a raw backend string. */
 function looksLikeAuthError(message: string): boolean {
-  return /\b(401|403|unauthori[sz]ed|forbidden|authenticat|invalid.{0,15}(token|api.?key|credential)|missing.{0,15}(token|api.?key|credential)|expired.{0,15}(token|credential)|not.{0,15}logged.?in|access.{0,15}denied)\b/i.test(
+  return /\b(401|403|unauthori[sz]ed|forbidden|authenticat\w*|invalid.{0,15}(token|api.?key|credentials?)|missing.{0,15}(token|api.?key|credentials?)|expired.{0,15}(token|credentials?)|not.{0,15}logged.?in|access.{0,15}denied)\b/i.test(
     message,
   );
 }
