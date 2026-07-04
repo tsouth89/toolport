@@ -253,12 +253,11 @@ fn load_pins(profile: Option<&str>) -> PinsLoad {
     }
     // Every connected client spawns its own gateway, and they all share this one pins file.
     // A read that lands in the moment between another gateway's temp-write and its atomic
-    // rename can occasionally see the file mid-swap on some filesystems, and a write that was
-    // interrupted can leave it empty. Neither is tampering, so neither should raise the loud
-    // "integrity baseline lost" alarm: an empty file is just "nothing pinned yet", and a
-    // transient bad read clears on a quick retry. Only content that is genuinely present and
-    // still won't parse after the retries is treated as Corrupt (which stays loud, because
-    // that is what baseline tampering actually looks like).
+    // rename can occasionally see the file mid-swap on some filesystems. That transient bad
+    // read clears on a quick retry, so it should NOT raise the loud "integrity baseline lost"
+    // alarm. But a file that is genuinely present and still won't parse after the retries -
+    // including an EMPTY one - is a lost baseline and stays Corrupt (loud), because that is
+    // what baseline tampering actually looks like.
     for attempt in 0..3 {
         let raw = match std::fs::read_to_string(&path) {
             Ok(s) => s,
@@ -271,7 +270,17 @@ fn load_pins(profile: Option<&str>) -> PinsLoad {
             Err(_) => return PinsLoad::Corrupt,
         };
         if raw.trim().is_empty() {
-            return PinsLoad::Fresh;
+            // An empty baseline file is a LOST baseline, not a fresh start: atomic_write
+            // (temp + fsync + rename) never leaves an empty file, so emptiness means it was
+            // truncated - a crash mid foreign write, or an attacker wiping it to silently
+            // reset drift detection. Returning Fresh here would silently re-baseline whatever
+            // tools are present now (re-trusting a poisoned definition with zero signal), so
+            // retry a transient empty read, then treat a persistently-empty file as Corrupt.
+            if attempt < 2 {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                continue;
+            }
+            return PinsLoad::Corrupt;
         }
         match serde_json::from_str::<BTreeMap<String, PinRepr>>(&raw) {
             Ok(pins) => {
@@ -1482,23 +1491,31 @@ mod tests {
     }
 
     #[test]
-    fn empty_pins_file_is_fresh_not_corrupt() {
-        // A write that was interrupted (or a gateway crash mid-swap) can leave the shared
-        // pins file empty. That is not baseline tampering, so it must NOT raise the loud
-        // "integrity baseline lost" alarm; it reads as "nothing pinned yet".
+    fn empty_pins_file_is_corrupt_not_a_silent_wipe() {
+        // atomic_write never leaves an empty pins file, so an empty one means the baseline
+        // was truncated (a crash mid foreign write, or an attacker wiping it to reset drift
+        // detection). It must trip the LOUD path, never a silent re-baseline: returning Fresh
+        // would re-trust whatever tools are present now with no signal. A transient mid-swap
+        // read is handled by the retry, not by treating empty as benign.
         let profile = Some("empty-pins-unit");
         let path = pins_path(profile).expect("profile path");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
         std::fs::write(&path, "").unwrap();
-        assert!(matches!(load_pins(profile), PinsLoad::Fresh), "empty file is Fresh");
+        assert!(
+            matches!(load_pins(profile), PinsLoad::Corrupt),
+            "empty file is a lost baseline (loud), not a silent Fresh wipe"
+        );
 
         std::fs::write(&path, "   \n\t ").unwrap();
-        assert!(matches!(load_pins(profile), PinsLoad::Fresh), "whitespace-only file is Fresh");
+        assert!(
+            matches!(load_pins(profile), PinsLoad::Corrupt),
+            "whitespace-only file is also a lost baseline"
+        );
 
-        // Genuinely present-but-unparseable content still trips the loud path.
+        // Genuinely present-but-unparseable content also trips the loud path.
         std::fs::write(&path, "{ this is not json").unwrap();
-        assert!(matches!(load_pins(profile), PinsLoad::Corrupt), "garbage is still Corrupt");
+        assert!(matches!(load_pins(profile), PinsLoad::Corrupt), "garbage is Corrupt");
 
         // A valid baseline round-trips as Loaded.
         std::fs::write(&path, r#"{"srv__a":"deadbeef"}"#).unwrap();
