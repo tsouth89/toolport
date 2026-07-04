@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Bot,
@@ -276,7 +276,10 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
     }
   }
 
-  useEffect(() => {
+  // One-shot (not polled): the status only changes when the user toggles it here.
+  // Exposed as a callback so a failed initial read can be retried explicitly, rather
+  // than leaving the panel wedged until an app restart.
+  const loadBridge = useCallback(() => {
     httpBridgeStatus()
       .then((s) => {
         setBridge(s);
@@ -284,6 +287,9 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
       })
       .catch(() => setBridgeError(true));
   }, []);
+  useEffect(() => {
+    loadBridge();
+  }, [loadBridge]);
 
   useEffect(() => {
     const load = () =>
@@ -621,12 +627,22 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
             <Switch
               checked={!!bridge?.running}
               onCheckedChange={toggleBridge}
-              disabled={bridgeBusy || (bridgeError && bridge === null)}
+              disabled={bridgeBusy}
             />
           </label>
           {bridgeError && bridge === null && (
-            <p className="text-xs text-muted-foreground">
-              Couldn&apos;t read the HTTP endpoint status. The gateway may be starting up.
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span>
+                Couldn&apos;t read the HTTP endpoint status. The gateway may be starting
+                up.
+              </span>
+              <button
+                type="button"
+                onClick={loadBridge}
+                className="shrink-0 font-medium text-foreground underline underline-offset-2 hover:text-primary"
+              >
+                Retry
+              </button>
             </p>
           )}
           {bridge?.running && bridge.url && (
