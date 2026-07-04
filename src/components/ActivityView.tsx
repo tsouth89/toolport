@@ -513,16 +513,35 @@ function ServerRow({ s }: { s: ServerStat }) {
         onClick={() => expandable && setOpen((o) => !o)}
       >
         <td className="px-3 py-2 font-medium">
-          <span className="flex min-w-0 items-center gap-1.5">
-            {expandable ? (
+          {expandable ? (
+            // Keyboard-operable disclosure lives on a real <button> inside the cell so
+            // the row keeps its table semantics; the row-level onClick stays for
+            // mouse click-anywhere and this button stops propagation to avoid a
+            // double toggle.
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpen((o) => !o);
+              }}
+              aria-expanded={open}
+              className="flex min-w-0 items-center gap-1.5 rounded-sm text-left focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
               <ChevronRight
+                aria-hidden="true"
                 className={`size-3.5 text-muted-foreground transition-transform ${open ? "rotate-90" : ""}`}
               />
-            ) : (
+              <span className="truncate">{s.server}</span>
+              <span className="sr-only">
+                {open ? "Collapse" : "Expand"} per-tool breakdown
+              </span>
+            </button>
+          ) : (
+            <span className="flex min-w-0 items-center gap-1.5">
               <span className="inline-block size-3.5" />
-            )}
-            <span className="truncate">{s.server}</span>
-          </span>
+              <span className="truncate">{s.server}</span>
+            </span>
+          )}
         </td>
         <td className="px-3 py-2 text-right tabular-nums">{s.calls}</td>
         <td
@@ -579,14 +598,25 @@ function CallRow({ e }: { e: AuditEntry }) {
   return (
     <div className="rounded-md border border-border/50 text-sm">
       <div
-        className={`flex items-center gap-3 px-3 py-2 ${
+        className={`flex items-center gap-3 rounded-md px-3 py-2 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${
           hasDetail ? "cursor-pointer hover:bg-muted/30" : ""
         }`}
         onClick={() => hasDetail && setOpen((o) => !o)}
+        onKeyDown={
+          hasDetail
+            ? (event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setOpen((o) => !o);
+                }
+              }
+            : undefined
+        }
         {...(hasDetail ? { role: "button", "aria-expanded": open, tabIndex: 0 } : {})}
       >
         {hasDetail ? (
           <ChevronRight
+            aria-hidden="true"
             className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${
               open ? "rotate-90" : ""
             }`}

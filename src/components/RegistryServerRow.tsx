@@ -203,7 +203,9 @@ export function RegistryServerRow({
             </code>
           )}
           {status === "error" && health?.error && (
-            <p className="text-xs text-warning">{health.error}</p>
+            <p className="max-h-32 overflow-y-auto text-xs break-words whitespace-pre-wrap text-warning">
+              {health.error}
+            </p>
           )}
 
           <div className="flex flex-wrap items-center gap-1">

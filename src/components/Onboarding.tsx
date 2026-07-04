@@ -102,10 +102,18 @@ export function Onboarding({
           {steps[step]}
 
           <div className="flex items-center justify-between border-t pt-4">
-            <div className="flex items-center gap-1.5">
+            <div
+              className="flex items-center gap-1.5"
+              role="progressbar"
+              aria-valuenow={step + 1}
+              aria-valuemin={1}
+              aria-valuemax={steps.length}
+              aria-label={`Setup step ${step + 1} of ${steps.length}`}
+            >
               {steps.map((_, i) => (
                 <span
                   key={i}
+                  aria-hidden="true"
                   className={`size-1.5 rounded-full transition-colors ${
                     i === step ? "bg-success" : "bg-muted-foreground/30"
                   }`}
@@ -114,6 +122,7 @@ export function Onboarding({
             </div>
             {step < steps.length - 1 && (
               <button
+                type="button"
                 onClick={onFinish}
                 className="text-xs text-muted-foreground transition hover:text-foreground"
               >
