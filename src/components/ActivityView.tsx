@@ -247,31 +247,38 @@ function SecurityNotices({
             {events.slice(0, 10).map((e) => {
               const badge = eventBadge(e);
               return (
-                <li key={renderKey(e)} className="flex items-center gap-2">
-                  <span className={`rounded px-1.5 py-0.5 font-medium ${badge.cls}`}>
-                    {badge.label}
-                  </span>
-                  <code className="font-mono text-foreground">{e.tool}</code>
-                  {e.signatures && e.signatures.length > 0 && (
-                    <span className="text-muted-foreground">
-                      ({e.signatures.join(", ")})
+                <li key={renderKey(e)} className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded px-1.5 py-0.5 font-medium ${badge.cls}`}>
+                      {badge.label}
                     </span>
+                    <code className="font-mono text-foreground">{e.tool}</code>
+                    {e.signatures && e.signatures.length > 0 && (
+                      <span className="text-muted-foreground">
+                        ({e.signatures.join(", ")})
+                      </span>
+                    )}
+                    <span className="ml-auto text-muted-foreground">
+                      {new Date(e.ts).toLocaleString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                    <button
+                      onClick={() => onDismiss(e)}
+                      aria-label="Dismiss this notice"
+                      className="rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-warning/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning"
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </div>
+                  {e.evidence && (
+                    <p className="ml-1 max-w-2xl border-l-2 border-warning/40 pl-2 font-mono text-[11px] leading-relaxed break-words text-muted-foreground">
+                      matched: “{e.evidence}”
+                    </p>
                   )}
-                  <span className="ml-auto text-muted-foreground">
-                    {new Date(e.ts).toLocaleString(undefined, {
-                      month: "short",
-                      day: "numeric",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </span>
-                  <button
-                    onClick={() => onDismiss(e)}
-                    aria-label="Dismiss this notice"
-                    className="rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-warning/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning"
-                  >
-                    <X className="size-3.5" />
-                  </button>
                 </li>
               );
             })}

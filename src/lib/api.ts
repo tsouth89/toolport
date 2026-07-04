@@ -62,6 +62,10 @@ export interface SecurityEvent {
   change: string;
   /** For tool_poison_flag: which heuristic signatures matched. */
   signatures?: string[];
+  /** For tool_poison_flag: a short de-obfuscated excerpt of the matched text, so the
+   * flag is verifiable instead of an opaque label. Absent when no direct phrase matched
+   * (e.g. an encoded payload) or on events written before evidence was captured. */
+  evidence?: string;
   /** "high" = loud/actionable (poison, destructive-tool change, safety-annotation
    * downgrade); "info" = benign non-destructive schema churn for the quiet history.
    * Absent on events written before severity tiering; classified by type on read. */
