@@ -498,8 +498,15 @@ fn load_quarantine(profile: Option<&str>) -> Quarantine {
         // Missing/unreadable is the normal first-run state: nothing quarantined yet.
         Err(_) => return Quarantine::new(),
     };
-    match serde_json::from_str(&raw) {
-        Ok(q) => q,
+    match serde_json::from_str::<Quarantine>(&raw) {
+        // A destructive tool APPEARING (first sight) is no longer quarantine-worthy: that
+        // is inventory, not a rug-pull, and the block/confirm/approval gates already cover
+        // it at call time. Drop any such legacy `added` entries so they auto-unblock rather
+        // than stranding the user with dozens of re-approvals for tools that never changed.
+        Ok(q) => q
+            .into_iter()
+            .filter(|(_, v)| v.get("change").and_then(Value::as_str) != Some("added"))
+            .collect(),
         // Present but unparseable: do NOT silently return empty (that would re-expose
         // every quarantined tool with no signal — a fail-OPEN of the supply-chain
         // defense). We can't reconstruct the list, so preserve the corrupt file for
@@ -610,7 +617,9 @@ pub fn apply_quarantine(profile: Option<&str>, current: &[Value], events: &[Valu
                 "a destructive tool's definition changed"
             }
             "changed" => "a tool dropped a readOnly/destructive safety annotation",
-            "added" if is_destructive_named(current, tool) => "a new destructive tool appeared",
+            // A new tool APPEARING is not a rug-pull (nothing was approved to change from),
+            // so it is never quarantined here; it surfaces in Activity and is gated at call
+            // time by Block/Confirm/Require-approval if those are on.
             _ => continue,
         };
         if !q.contains_key(tool) {
@@ -1239,6 +1248,40 @@ mod tests {
         assert!(release(profile, "srv__wipe"));
         assert!(!quarantined(profile).contains("srv__wipe"));
         assert!(!release(profile, "srv__wipe"), "releasing twice is a no-op");
+
+        if let Some(p) = quarantine_path(profile) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn added_destructive_tool_is_not_quarantined_and_legacy_added_clears() {
+        let profile = Some("quarantine-added-unit");
+        if let Some(p) = quarantine_path(profile) {
+            let _ = std::fs::remove_file(p);
+        }
+        let current = vec![destructive_tool("srv__delete_all", "Delete everything.")];
+        // A destructive tool APPEARING for the first time is inventory, not a rug-pull, so
+        // it must never be quarantined (the block/confirm/approval gates cover the call).
+        let events = vec![event("srv", "srv__delete_all", "added", SEV_HIGH)];
+        assert!(
+            !apply_quarantine(profile, &current, &events),
+            "an added tool is never quarantined"
+        );
+        assert!(quarantined(profile).is_empty(), "nothing blocked on first sight");
+
+        // A legacy quarantine file that still holds an `added` entry auto-clears on load,
+        // so upgrading doesn't strand the user re-approving tools that never changed.
+        let mut legacy = Quarantine::new();
+        legacy.insert(
+            "srv__delete_all".to_string(),
+            json!({ "tool": "srv__delete_all", "server": "srv", "change": "added" }),
+        );
+        save_quarantine(profile, &legacy);
+        assert!(
+            quarantined(profile).is_empty(),
+            "legacy added entry is dropped on load"
+        );
 
         if let Some(p) = quarantine_path(profile) {
             let _ = std::fs::remove_file(p);
