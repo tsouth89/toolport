@@ -105,45 +105,44 @@
 
 .dark {
   color-scheme: dark;
-  /* Navy-biased neutral ramp: a faint blue hue (H~262) at low chroma on the greys gives
-     the whole app a deep-navy feel that reads more intentional than flat grey, while
-     lightness is preserved so contrast is unchanged. Orange is the single hero accent. */
-  --background: oklch(0.15 0.017 262);
-  --foreground: oklch(0.965 0.006 260);
-  --card: oklch(0.208 0.022 262);
-  --card-foreground: oklch(0.965 0.006 260);
-  --popover: oklch(0.208 0.022 262);
-  --popover-foreground: oklch(0.965 0.006 260);
-  /* Match the LOGO's coral-orange hue (~48), not an amber (~55): the yellower hue on a
-     dark ground read as "Halloween" and looked like a different orange than the mark. Kept
-     a hair lighter than --brand purely so dark ink stays legible on filled buttons. */
-  --primary: oklch(0.72 0.16 48);
-  --primary-foreground: oklch(0.24 0.055 48);
-  --brand: oklch(0.7 0.17 47);
-  --brand-foreground: oklch(0.24 0.055 48);
-  --secondary: oklch(0.272 0.024 262);
-  --secondary-foreground: oklch(0.965 0.006 260);
-  --muted: oklch(0.272 0.024 262);
-  --muted-foreground: oklch(0.72 0.026 262);
-  --accent: oklch(0.302 0.028 262);
-  --accent-foreground: oklch(0.965 0.006 260);
+  /* Deep-NAVY neutral ramp keyed to the brand navy (#1E3A66, H~258). The greys carry a
+     real blue chroma so the app reads navy + orange (the brand), not black + orange. Dark
+     enough to stay a comfortable dark UI; lightness rises through the ramp for elevation. */
+  --background: oklch(0.19 0.046 258);
+  --foreground: oklch(0.965 0.008 250);
+  --card: oklch(0.238 0.052 258);
+  --card-foreground: oklch(0.965 0.008 250);
+  --popover: oklch(0.238 0.052 258);
+  --popover-foreground: oklch(0.965 0.008 250);
+  /* The real brand orange (#F97316) at the logo's coral hue (~48) - one hero accent. A
+     hair lighter than --brand so dark ink stays legible on filled buttons. */
+  --primary: oklch(0.71 0.185 48);
+  --primary-foreground: oklch(0.24 0.06 48);
+  --brand: oklch(0.705 0.19 48);
+  --brand-foreground: oklch(0.24 0.06 48);
+  --secondary: oklch(0.305 0.05 258);
+  --secondary-foreground: oklch(0.965 0.008 250);
+  --muted: oklch(0.305 0.05 258);
+  --muted-foreground: oklch(0.735 0.032 255);
+  --accent: oklch(0.345 0.056 258);
+  --accent-foreground: oklch(0.965 0.008 250);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(0.82 0.04 262 / 12%);
-  --input: oklch(0.82 0.04 262 / 16%);
-  --ring: oklch(0.72 0.15 48);
-  --chart-1: oklch(0.72 0.16 48);
+  --border: oklch(0.72 0.05 258 / 16%);
+  --input: oklch(0.72 0.05 258 / 20%);
+  --ring: oklch(0.71 0.16 48);
+  --chart-1: oklch(0.71 0.185 48);
   --chart-2: oklch(0.746 0.16 232.661);
   --chart-3: oklch(0.765 0.177 163.223);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.702 0.183 293.541);
-  --sidebar: oklch(0.128 0.018 262);
-  --sidebar-foreground: oklch(0.965 0.006 260);
-  --sidebar-primary: oklch(0.72 0.16 48);
-  --sidebar-primary-foreground: oklch(0.24 0.055 48);
-  --sidebar-accent: oklch(0.272 0.024 262);
-  --sidebar-accent-foreground: oklch(0.965 0.006 260);
-  --sidebar-border: oklch(0.82 0.04 262 / 12%);
-  --sidebar-ring: oklch(0.72 0.15 48);
+  --sidebar: oklch(0.165 0.045 258);
+  --sidebar-foreground: oklch(0.965 0.008 250);
+  --sidebar-primary: oklch(0.71 0.185 48);
+  --sidebar-primary-foreground: oklch(0.24 0.06 48);
+  --sidebar-accent: oklch(0.305 0.05 258);
+  --sidebar-accent-foreground: oklch(0.965 0.008 250);
+  --sidebar-border: oklch(0.72 0.05 258 / 16%);
+  --sidebar-ring: oklch(0.71 0.16 48);
 }
 
 @layer base {
