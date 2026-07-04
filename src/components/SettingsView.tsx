@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Bot,
@@ -6,6 +6,7 @@ import {
   Copy,
   Globe,
   Layers,
+  Pin,
   Power,
   ShieldAlert,
   ShieldCheck,
@@ -36,6 +37,7 @@ import {
   setLazyDiscovery,
   setLiveInspect,
   setQuarantineOnDrift,
+  setToolPinned,
   startHttpBridge,
   stopHttpBridge,
   type HttpBridgeStatus,
@@ -50,6 +52,90 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
+/** The set of tools pinned as lazy-discovery prerequisites, with one-click unpin.
+ * Pinning happens contextually (a tool's card in Playground); this is where you see
+ * and manage the whole set. Reads `registry.pinnedTools` (server id -> tool names). */
+function PinnedPrerequisites({
+  registry,
+  onRegistryChange,
+}: {
+  registry: Registry | null;
+  onRegistryChange: (registry: Registry) => void;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const nameOf = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of registry?.servers ?? []) m.set(s.id, s.name);
+    return m;
+  }, [registry?.servers]);
+  const pins = useMemo(() => {
+    const out: { serverId: string; server: string; tool: string }[] = [];
+    for (const [serverId, tools] of Object.entries(registry?.pinnedTools ?? {})) {
+      for (const tool of tools) {
+        out.push({ serverId, server: nameOf.get(serverId) ?? serverId, tool });
+      }
+    }
+    return out.sort((a, b) =>
+      `${a.server}${a.tool}`.localeCompare(`${b.server}${b.tool}`),
+    );
+  }, [registry?.pinnedTools, nameOf]);
+
+  async function unpin(serverId: string, tool: string) {
+    setBusy(`${serverId}:${tool}`);
+    try {
+      onRegistryChange(await setToolPinned(serverId, tool, false));
+    } catch (e) {
+      toastError(`Couldn't unpin the tool: ${e}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+      <div className="flex items-center gap-2 text-xs">
+        <Pin className="size-3.5 shrink-0 text-info" />
+        <span className="font-medium">Pinned prerequisites</span>
+        <span className="rounded-full bg-muted px-1.5 py-0.5 text-muted-foreground">
+          {pins.length}
+        </span>
+        <span className="ml-auto text-muted-foreground">
+          always surfaced in search, with full schema
+        </span>
+      </div>
+      {pins.length === 0 ? (
+        <p className="mt-2 max-w-2xl text-xs text-muted-foreground">
+          None yet. Pin a load-bearing tool (auth, list-before-act, or one whose
+          description doesn&apos;t match your keywords) from its card in Playground, so
+          lazy discovery never hides it.
+        </p>
+      ) : (
+        <ul className="mt-2 space-y-1">
+          {pins.map((p) => (
+            <li
+              key={`${p.serverId}:${p.tool}`}
+              className="flex items-center gap-2 text-xs"
+            >
+              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-foreground/90">
+                {p.tool}
+              </code>
+              <span className="text-muted-foreground">{p.server}</span>
+              <button
+                onClick={() => unpin(p.serverId, p.tool)}
+                disabled={busy === `${p.serverId}:${p.tool}`}
+                aria-label={`Unpin ${p.tool}`}
+                className="ml-auto rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border disabled:opacity-50"
+              >
+                <X className="size-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 interface Props {
   registry: Registry | null;
@@ -263,6 +349,9 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           "Expose 4 meta-tools, not the full catalog (all clients)",
           apply(setLazyDiscovery),
         )}
+        {lazyDiscovery ? (
+          <PinnedPrerequisites registry={registry} onRegistryChange={onRegistryChange} />
+        ) : null}
       </section>
       <section className="flex flex-col gap-2">
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
