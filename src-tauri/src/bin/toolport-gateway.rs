@@ -2492,16 +2492,26 @@ fn tool_cache_path(profile: Option<&str>) -> Option<PathBuf> {
 
 /// The namespaced tool catalog from the last successful build, so tools/list can
 /// answer instantly without waiting on downstream connections.
+/// Bump when the shape/derivation of cached tools changes (new sanitizing, projection,
+/// schema handling), so a stale on-disk cache from an older build is discarded and
+/// rebuilt rather than served verbatim until the next server toggle.
+const TOOL_CACHE_VERSION: u64 = 1;
+
 fn load_tool_cache(profile: Option<&str>) -> Vec<Value> {
     tool_cache_path(profile)
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        // Only honor a cache written by this catalog version; a bare-array (pre-version)
+        // or older-version file has no matching tag and is dropped, forcing a rebuild.
+        .filter(|v| v.get("version").and_then(Value::as_u64) == Some(TOOL_CACHE_VERSION))
+        .and_then(|v| v.get("tools").and_then(Value::as_array).cloned())
         .unwrap_or_default()
 }
 
 fn save_tool_cache(tools: &[Value], profile: Option<&str>) {
     if let Some(path) = tool_cache_path(profile) {
-        if let Ok(s) = serde_json::to_string(tools) {
+        let wrapped = json!({ "version": TOOL_CACHE_VERSION, "tools": tools });
+        if let Ok(s) = serde_json::to_string(&wrapped) {
             // Atomic + unique temp: several gateways share this cache file, so a
             // torn or interleaved write would leave an inconsistent catalog.
             let _ = registry::atomic_write(&path, &s);

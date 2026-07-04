@@ -6,7 +6,7 @@
 //! its tools. The transport is abstracted so the router can be tested with a mock
 //! instead of spawning real processes.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -96,7 +96,6 @@ impl From<String> for TransportError {
 /// Read up to `max` bytes of a ureq response body, lossily as text, never more than
 /// the cap even if the server keeps streaming.
 fn read_capped(resp: ureq::Response, max: u64) -> String {
-    use std::io::Read;
     let mut buf = Vec::new();
     let _ = resp.into_reader().take(max).read_to_end(&mut buf);
     String::from_utf8_lossy(&buf).into_owned()
@@ -674,9 +673,20 @@ impl StdioTransport {
             let mut reader = BufReader::new(stdout);
             loop {
                 let mut line = String::new();
-                match reader.read_line(&mut line) {
+                // Bound each line to the same cap as an HTTP response body: a broken or
+                // hostile server that emits one newline-less multi-gigabyte line can't
+                // grow this String without limit (a plain `read_line` would). `take`
+                // stops at the cap; a full-cap line with no terminator is a protocol
+                // violation, so we close the connection.
+                match (&mut reader).take(MAX_RESPONSE_BYTES).read_line(&mut line) {
                     Ok(0) => break,
-                    Ok(_) => {
+                    Ok(n) => {
+                        if n as u64 >= MAX_RESPONSE_BYTES && !line.ends_with('\n') {
+                            eprintln!(
+                                "toolport: downstream emitted an unterminated line >= {MAX_RESPONSE_BYTES} bytes; closing connection"
+                            );
+                            break;
+                        }
                         if !forward_line(line, &tx, &dirty, &drain_armed) {
                             break;
                         }

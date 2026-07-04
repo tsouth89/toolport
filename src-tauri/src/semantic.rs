@@ -120,7 +120,15 @@ fn embed_batch(cfg: &SemanticConfig, inputs: &[String]) -> Option<Vec<Vec<f32>>>
     if inputs.is_empty() {
         return Some(Vec::new());
     }
-    let mut req = ureq::post(&cfg.endpoint).set("Content-Type", "application/json");
+    // A bounded agent, so a hung/slow embeddings endpoint (a wedged local Ollama/LM
+    // Studio, a black-holed cloud host) can't stall the interactive tool search
+    // indefinitely: on timeout `send_json` errors and the caller falls back to the
+    // pure-lexical ranker. Without this, the bare `ureq::post` inherits ureq's default
+    // of no read timeout and a hang here blocks the whole `search_tools` response.
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let mut req = agent.post(&cfg.endpoint).set("Content-Type", "application/json");
     if let Ok(key) = std::env::var("CONDUIT_EMBED_KEY") {
         if !key.is_empty() {
             req = req.set("Authorization", &format!("Bearer {key}"));

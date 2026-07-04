@@ -185,9 +185,9 @@ pub fn shape_result(result: &mut Value, budget: usize, owner: Option<&str>) -> b
 
     let marker = format!(
         "\n\n[Toolport shaped this result: it was ~{} KB, larger than the {} KB context \
-         budget. Showing the first {} of {} characters. The full result is cached, call \
-         conduit_fetch_result with {{\"cursor\":\"{}\",\"offset\":{}}} to read the rest. \
-         Nothing was lost.]",
+         budget. Showing the first {} of {} characters. The rest is held temporarily, call \
+         conduit_fetch_result with {{\"cursor\":\"{}\",\"offset\":{}}} to read it. If that \
+         later reports the cursor expired, just re-run this tool call for a fresh result.]",
         size / 1024,
         budget / 1024,
         head_chars,
