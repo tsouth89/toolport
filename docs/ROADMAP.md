@@ -232,14 +232,16 @@ background sync so policy reaches every member; deployed server-side).
       it (`oauth.rs`), so no "re-auth soon" UX is possible. Store issue/expiry ts; then a
       subtle near/past-expiry hint on the server row (probe stays source of truth). (M)
 - [ ] **Post-connect success signal for first-timers** ("Toolport is now serving N servers
-      to <client>; open it and ask for tools"), and make onboarding's Done step surface
-      probe failures instead of swallowing them to `health=[]`. (M)
-- [ ] **Playground empty/auth states**: explicit "server advertises no tools" copy; detect
-      an auth-required connect failure and link to the server's Secrets dialog; label the
-      raw-JSON fallback when a schema is too complex to form-render. (S-M)
-- [ ] **Settings status panels** distinguish stale-from-poll-failure vs empty (HTTP-bridge
-      status, quarantine 15s / allowed 10s polls swallow errors). Same class as the
-      tracked Activity empty-vs-error item, different screens. (S)
+      to <client>; open it and ask for tools"). The other half of this item, onboarding's
+      Done step surfacing probe failures instead of swallowing them to `health=[]`, shipped
+      in #186. (M -> S remaining)
+- [x] **Playground empty/auth states** (#184): explicit "server advertises no tools" copy;
+      auth-required connect failures link to the server's Secrets dialog (auth-error matcher
+      widened for inflected forms). Residual: label the raw-JSON fallback when a schema is
+      too complex to form-render.
+- [x] **Settings status panels** distinguish stale-from-poll-failure vs empty (#185): the
+      HTTP-bridge, quarantine (15s), and allowed-tools (10s) polls no longer swallow errors,
+      they flag "couldn't read / may be stale" instead of rendering as empty.
 - [ ] **Client-import preview**: `handleImport` bulk-adds every importable server with only
       a count toast; reuse the share-link `preview_import`/`ImportItem` review flow. (S-M)
 - [ ] **Recall escape hatch** for lazy discovery: a `list_server_tools`/`search_tools_deep`
@@ -253,8 +255,9 @@ background sync so policy reaches every member; deployed server-side).
       order; a removed-then-readded server can take a different slot and silently rename a
       tool the client cached, failing in-flight calls with "no route". Derive from
       `(server_id, tool_name)` content instead of position. (M)
-- [ ] Small: "Clear filter" buttons on zero-match states (Activity recent-calls, Playground
-      tool filter, catalog search); light credential/raw-arg client-side validation. (S)
+- [x] "Clear filter" buttons on zero-match states (Activity recent-calls, Playground tool
+      filter, catalog search) shipped in #184. Residual: light credential/raw-arg
+      client-side validation. (S)
 
 ## The core decision: Toolport is a gateway, not a file editor
 
