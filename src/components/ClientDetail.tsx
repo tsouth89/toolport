@@ -75,6 +75,19 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
     return target.enabledServerIds.filter((id) => ids.has(id)).length;
   }
 
+  /** The actual servers a scope resolves to, so a connected client shows WHAT it can
+   * reach, not just a count. */
+  function scopeServers(scopeName: string): { id: string; name: string }[] {
+    const target = scopeName
+      ? profiles.find((p) => p.name.toLowerCase() === scopeName.toLowerCase())
+      : (profiles.find((p) => p.id === registry?.activeProfileId) ?? profiles[0]);
+    if (!target) return [];
+    const enabled = new Set(target.enabledServerIds);
+    return (registry?.servers ?? [])
+      .filter((s) => enabled.has(s.id))
+      .map((s) => ({ id: s.id, name: s.name }));
+  }
+
   /** Re-apply a scope to an already-connected client (overwrites its gateway
    * entry's CONDUIT_PROFILE in place, no disconnect needed). */
   async function applyScope() {
@@ -301,10 +314,39 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
         </div>
       </div>
 
-      <p className="text-sm text-muted-foreground">
-        Connect points {client.name} at Toolport so it uses your managed servers. Import
-        copies this client's own servers into Toolport so it can manage them.
-      </p>
+      {installed ? (
+        <div>
+          <div className="mb-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+            Servers it can reach
+          </div>
+          {scopeServers(currentScope).length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              No enabled servers in this scope yet. Enable some under All servers.
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {scopeServers(currentScope).map((s) => (
+                <span
+                  key={s.id}
+                  className="rounded-md border border-border/60 bg-muted/40 px-2 py-1 font-mono text-[11px] text-foreground/90"
+                >
+                  {s.name}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          Point {client.name} at Toolport to use your{" "}
+          <span className="font-medium text-foreground">
+            {scopeServerCount(profile)} managed server
+            {scopeServerCount(profile) === 1 ? "" : "s"}
+          </span>{" "}
+          from one place, no re-wiring per project. Or import {client.name}&apos;s own
+          servers into Toolport below.
+        </p>
+      )}
 
       {client.usesConnectors && (
         <Card className="gap-0 border-info/20 bg-info/5">
@@ -356,22 +398,22 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
             )}
           </div>
         </div>
-        <p className="mb-1 text-xs text-muted-foreground">
-          The servers {client.name} already has, from its config and any plugins (tagged
-          below).
-        </p>
-        <ul className="mb-3 space-y-0.5 text-xs text-muted-foreground">
-          <li>
-            <span className="font-medium text-foreground">Import</span> copies a server
-            into Toolport; {client.name} keeps its own copy.
-          </li>
-          <li>
-            <span className="font-medium text-foreground">Move config in</span> copies it,
-            then removes it from {client.name}'s config so the gateway is the only source
-            (plugin servers stay, only {client.name} can remove those). This is the
-            cutover that actually saves context.
-          </li>
-        </ul>
+        <details className="mb-2">
+          <summary className="cursor-pointer text-xs font-medium text-muted-foreground/80 hover:text-foreground">
+            How importing works
+          </summary>
+          <ul className="mt-1.5 mb-1 space-y-0.5 text-xs text-muted-foreground">
+            <li>
+              <span className="font-medium text-foreground">Import</span> copies a server
+              into Toolport; {client.name} keeps its own copy.
+            </li>
+            <li>
+              <span className="font-medium text-foreground">Move config in</span> copies
+              it, then removes it from {client.name}'s config so the gateway is the only
+              source (plugin servers stay). The cutover that actually saves context.
+            </li>
+          </ul>
+        </details>
         {installed && toImport.length > 0 && movable.length > 0 && (
           <p className="mb-3 -mt-1 inline-flex items-start gap-1.5 rounded-md bg-warning/10 px-2 py-1 text-xs text-warning">
             <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
@@ -388,7 +430,9 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
           <p className="text-sm text-muted-foreground">
             {client.usesConnectors
               ? "No local servers in the config file to import."
-              : "Nothing configured in this client to import."}
+              : installed
+                ? `${client.name} has no servers of its own, it's already using Toolport's.`
+                : "Nothing configured in this client to import."}
           </p>
         ) : (
           <div className="grid gap-2 sm:grid-cols-2">
