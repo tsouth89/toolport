@@ -1231,11 +1231,24 @@ fn team_connect(
 #[tauri::command]
 fn team_sync(app: tauri::AppHandle, state: State<RegistryState>) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    let outcome = teams::sync_now()?.map(|(_, o)| o).unwrap_or_default();
-    let fresh = reload_into_state(state.inner())?;
-    nudge_gateway(state.inner());
-    emit_team_review(&app, outcome);
-    Ok(fresh)
+    match teams::sync_now()? {
+        teams::SyncResult::Removed => {
+            // The member was removed; sync_now already cleared the local team. Reload
+            // so the UI drops the team, and tell it why so it can surface a notice
+            // rather than the raw error the config pull used to throw.
+            let fresh = reload_into_state(state.inner())?;
+            nudge_gateway(state.inner());
+            let _ = app.emit("team-removed", serde_json::json!({}));
+            Ok(fresh)
+        }
+        teams::SyncResult::Ok { applied, .. } => {
+            let outcome = applied.map(|(_, o)| o).unwrap_or_default();
+            let fresh = reload_into_state(state.inner())?;
+            nudge_gateway(state.inner());
+            emit_team_review(&app, outcome);
+            Ok(fresh)
+        }
+    }
 }
 
 /// Tell the UI how a team config landed: how many servers need the member's review (they

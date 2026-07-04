@@ -30,6 +30,7 @@ import {
   removeServer,
   setAllEnabled,
   setServerEnabled,
+  teamSync,
 } from "@/lib/api";
 import {
   importableServers,
@@ -229,6 +230,54 @@ function App() {
       void unlisten.then((f) => f());
     };
   }, []);
+
+  // The backend signals an authoritative removal from a team (a 401/403 on the
+  // membership heartbeat) so we can tell the member plainly rather than leaving them
+  // to wonder why the team's servers vanished. The registry (team already cleared) is
+  // pushed via the normal team_sync return / registry-changed path.
+  useEffect(() => {
+    const unlisten = listen("team-removed", () => {
+      toast.warning(
+        "You were removed from the team. Its shared servers have been removed from your setup.",
+      );
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
+
+  // Keep a team member's shared server set AND security policy current even if they
+  // never open the Teams tab: an admin tightening a force-quarantine / approval policy
+  // must reach every member, not just those who happen to click "Sync now". Runs on
+  // connect and on a modest interval; cheap when unchanged (the server 304s on an
+  // unchanged config), and not tied to the Teams view. Keyed on the team id so it
+  // starts on connect and tears down on disconnect/removal.
+  const teamId = registry?.team?.teamId;
+  useEffect(() => {
+    if (!teamId) return;
+    let cancelled = false;
+    let running = false;
+    const tick = async () => {
+      if (running || cancelled) return;
+      running = true;
+      try {
+        const fresh = await teamSync();
+        if (!cancelled) setRegistry(fresh);
+      } catch {
+        // A transient network error is fine; the next tick retries. Removal is a clean
+        // 401/403 the backend turns into a cleared team + the team-removed event, not a
+        // throw, so it won't land here.
+      } finally {
+        running = false;
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 5 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [teamId]);
 
   function selectClient(id: string | null) {
     setSelectedClientId(id);
