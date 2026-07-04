@@ -18,6 +18,7 @@ import {
   ServerOff,
   Store,
   TriangleAlert,
+  WifiOff,
 } from "lucide-react";
 import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
@@ -76,6 +77,7 @@ const SettingsView = lazy(() =>
   import("@/components/SettingsView").then((m) => ({ default: m.SettingsView })),
 );
 import { Button } from "@/components/ui/button";
+import { Callout } from "@/components/Callout";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -94,6 +96,12 @@ function App() {
   const [activityKey, setActivityKey] = useState(0);
   const [health, setHealth] = useState<Record<string, ProbeResult>>({});
   const [probing, setProbing] = useState(false);
+  // Whether the app's Rust backend answered the last health probe. `probe_servers`
+  // returns per-server failures as ok:false results; a *thrown* invoke instead means
+  // the backend itself didn't respond, and without this the server badges would sit
+  // on "Checking…" forever with no explanation. Optimistic default so the banner
+  // only appears after a real failure.
+  const [backendReachable, setBackendReachable] = useState(true);
   const [query, setQuery] = useState("");
   const [onboarded, setOnboarded] = useState(
     () => localStorage.getItem("conduit.onboarded") === "1",
@@ -127,11 +135,14 @@ function App() {
     try {
       const results = await probeServers();
       setHealth(Object.fromEntries(results.map((r) => [r.serverId, r])));
+      setBackendReachable(true);
       return results;
     } catch {
       // Non-fatal: badges just stay in "checking". Record that it threw so a manual
-      // refresh reports the failure instead of a false success (both return []).
+      // refresh reports the failure instead of a false success (both return []), and
+      // surface a persistent banner so the stale badges aren't read as real status.
       probeErroredRef.current = true;
+      setBackendReachable(false);
       return [];
     } finally {
       setProbing(false);
@@ -510,6 +521,29 @@ function App() {
               </Button>
             </div>
           </header>
+
+          {!backendReachable && (
+            <Callout
+              variant="warning"
+              role="status"
+              className="mx-6 mt-3 flex items-center gap-3"
+            >
+              <WifiOff className="size-4 shrink-0" aria-hidden="true" />
+              <span className="min-w-0 flex-1">
+                Toolport's backend didn't respond to the last health check, so server
+                status below may be stale.
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                onClick={() => void reprobe()}
+                disabled={probing}
+              >
+                Retry
+              </Button>
+            </Callout>
+          )}
 
           <ScrollArea className="min-h-0 flex-1">
             <div className="p-6">
