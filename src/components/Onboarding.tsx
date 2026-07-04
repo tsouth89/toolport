@@ -536,14 +536,28 @@ function Done({
       </StepHeader>
 
       {broken.length > 0 && (
-        <div className="flex flex-col gap-1 rounded-md bg-warning/10 px-3 py-2 text-sm">
+        <div className="flex flex-col gap-2 rounded-md bg-warning/10 px-3 py-2 text-sm">
           <span className="font-medium text-warning">
-            {broken.length} server{broken.length === 1 ? "" : "s"} couldn't start:{" "}
-            {broken.map((r) => nameFor(r.serverId)).join(", ")}
+            {broken.length} server{broken.length === 1 ? "" : "s"} couldn't start
           </span>
+          <ul className="flex flex-col gap-1.5">
+            {broken.map((r) => (
+              <li key={r.serverId} className="flex flex-col gap-0.5">
+                <span className="text-xs font-medium text-foreground/80">
+                  {nameFor(r.serverId)}
+                </span>
+                {r.error && (
+                  <span className="max-h-20 overflow-y-auto text-xs break-words whitespace-pre-wrap text-muted-foreground">
+                    {r.error}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
           <span className="text-xs text-muted-foreground">
-            They likely need a runtime that isn't installed (Node/npx or Python/uvx), or
-            the command needs a fix. Retry from each server's card once it's sorted.
+            Most first-run failures are a missing runtime (Node/npx or Python/uvx) or a
+            command that needs a fix. Sort it out, then retry from that server's card (the
+            button below takes you to the main screen).
           </span>
         </div>
       )}
