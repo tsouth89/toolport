@@ -6,6 +6,8 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-04
+
 ### Added
 
 - **A full visual redesign.** Toolport moves to its brand palette, a deep navy
