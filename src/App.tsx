@@ -433,11 +433,7 @@ function App() {
                             ? "MCP client"
                             : loading || !registry
                               ? "Loading…"
-                              : `${enabledCount} of ${servers.length} enabled` +
-                                (connectedCount ? ` · ${connectedCount} connected` : "") +
-                                (attentionCount
-                                  ? ` · ${attentionCount} need${attentionCount === 1 ? "s" : ""} attention`
-                                  : "")}
+                              : "One gateway in front of every MCP server you run"}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -563,6 +559,12 @@ function App() {
                   </div>
                 ) : (
                   <div className="flex flex-col gap-5">
+                    <StatusBar
+                      total={servers.length}
+                      connected={connectedCount}
+                      attention={attentionCount}
+                      disabled={servers.length - enabledCount}
+                    />
                     <ServerGroup
                       title="Needs attention"
                       dot="bg-warning"
@@ -617,6 +619,52 @@ function App() {
   );
 }
 
+/** At-a-glance server health as a row of chips: the primary status summary, promoted out
+ * of the grey header caption into a scannable status bar with the same semantic dots the
+ * groups use. */
+function StatusBar({
+  total,
+  connected,
+  attention,
+  disabled,
+}: {
+  total: number;
+  connected: number;
+  attention: number;
+  disabled: number;
+}) {
+  const chip =
+    "inline-flex items-center gap-2 rounded-full border border-border/60 bg-card/50 px-3 py-1.5 text-xs font-semibold";
+  const dot = "size-1.5 rounded-full";
+  return (
+    <div className="flex flex-wrap gap-2">
+      <span className={chip}>
+        <span className="tabular-nums">{total}</span>
+        <span className="font-normal text-muted-foreground">servers</span>
+      </span>
+      <span className={chip}>
+        <span className={`${dot} bg-success`} />
+        <span className="tabular-nums">{connected}</span>
+        <span className="font-normal text-muted-foreground">connected</span>
+      </span>
+      {attention > 0 && (
+        <span className={`${chip} border-warning/40`}>
+          <span className={`${dot} bg-warning`} />
+          <span className="tabular-nums">{attention}</span>
+          <span className="font-normal text-muted-foreground">
+            need{attention === 1 ? "s" : ""} attention
+          </span>
+        </span>
+      )}
+      <span className={chip}>
+        <span className={`${dot} bg-muted-foreground/40`} />
+        <span className="tabular-nums">{disabled}</span>
+        <span className="font-normal text-muted-foreground">disabled</span>
+      </span>
+    </div>
+  );
+}
+
 /** A titled, collapsible section of server rows. Renders nothing when empty, so
  * the page only shows the buckets that have servers. Collapse state persists per
  * group; the Disabled bucket starts collapsed. */
@@ -666,7 +714,7 @@ function ServerGroup({
         <span className="text-xs text-muted-foreground/70">{count}</span>
       </button>
       {!collapsed && (
-        <div className="overflow-hidden rounded-xl border border-border/60">
+        <div className="overflow-hidden rounded-xl border border-border/60 bg-card/40 shadow-[0_1px_0_rgba(255,255,255,.02)_inset,0_10px_28px_-24px_rgba(0,0,0,.9)]">
           {children}
         </div>
       )}

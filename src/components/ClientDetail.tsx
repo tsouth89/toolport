@@ -4,6 +4,7 @@ import {
   Check,
   Download,
   Link2,
+  Monitor,
   Plug,
   PlugZap,
   Puzzle,
@@ -336,15 +337,27 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
             </div>
           )}
         </div>
+      ) : scopeServerCount(profile) > 0 ? (
+        <div className="flex flex-col gap-4">
+          <p className="max-w-prose text-sm text-muted-foreground">
+            Connect {client.name} once and it reaches your{" "}
+            <span className="font-medium text-foreground">
+              {scopeServerCount(profile)} managed server
+              {scopeServerCount(profile) === 1 ? "" : "s"}
+            </span>{" "}
+            through one gateway, no re-wiring per project. Your keys stay in your
+            keychain.
+          </p>
+          <GatewayFlow
+            clientName={client.name}
+            servers={scopeServers(profile).map((s) => s.name)}
+          />
+        </div>
       ) : (
-        <p className="text-sm text-muted-foreground">
-          Point {client.name} at Toolport to use your{" "}
-          <span className="font-medium text-foreground">
-            {scopeServerCount(profile)} managed server
-            {scopeServerCount(profile) === 1 ? "" : "s"}
-          </span>{" "}
-          from one place, no re-wiring per project. Or import {client.name}&apos;s own
-          servers into Toolport below.
+        <p className="max-w-prose text-sm text-muted-foreground">
+          Connect {client.name}, then enable servers under{" "}
+          <span className="font-medium text-foreground">All servers</span> and
+          they&apos;ll all route through Toolport, no per-client setup.
         </p>
       )}
 
@@ -365,76 +378,74 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
         </Card>
       )}
 
-      {/* Import: client servers are sources to pull into Toolport, nothing more. */}
-      <div>
-        <div className="mb-1 flex items-center justify-between gap-2">
-          <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            Import into Toolport
-          </span>
-          <div className="flex items-center gap-1.5">
-            {toImport.length > 0 && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 px-2 text-xs"
-                onClick={handleImportAll}
-                disabled={busy}
-              >
-                <Download className="size-3" />
-                Import all ({toImport.length})
-              </Button>
-            )}
-            {movable.length > 0 && (
-              <Button
-                size="sm"
-                variant="default"
-                className="h-7 px-2 text-xs"
-                onClick={() => setMigrateOpen(true)}
-                disabled={busy}
-              >
-                <Shuffle className="size-3" />
-                Move config in ({movable.length})
-              </Button>
-            )}
-          </div>
-        </div>
-        <details className="mb-2">
-          <summary className="cursor-pointer text-xs font-medium text-muted-foreground/80 hover:text-foreground">
-            How importing works
-          </summary>
-          <ul className="mt-1.5 mb-1 space-y-0.5 text-xs text-muted-foreground">
-            <li>
-              <span className="font-medium text-foreground">Import</span> copies a server
-              into Toolport; {client.name} keeps its own copy.
-            </li>
-            <li>
-              <span className="font-medium text-foreground">Move config in</span> copies
-              it, then removes it from {client.name}'s config so the gateway is the only
-              source (plugin servers stay). The cutover that actually saves context.
-            </li>
-          </ul>
-        </details>
-        {installed && toImport.length > 0 && movable.length > 0 && (
-          <p className="mb-3 -mt-1 inline-flex items-start gap-1.5 rounded-md bg-warning/10 px-2 py-1 text-xs text-warning">
-            <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
-            <span>
-              {client.name} is already connected to Toolport. Import on its own leaves a
-              copy here too, so these tools load twice, once directly and once through the
-              gateway. Use <span className="font-medium">Move config in</span> to avoid
-              that.
+      {/* Import: client servers are sources to pull into Toolport. The WHOLE block only
+          renders when the client actually has servers of its own to import - otherwise it
+          used to show a header + a "how importing works" explainer describing Import / Move
+          buttons that weren't on screen (an AI-agent client with no own servers). */}
+      {allServers.length > 0 && (
+        <div>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className="text-2xs font-semibold tracking-[0.09em] text-muted-foreground uppercase">
+              Import into Toolport
             </span>
-          </p>
-        )}
+            <div className="flex items-center gap-1.5">
+              {toImport.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-xs"
+                  onClick={handleImportAll}
+                  disabled={busy}
+                >
+                  <Download className="size-3" />
+                  Import all ({toImport.length})
+                </Button>
+              )}
+              {movable.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="default"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => setMigrateOpen(true)}
+                  disabled={busy}
+                >
+                  <Shuffle className="size-3" />
+                  Move config in ({movable.length})
+                </Button>
+              )}
+            </div>
+          </div>
+          <details className="mb-2">
+            <summary className="cursor-pointer text-xs font-medium text-muted-foreground/80 hover:text-foreground">
+              How importing works
+            </summary>
+            <ul className="mt-1.5 mb-1 space-y-0.5 text-xs text-muted-foreground">
+              <li>
+                <span className="font-medium text-foreground">Import</span> copies a
+                server into Toolport; {client.name} keeps its own copy.
+              </li>
+              {movable.length > 0 && (
+                <li>
+                  <span className="font-medium text-foreground">Move config in</span>{" "}
+                  copies it, then removes it from {client.name}'s config so the gateway is
+                  the only source (plugin servers stay). The cutover that actually saves
+                  context.
+                </li>
+              )}
+            </ul>
+          </details>
+          {installed && toImport.length > 0 && movable.length > 0 && (
+            <p className="mb-3 -mt-1 inline-flex items-start gap-1.5 rounded-md bg-warning/10 px-2 py-1 text-xs text-warning">
+              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+              <span>
+                {client.name} is already connected to Toolport. Import on its own leaves a
+                copy here too, so these tools load twice, once directly and once through
+                the gateway. Use <span className="font-medium">Move config in</span> to
+                avoid that.
+              </span>
+            </p>
+          )}
 
-        {allServers.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            {client.usesConnectors
-              ? "No local servers in the config file to import."
-              : installed
-                ? `${client.name} has no servers of its own, it's already using Toolport's.`
-                : "Nothing configured in this client to import."}
-          </p>
-        ) : (
           <div className="grid gap-2 sm:grid-cols-2">
             {allServers.map((server) => (
               <ServerMiniCard
@@ -447,18 +458,18 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
               />
             ))}
           </div>
-        )}
 
-        {toImport.length === 0 && allServers.length > 0 && (
-          <p className="mt-3 inline-flex items-center gap-1.5 text-xs text-success">
-            <Check className="size-3.5" />
-            Everything here is already in Toolport. Manage it under{" "}
-            <span className="inline-flex items-center gap-0.5 font-medium">
-              All servers <ArrowRight className="size-3" />
-            </span>
-          </p>
-        )}
-      </div>
+          {toImport.length === 0 && (
+            <p className="mt-3 inline-flex items-center gap-1.5 text-xs text-success">
+              <Check className="size-3.5" />
+              Everything here is already in Toolport. Manage it under{" "}
+              <span className="inline-flex items-center gap-0.5 font-medium">
+                All servers <ArrowRight className="size-3" />
+              </span>
+            </p>
+          )}
+        </div>
+      )}
 
       <Dialog open={migrateOpen} onOpenChange={setMigrateOpen}>
         <DialogContent className="sm:max-w-md">
@@ -533,6 +544,60 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+/** The product in one glance: client -> Toolport gateway -> the servers it reaches. Shows
+ * the pitch concretely instead of describing it in prose. */
+function GatewayFlow({ clientName, servers }: { clientName: string; servers: string[] }) {
+  const shown = servers.slice(0, 4);
+  const extra = servers.length - shown.length;
+  const link = "mb-7 h-px w-8 shrink-0";
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-1 rounded-xl border border-border/60 bg-card/40 px-4 py-5">
+      <div className="flex flex-col items-center gap-2 text-center">
+        <div className="grid size-14 place-items-center rounded-2xl border border-border bg-secondary text-xl">
+          <Monitor className="size-6 text-muted-foreground" />
+        </div>
+        <div className="text-2xs font-semibold">{clientName}</div>
+      </div>
+      <div className={`${link} bg-gradient-to-r from-border to-primary`} />
+      <div className="flex flex-col items-center gap-2 text-center">
+        <div className="grid size-16 place-items-center rounded-2xl border border-primary/45 bg-primary/10 shadow-[0_0_0_5px_rgba(239,147,80,.09),0_16px_34px_-16px_rgba(239,147,80,.5)]">
+          <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true">
+            <circle
+              cx="16"
+              cy="16"
+              r="13"
+              fill="none"
+              stroke="var(--brand)"
+              strokeWidth="2.5"
+            />
+            <circle cx="16" cy="16" r="5" fill="var(--brand)" />
+          </svg>
+        </div>
+        <div className="text-2xs font-semibold">
+          Toolport
+          <span className="block font-normal text-muted-foreground">gateway</span>
+        </div>
+      </div>
+      <div className={`${link} bg-gradient-to-r from-primary to-border`} />
+      <div className="flex flex-col gap-1">
+        {shown.map((s) => (
+          <span
+            key={s}
+            className="rounded-md border border-border/60 bg-card px-2 py-1 font-mono text-2xs text-muted-foreground"
+          >
+            {s}
+          </span>
+        ))}
+        {extra > 0 && (
+          <span className="px-2 font-mono text-2xs text-muted-foreground/60">
+            +{extra} more
+          </span>
+        )}
+      </div>
     </div>
   );
 }

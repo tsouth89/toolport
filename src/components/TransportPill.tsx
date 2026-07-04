@@ -1,30 +1,14 @@
 import { Globe, HelpCircle, Radio, Terminal } from "lucide-react";
 import type { Transport } from "@/lib/types";
 
-const meta: Record<
-  Transport,
-  { label: string; icon: typeof Terminal; className: string }
-> = {
-  stdio: {
-    label: "stdio",
-    icon: Terminal,
-    className: "text-success border-success/30 bg-success/10",
-  },
-  http: {
-    label: "http",
-    icon: Globe,
-    className: "text-owned border-owned/30 bg-owned/10",
-  },
-  sse: {
-    label: "sse",
-    icon: Radio,
-    className: "text-info border-info/30 bg-info/10",
-  },
-  unknown: {
-    label: "unknown",
-    icon: HelpCircle,
-    className: "text-muted-foreground border-border bg-muted",
-  },
+// Transport is low-value, near-constant metadata, so it renders NEUTRAL: the icon plus a
+// muted mono label. Semantic colors (green/amber/red) are reserved exclusively for health,
+// so a healthy stdio server no longer shows two unrelated greens next to each other.
+const meta: Record<Transport, { label: string; icon: typeof Terminal }> = {
+  stdio: { label: "stdio", icon: Terminal },
+  http: { label: "http", icon: Globe },
+  sse: { label: "sse", icon: Radio },
+  unknown: { label: "unknown", icon: HelpCircle },
 };
 
 export function TransportPill({ transport }: { transport: Transport }) {
@@ -33,9 +17,9 @@ export function TransportPill({ transport }: { transport: Transport }) {
   return (
     <span
       aria-label={`Transport: ${m.label}`}
-      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${m.className}`}
+      className="inline-flex items-center gap-1 font-mono text-2xs text-muted-foreground/70"
     >
-      <Icon className="size-3" aria-hidden="true" />
+      <Icon className="size-3 opacity-70" aria-hidden="true" />
       <span aria-hidden="true">{m.label}</span>
     </span>
   );
