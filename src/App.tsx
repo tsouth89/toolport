@@ -78,11 +78,15 @@ const SettingsView = lazy(() =>
 );
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/Callout";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+
+/** Above this many servers, "Disable all" asks for confirmation first. */
+const BULK_DISABLE_CONFIRM_MIN = 3;
 
 function App() {
   const [registry, setRegistry] = useState<Registry | null>(null);
@@ -91,6 +95,9 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [togglingAll, setTogglingAll] = useState(false);
+  // Gates the "Disable all" bulk action behind a confirm when it turns off more
+  // than a couple of servers, so one menu click can't silently kill a big set.
+  const [confirmDisableAll, setConfirmDisableAll] = useState(false);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [view, setView] = useState<View>("servers");
   const [activityKey, setActivityKey] = useState(0);
@@ -484,7 +491,18 @@ function App() {
 
                       {servers.length > 0 && (
                         <DropdownMenuItem
-                          onClick={handleToggleAll}
+                          onClick={() => {
+                            // "Disable all" only shows when every server is enabled,
+                            // so it turns off `servers.length`. Confirm when that's
+                            // more than a couple; "Enable all" and small sets go
+                            // straight through.
+                            const disabling = enabledCount >= servers.length;
+                            if (disabling && servers.length > BULK_DISABLE_CONFIRM_MIN) {
+                              setConfirmDisableAll(true);
+                            } else {
+                              void handleToggleAll();
+                            }
+                          }}
                           // Gate on the flag handleToggleAll actually sets (togglingAll),
                           // not just busyId, so it can't be re-fired mid-run. Disabled
                           // while a search is active: it acts on ALL servers, so it must
@@ -648,6 +666,15 @@ function App() {
         </Suspense>
       )}
       <PendingApprovals />
+      <ConfirmDialog
+        open={confirmDisableAll}
+        onOpenChange={setConfirmDisableAll}
+        title="Disable all servers?"
+        description={`This turns off all ${servers.length} servers for this profile. Clients will lose their tools until you re-enable them.`}
+        confirmLabel="Disable all"
+        destructive
+        onConfirm={handleToggleAll}
+      />
       <Toaster position="bottom-right" />
     </TooltipProvider>
   );

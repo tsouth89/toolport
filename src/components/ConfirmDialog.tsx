@@ -11,8 +11,9 @@ import {
 import { Button } from "@/components/ui/button";
 
 interface Props {
-  /** The control that opens the confirm (rendered via DialogTrigger asChild). */
-  trigger: ReactNode;
+  /** The control that opens the confirm (rendered via DialogTrigger asChild).
+   * Optional when the dialog is driven in controlled mode via `open`. */
+  trigger?: ReactNode;
   title: string;
   description?: ReactNode;
   confirmLabel?: string;
@@ -21,6 +22,10 @@ interface Props {
   destructive?: boolean;
   /** Runs on confirm; the dialog closes when it resolves. Errors keep it open. */
   onConfirm: () => void | Promise<void>;
+  /** Controlled open state. Omit for the default trigger-driven (uncontrolled) use. */
+  open?: boolean;
+  /** Notified on open/close in controlled mode (and alongside internal state). */
+  onOpenChange?: (open: boolean) => void;
 }
 
 /** A lightweight confirm gate for irreversible actions (remove, delete, leave).
@@ -33,9 +38,19 @@ export function ConfirmDialog({
   cancelLabel = "Cancel",
   destructive = false,
   onConfirm,
+  open: openProp,
+  onOpenChange,
 }: Props) {
-  const [open, setOpen] = useState(false);
+  const [openState, setOpenState] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Controlled when an `open` prop is supplied (e.g. opened from a menu item),
+  // otherwise self-managed by the trigger.
+  const isControlled = openProp !== undefined;
+  const open = isControlled ? openProp : openState;
+  const setOpen = (o: boolean) => {
+    if (!isControlled) setOpenState(o);
+    onOpenChange?.(o);
+  };
 
   async function handleConfirm() {
     setBusy(true);
@@ -53,7 +68,7 @@ export function ConfirmDialog({
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>{trigger}</DialogTrigger>
+      {trigger && <DialogTrigger asChild>{trigger}</DialogTrigger>}
       <DialogContent className="sm:max-w-sm" onClick={(e) => e.stopPropagation()}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
