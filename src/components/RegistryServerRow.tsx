@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, Copy, KeyRound, LogIn, Pencil, Trash2 } from "lucide-react";
+import { ChevronDown, Copy, KeyRound, LogIn, Pencil, Trash2, Users } from "lucide-react";
 import type { ProbeResult, Registry, ServerEntry } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -77,6 +77,10 @@ export function RegistryServerRow({
       : (server.url ?? "");
   const secretCount = server.env.filter((e) => e.secret).length;
   const status = statusOf(enabled, health);
+  // Team-synced servers are tagged `team:<id>`. An admin manages them centrally, so a
+  // member sees a Team badge and can't edit/remove them locally (a local change would
+  // just re-sync away), but still authenticates them (keys stay on their own machine).
+  const isTeam = server.source?.startsWith("team:") ?? false;
 
   const label =
     status === "connected"
@@ -127,11 +131,16 @@ export function RegistryServerRow({
 
         <span className="min-w-0 truncate text-sm font-medium">{server.name}</span>
 
-        {server.source && (
+        {isTeam ? (
+          <span className="hidden shrink-0 items-center gap-1 rounded bg-info/15 px-1.5 py-0.5 text-[11px] font-medium text-info md:inline-flex">
+            <Users className="size-3" aria-hidden="true" />
+            Team
+          </span>
+        ) : server.source ? (
           <span className="hidden max-w-40 shrink-0 truncate rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground md:inline">
             {server.source.replace("imported:", "from ")}
           </span>
-        )}
+        ) : null}
 
         <span className="ml-auto flex shrink-0 items-center gap-2.5">
           {status === "needs-auth" ? (
@@ -199,47 +208,56 @@ export function RegistryServerRow({
               }
             />
 
-            <ServerDialog
-              onSaved={onRegistryChange}
-              initial={{ ...server, name: duplicateName }}
-              existingNames={registry?.servers.map((s) => s.name) ?? []}
-              trigger={
-                <button className={ACTION} title="Add another account">
-                  <Copy className="size-3.5" />
-                  Duplicate
-                </button>
-              }
-            />
+            {isTeam ? (
+              <span className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground">
+                <Users className="size-3.5" aria-hidden="true" />
+                Managed by your team. Ask an admin to change or remove it.
+              </span>
+            ) : (
+              <>
+                <ServerDialog
+                  onSaved={onRegistryChange}
+                  initial={{ ...server, name: duplicateName }}
+                  existingNames={registry?.servers.map((s) => s.name) ?? []}
+                  trigger={
+                    <button className={ACTION} title="Add another account">
+                      <Copy className="size-3.5" />
+                      Duplicate
+                    </button>
+                  }
+                />
 
-            <ServerDialog
-              onSaved={onRegistryChange}
-              editId={server.id}
-              initial={server}
-              existingNames={registry?.servers.map((s) => s.name) ?? []}
-              trigger={
-                <button className={ACTION}>
-                  <Pencil className="size-3.5" />
-                  Edit
-                </button>
-              }
-            />
+                <ServerDialog
+                  onSaved={onRegistryChange}
+                  editId={server.id}
+                  initial={server}
+                  existingNames={registry?.servers.map((s) => s.name) ?? []}
+                  trigger={
+                    <button className={ACTION}>
+                      <Pencil className="size-3.5" />
+                      Edit
+                    </button>
+                  }
+                />
 
-            <ConfirmDialog
-              trigger={
-                <button
-                  disabled={busy}
-                  className={`${ACTION} hover:bg-destructive/10 hover:text-destructive`}
-                >
-                  <Trash2 className="size-3.5" />
-                  Remove
-                </button>
-              }
-              title={`Remove ${server.name}?`}
-              description="This deletes the server from Toolport. Any saved secrets stay in your keychain."
-              confirmLabel="Remove"
-              destructive
-              onConfirm={onRemove}
-            />
+                <ConfirmDialog
+                  trigger={
+                    <button
+                      disabled={busy}
+                      className={`${ACTION} hover:bg-destructive/10 hover:text-destructive`}
+                    >
+                      <Trash2 className="size-3.5" />
+                      Remove
+                    </button>
+                  }
+                  title={`Remove ${server.name}?`}
+                  description="This deletes the server from Toolport. Any saved secrets stay in your keychain."
+                  confirmLabel="Remove"
+                  destructive
+                  onConfirm={onRemove}
+                />
+              </>
+            )}
           </div>
         </div>
       )}
