@@ -237,19 +237,32 @@ export function CatalogView({ registry, onAdded }: Props) {
           </div>
         ) : browsing && popularError ? (
           <div className="flex flex-col items-center gap-3 py-20 text-center">
-            <p className="text-sm text-muted-foreground">Couldn't load the catalog.</p>
+            <div>
+              <p className="font-medium">Catalog could not load</p>
+              <p className="max-w-md text-sm text-muted-foreground">
+                Toolport could not load the curated picks. Check that the desktop app is
+                still running, then try again.
+              </p>
+            </div>
             <Button variant="outline" size="sm" onClick={reloadPopular}>
               Try again
             </Button>
           </div>
         ) : (
-          <p className="py-20 text-center text-sm text-muted-foreground">
-            {loading
-              ? ""
-              : results !== null
-                ? `No servers match "${query}".`
-                : "Catalog unavailable."}
-          </p>
+          !loading && (
+            <div className="flex flex-col items-center gap-1 py-20 text-center">
+              <p className="font-medium">
+                {results !== null
+                  ? `No catalog results for "${query}"`
+                  : "Catalog unavailable"}
+              </p>
+              <p className="max-w-md text-sm text-muted-foreground">
+                {results !== null
+                  ? "Try a provider name, app name, or shorter query. You can also clear the search to browse popular servers."
+                  : "Try again in a moment, or reopen Toolport if the catalog stays empty."}
+              </p>
+            </div>
+          )
         )
       ) : browsing ? (
         <div className="flex flex-col gap-6">
