@@ -1433,6 +1433,21 @@ fn export_config_to_path(
     std::fs::write(&path, json).map_err(|e| format!("Couldn't write the file: {e}"))
 }
 
+/// Export the audit log to a file (path from a save dialog). `format` is "csv" or
+/// "json". CSV is formula-injection-safe (see `audit::to_csv`) since tool names and
+/// error text come from untrusted downstream servers. Exports the full retained
+/// log, which the audit module already caps.
+#[tauri::command]
+fn export_audit_to_path(path: String, format: String) -> Result<(), String> {
+    let entries = audit::read_recent(usize::MAX);
+    let body = if format == "csv" {
+        audit::to_csv(&entries)
+    } else {
+        serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())?
+    };
+    std::fs::write(&path, body).map_err(|e| format!("Couldn't write the file: {e}"))
+}
+
 /// Public endpoint that turns a shared setup into a `toolport.app/s/<id>` link.
 const SHARE_ENDPOINT: &str = "https://toolport.app/api/share";
 
@@ -2108,6 +2123,7 @@ pub fn run() {
             set_all_enabled,
             export_config,
             export_config_to_path,
+            export_audit_to_path,
             share_stack,
             fetch_shared_setup,
             take_pending_shared,

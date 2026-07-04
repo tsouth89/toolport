@@ -466,6 +466,11 @@ export function exportConfigToPath(
   });
 }
 
+/** Export the audit/activity log to a file (path from a save dialog). */
+export function exportAuditToPath(path: string, format: "csv" | "json"): Promise<void> {
+  return invoke<void>("export_audit_to_path", { path, format });
+}
+
 /** Turn a shareable setup (from exportConfig) into a toolport.app/s/<id> link. */
 export function shareStack(setupJson: string): Promise<string> {
   return invoke<string>("share_stack", { setupJson });

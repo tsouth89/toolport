@@ -347,9 +347,96 @@ fn aggregate(entries: &[Value]) -> Value {
     })
 }
 
+/// The columns exported to CSV, in order. Keys match the audit entry JSON.
+const CSV_COLUMNS: &[&str] = &[
+    "ts",
+    "server",
+    "tool",
+    "client",
+    "ok",
+    "held",
+    "durationMs",
+    "action",
+    "error",
+];
+
+/// Render audit `entries` as CSV (RFC-4180-ish: CRLF rows, quoted cells, doubled
+/// internal quotes). Any cell whose text begins with a spreadsheet formula trigger
+/// is prefixed with `'` so opening the file in Excel/Sheets can't execute it: the
+/// audit log holds tool names and error text from untrusted downstream servers.
+pub fn to_csv(entries: &[Value]) -> String {
+    let mut out = String::new();
+    out.push_str(&CSV_COLUMNS.join(","));
+    out.push_str("\r\n");
+    for e in entries {
+        let row: Vec<String> = CSV_COLUMNS.iter().map(|col| csv_cell(e.get(*col))).collect();
+        out.push_str(&row.join(","));
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// One CSV cell: stringify the JSON value, neutralize a leading formula trigger,
+/// then quote and escape.
+fn csv_cell(value: Option<&Value>) -> String {
+    let raw = match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+    };
+    // Formula-injection guard (OWASP): a cell starting with one of these could be
+    // executed as a formula by a spreadsheet, so shift it behind a quote.
+    let guarded = if raw
+        .starts_with(['=', '+', '-', '@', '\t', '\r'])
+    {
+        format!("'{raw}")
+    } else {
+        raw
+    };
+    format!("\"{}\"", guarded.replace('"', "\"\""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_csv_has_header_and_a_row() {
+        let entries = vec![json!({
+            "ts": 1, "server": "gh", "tool": "search", "ok": true, "durationMs": 42
+        })];
+        let csv = to_csv(&entries);
+        assert!(csv.starts_with(
+            "ts,server,tool,client,ok,held,durationMs,action,error\r\n"
+        ));
+        assert!(csv.contains("\"gh\""));
+        assert!(csv.contains("\"search\""));
+        assert!(csv.contains("\"42\""));
+        // A missing column renders as an empty quoted cell, not the word "null".
+        assert!(csv.contains("\"\""));
+        assert!(!csv.contains("null"));
+        assert!(csv.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn to_csv_neutralizes_formula_injection() {
+        // A malicious tool name / error that a spreadsheet would execute as a formula.
+        let csv = to_csv(&[json!({
+            "tool": "=cmd|'/c calc'!A1", "error": "@SUM(1+1)"
+        })]);
+        assert!(csv.contains("\"'=cmd|'/c calc'!A1\""), "got {csv}");
+        assert!(csv.contains("\"'@SUM(1+1)\""), "got {csv}");
+        // A benign value is left untouched (no stray leading quote).
+        let benign = to_csv(&[json!({ "tool": "search" })]);
+        assert!(benign.contains("\"search\""));
+        assert!(!benign.contains("'search"));
+    }
+
+    #[test]
+    fn to_csv_escapes_embedded_quotes() {
+        let csv = to_csv(&[json!({ "error": "he said \"hi\"" })]);
+        assert!(csv.contains("\"he said \"\"hi\"\"\""), "got {csv}");
+    }
 
     #[test]
     fn agent_toggle_denial_record_proves_scope_without_leaking() {

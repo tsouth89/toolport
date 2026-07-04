@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronRight,
+  Download,
   Fingerprint,
   History,
   ScrollText,
@@ -18,8 +19,10 @@ import {
 import { toast } from "sonner";
 import { fmtTokens } from "@/lib/utils";
 import { toastError } from "@/lib/toast";
+import { save } from "@tauri-apps/plugin-dialog";
 import { Input } from "@/components/ui/input";
 import {
+  exportAuditToPath,
   getAuditLog,
   getAuditStats,
   getInspectLog,
@@ -1352,6 +1355,27 @@ export function ActivityView({
     };
   }, [refreshKey]);
 
+  // Export the full retained audit log. The save dialog offers CSV and JSON; the
+  // chosen extension picks the format. CSV is formula-injection-safe in the backend.
+  async function exportLog() {
+    try {
+      const path = await save({
+        title: "Export activity log",
+        defaultPath: "toolport-activity.csv",
+        filters: [
+          { name: "CSV", extensions: ["csv"] },
+          { name: "JSON", extensions: ["json"] },
+        ],
+      });
+      if (!path) return;
+      const format = path.toLowerCase().endsWith(".json") ? "json" : "csv";
+      await exportAuditToPath(path, format);
+      toast.success("Exported activity log");
+    } catch (e) {
+      toastError(`Couldn't export the log: ${e}`);
+    }
+  }
+
   const liveSecurity = dedupeSecurity(security).filter(
     (e) => !dismissed.has(securityKey(e)),
   );
@@ -1487,19 +1511,29 @@ export function ActivityView({
       {banner}
       {stats && <StatsPanel stats={stats} />}
 
-      <button
-        onClick={() => setLogOpen((v) => !v)}
-        aria-expanded={logOpen}
-        className="mb-2 flex w-full items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ChevronRight
-          className={`size-4 transition-transform ${logOpen ? "rotate-90" : ""}`}
-        />
-        Recent calls
-        <span className="text-xs font-normal text-muted-foreground/70">
-          last {entries.length} {entries.length === 1 ? "call" : "calls"}
-        </span>
-      </button>
+      <div className="mb-2 flex items-center gap-2">
+        <button
+          onClick={() => setLogOpen((v) => !v)}
+          aria-expanded={logOpen}
+          className="flex flex-1 items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ChevronRight
+            className={`size-4 transition-transform ${logOpen ? "rotate-90" : ""}`}
+          />
+          Recent calls
+          <span className="text-xs font-normal text-muted-foreground/70">
+            last {entries.length} {entries.length === 1 ? "call" : "calls"}
+          </span>
+        </button>
+        <button
+          onClick={() => void exportLog()}
+          title="Export the full activity log to a file (CSV or JSON)"
+          className="flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        >
+          <Download className="size-3.5" aria-hidden="true" />
+          Export
+        </button>
+      </div>
 
       {logOpen && (
         <>
