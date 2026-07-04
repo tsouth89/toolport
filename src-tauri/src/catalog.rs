@@ -309,20 +309,21 @@ fn popular_matching(query: &str) -> Vec<CatalogEntry> {
 /// quality), then live MCP Registry results for the long tail, de-duplicated by
 /// name. This is why popular picks like Vercel always surface even when the
 /// registry's own search doesn't return them.
-pub fn search(query: &str) -> Vec<CatalogEntry> {
+pub fn search(query: &str) -> Result<Vec<CatalogEntry>, String> {
     let mut out = popular_matching(query);
     let mut seen: std::collections::HashSet<String> =
         out.iter().map(|e| e.name.to_lowercase()).collect();
     if !query.trim().is_empty() {
-        if let Ok(registry) = search_registry(query) {
-            for e in registry {
-                if seen.insert(e.name.to_lowercase()) {
-                    out.push(e);
-                }
+        // Propagate a registry/network failure instead of swallowing it: otherwise an
+        // outage renders as an innocent "no results" in the UI with no retry. An empty
+        // registry response is `Ok(empty)`, so only a real failure surfaces as an error.
+        for e in search_registry(query)? {
+            if seen.insert(e.name.to_lowercase()) {
+                out.push(e);
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Turn one registry `server` object into a catalog entry. Prefers a hosted

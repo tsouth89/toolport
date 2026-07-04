@@ -1367,7 +1367,7 @@ fn list_stacks() -> Vec<stacks::Stack> {
 /// on a blocking worker. Empty query returns popular/recent servers.
 #[tauri::command]
 async fn search_catalog(query: String) -> Result<Vec<catalog::CatalogEntry>, String> {
-    tauri::async_runtime::spawn_blocking(move || Ok(catalog::search(&query)))
+    tauri::async_runtime::spawn_blocking(move || catalog::search(&query))
         .await
         .map_err(|e| e.to_string())?
 }

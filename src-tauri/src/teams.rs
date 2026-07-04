@@ -130,7 +130,12 @@ pub fn fetch_me(server_url: &str, team_id: &str, token: &str) -> Result<Membersh
     {
         Ok(resp) => {
             let v: Value = resp.into_json().map_err(|e| e.to_string())?;
-            let role = v["role"].as_str().unwrap_or("member").to_string();
+            // Fail noisily on a malformed 200 rather than defaulting to "member": a
+            // silent default would demote an admin's persisted role on a buggy response.
+            let role = v["role"]
+                .as_str()
+                .ok_or("membership response had no role")?
+                .to_string();
             Ok(MembershipCheck::Active { role })
         }
         Err(ureq::Error::Status(401 | 403, _)) => Ok(MembershipCheck::Removed),
@@ -219,8 +224,11 @@ pub enum SyncResult {
 }
 
 pub fn sync_now() -> Result<SyncResult, String> {
-    let mut reg = crate::registry::load()?;
-    let conn = reg.team.clone().ok_or("not connected to a team")?;
+    // Snapshot only what the network calls need; do NOT hold this copy to save later.
+    let conn = {
+        let reg = crate::registry::load()?;
+        reg.team.clone().ok_or("not connected to a team")?
+    };
     let token = load_token().ok_or("team token is missing from the keychain")?;
 
     // Membership heartbeat first. This catches two things a config pull can't: removal
@@ -240,7 +248,22 @@ pub fn sync_now() -> Result<SyncResult, String> {
     };
     let role_changed = role != conn.role;
 
-    let applied = match pull_config(&conn.server_url, &conn.team_id, &token, conn.last_version)? {
+    let pulled = pull_config(&conn.server_url, &conn.team_id, &token, conn.last_version)?;
+
+    // Re-load a FRESH registry now, AFTER the (possibly multi-second) network round
+    // trips, and apply the deltas to it. Loading at the top and saving here would clobber
+    // any change another command made to the registry while we were on the network.
+    let mut reg = crate::registry::load()?;
+    match reg.team.as_ref() {
+        // The user disconnected or switched teams mid-sync: don't apply stale results.
+        None => return Ok(SyncResult::Ok { role, role_changed, applied: None }),
+        Some(t) if t.team_id != conn.team_id => {
+            return Ok(SyncResult::Ok { role, role_changed, applied: None })
+        }
+        _ => {}
+    }
+
+    let applied = match pulled {
         None => None,
         Some((version, cfg)) => {
             let outcome = apply_team_config(&mut reg, &conn.team_id, &cfg);

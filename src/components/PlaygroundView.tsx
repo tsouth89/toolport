@@ -797,8 +797,13 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
           : String(e),
       );
     } finally {
-      if (tickerRef.current) clearInterval(tickerRef.current);
-      if (callSeq.current === myId) setCalling(false);
+      // Only tear down if we're still the current call: a cancelled/superseded call
+      // resolving late must not clear a newer call's ticker (which would freeze its
+      // elapsed timer) or flip its calling state.
+      if (callSeq.current === myId) {
+        if (tickerRef.current) clearInterval(tickerRef.current);
+        setCalling(false);
+      }
     }
   }
 

@@ -133,10 +133,9 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
 
 ### Robustness / tech debt
 
-- [ ] **Tool-cache versioning.** The gateway serves the on-disk cache verbatim with
-      no version tag, so catalog-logic changes don't take effect until a server
-      toggles or the cache is deleted. Wrap in `{version, tools}`, discard on
-      mismatch. (S)
+- [x] **Tool-cache versioning SHIPPED (2026-07-04 robustness sprint):** the cache is
+      wrapped as `{version, tools}` (`TOOL_CACHE_VERSION`) and discarded on mismatch, so
+      a stale cache from an older build is rebuilt rather than served verbatim.
 - [x] **Router lock held across the downstream call SHIPPED (#95, #99):** the live
       router is a `Mutex<Arc<Router>>`; dispatch clones the Arc and releases the lock
       before the (possibly 120s-held) downstream call, and the HTTP loop is multithreaded.
