@@ -236,20 +236,40 @@ export function CatalogView({ registry, onAdded }: Props) {
             ))}
           </div>
         ) : browsing && popularError ? (
-          <div className="flex flex-col items-center gap-3 py-20 text-center">
-            <p className="text-sm text-muted-foreground">Couldn't load the catalog.</p>
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex flex-col items-center gap-3 py-20 text-center"
+          >
+            <div>
+              <p className="font-medium">Catalog could not load</p>
+              <p className="max-w-md text-sm text-muted-foreground">
+                Toolport could not load the curated picks. Try again in a moment.
+              </p>
+            </div>
             <Button variant="outline" size="sm" onClick={reloadPopular}>
               Try again
             </Button>
           </div>
         ) : (
-          <p className="py-20 text-center text-sm text-muted-foreground">
-            {loading
-              ? ""
-              : results !== null
-                ? `No servers match "${query}".`
-                : "Catalog unavailable."}
-          </p>
+          !loading && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex flex-col items-center gap-1 py-20 text-center"
+            >
+              <p className="font-medium">
+                {results !== null
+                  ? `No catalog results for "${query}"`
+                  : "No popular servers available"}
+              </p>
+              <p className="max-w-md text-sm text-muted-foreground">
+                {results !== null
+                  ? "Try a provider name, app name, or shorter query. You can also clear the search to browse popular servers."
+                  : "Use search to query the MCP Registry, or try again later if the browse list stays empty."}
+              </p>
+            </div>
+          )
         )
       ) : browsing ? (
         <div className="flex flex-col gap-6">
