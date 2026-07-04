@@ -212,8 +212,11 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const liveInspect = registry?.liveInspect ?? false;
   const [busy, setBusy] = useState(false);
   const [quarantined, setQuarantined] = useState<QuarantinedTool[]>([]);
+  const [quarantineError, setQuarantineError] = useState(false);
   const [allowedTools, setAllowedTools] = useState<AllowedTool[]>([]);
+  const [allowedError, setAllowedError] = useState(false);
   const [bridge, setBridge] = useState<HttpBridgeStatus | null>(null);
+  const [bridgeError, setBridgeError] = useState(false);
   const [bridgeBusy, setBridgeBusy] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [newLabel, setNewLabel] = useState("");
@@ -275,15 +278,23 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
 
   useEffect(() => {
     httpBridgeStatus()
-      .then(setBridge)
-      .catch(() => {});
+      .then((s) => {
+        setBridge(s);
+        setBridgeError(false);
+      })
+      .catch(() => setBridgeError(true));
   }, []);
 
   useEffect(() => {
     const load = () =>
       listQuarantined()
-        .then(setQuarantined)
-        .catch(() => {});
+        .then((q) => {
+          setQuarantined(q);
+          setQuarantineError(false);
+        })
+        // A failed poll must not read as "nothing quarantined": keep any prior
+        // list and flag the error so the panel can say the status is stale.
+        .catch(() => setQuarantineError(true));
     load();
     // Quarantine happens asynchronously in the gateway, so poll to keep the list fresh.
     const id = setInterval(load, 15000);
@@ -304,8 +315,11 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   useEffect(() => {
     const load = () =>
       listAllowedTools()
-        .then(setAllowedTools)
-        .catch(() => {});
+        .then((t) => {
+          setAllowedTools(t);
+          setAllowedError(false);
+        })
+        .catch(() => setAllowedError(true));
     load();
     const id = setInterval(load, 10000);
     return () => clearInterval(id);
@@ -324,6 +338,7 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
     setBridgeBusy(true);
     try {
       setBridge(on ? await startHttpBridge() : await stopHttpBridge());
+      setBridgeError(false);
     } catch (e) {
       toastError(`Couldn't ${on ? "start" : "stop"} the HTTP endpoint: ${e}`);
     } finally {
@@ -516,13 +531,19 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           "Off by default. While on, Toolport captures each tool call's arguments and results to a small local, ephemeral buffer (the last 50 calls) so you can inspect them in Activity. This is separate from the audit log, never leaves your machine, and is cleared when you turn it off or restart the gateway.",
           applyLiveInspect,
         )}
+        {quarantined.length === 0 && quarantineError && (
+          <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-muted-foreground">
+            <ShieldX className="size-4 shrink-0 text-destructive" />
+            <span>Couldn&apos;t read quarantine status. Retrying every 15s.</span>
+          </div>
+        )}
         {quarantined.length > 0 && (
           <div className="flex flex-col gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5">
             <div className="flex items-center gap-2">
               <ShieldX className="size-4 shrink-0 text-destructive" />
               <span className="text-sm font-medium">Quarantined tools</span>
               <span className="text-xs text-muted-foreground">
-                blocked until you re-approve
+                {quarantineError ? "status may be stale" : "blocked until you re-approve"}
               </span>
             </div>
             <ul className="flex flex-col gap-1.5">
@@ -545,12 +566,20 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
             </ul>
           </div>
         )}
+        {allowedTools.length === 0 && allowedError && (
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+            <UserCheck className="size-4 shrink-0 text-info" />
+            <span>Couldn&apos;t read the allowed-tools list. Retrying every 10s.</span>
+          </div>
+        )}
         {allowedTools.length > 0 && (
           <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">
             <div className="flex items-center gap-2">
               <UserCheck className="size-4 shrink-0 text-info" />
               <span className="text-sm font-medium">Allowed tools</span>
-              <span className="text-xs text-muted-foreground">skip human approval</span>
+              <span className="text-xs text-muted-foreground">
+                {allowedError ? "list may be stale" : "skip human approval"}
+              </span>
             </div>
             <ul className="flex flex-col gap-1.5">
               {allowedTools.map((t) => (
@@ -592,9 +621,14 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
             <Switch
               checked={!!bridge?.running}
               onCheckedChange={toggleBridge}
-              disabled={bridgeBusy}
+              disabled={bridgeBusy || (bridgeError && bridge === null)}
             />
           </label>
+          {bridgeError && bridge === null && (
+            <p className="text-xs text-muted-foreground">
+              Couldn&apos;t read the HTTP endpoint status. The gateway may be starting up.
+            </p>
+          )}
           {bridge?.running && bridge.url && (
             <>
               <div className="flex items-center gap-2 rounded border bg-muted/40 px-2 py-1.5">
