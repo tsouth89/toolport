@@ -593,6 +593,10 @@ function CallRow({ e }: { e: AuditEntry }) {
 }
 
 function StatsPanel({ stats }: { stats: AuditStats }) {
+  // The three summary cards are the glanceable health check and stay visible; the full
+  // per-server table (can be 20+ rows) collapses by default so it stops being a wall
+  // below the security lane. It's one tap when you actually want the breakdown.
+  const [tableOpen, setTableOpen] = useState(false);
   if (stats.total === 0) return null;
   const errPct = (stats.errorRate * 100).toFixed(stats.errorRate < 0.1 ? 1 : 0);
   return (
@@ -619,27 +623,46 @@ function StatsPanel({ stats }: { stats: AuditStats }) {
           <div className="text-xs text-muted-foreground">active servers</div>
         </div>
       </div>
-      <div className="overflow-hidden rounded-lg border">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b bg-muted/40 text-left text-xs text-muted-foreground">
-              <th className="px-3 py-2 font-medium">Server</th>
-              <th className="px-3 py-2 text-right font-medium">Calls</th>
-              <th className="px-3 py-2 text-right font-medium">Errors</th>
-              <th className="px-3 py-2 text-right font-medium">Avg</th>
-              <th className="px-3 py-2 text-right font-medium">p95</th>
-            </tr>
-          </thead>
-          <tbody>
-            {stats.servers.map((s) => (
-              <ServerRow key={s.server} s={s} />
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <p className="text-xs text-muted-foreground/70">
-        Click a server to see its per-tool breakdown.
-      </p>
+
+      <button
+        onClick={() => setTableOpen((v) => !v)}
+        aria-expanded={tableOpen}
+        className="flex w-fit items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <ChevronRight
+          className={`size-4 transition-transform ${tableOpen ? "rotate-90" : ""}`}
+        />
+        Per-server breakdown
+        <span className="text-xs font-normal text-muted-foreground/70">
+          {stats.servers.length} {stats.servers.length === 1 ? "server" : "servers"}
+        </span>
+      </button>
+
+      {tableOpen && (
+        <>
+          <div className="overflow-hidden rounded-lg border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b bg-muted/40 text-left text-xs text-muted-foreground">
+                  <th className="px-3 py-2 font-medium">Server</th>
+                  <th className="px-3 py-2 text-right font-medium">Calls</th>
+                  <th className="px-3 py-2 text-right font-medium">Errors</th>
+                  <th className="px-3 py-2 text-right font-medium">Avg</th>
+                  <th className="px-3 py-2 text-right font-medium">p95</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.servers.map((s) => (
+                  <ServerRow key={s.server} s={s} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-muted-foreground/70">
+            Click a server to see its per-tool breakdown.
+          </p>
+        </>
+      )}
     </div>
   );
 }
