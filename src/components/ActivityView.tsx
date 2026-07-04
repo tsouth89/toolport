@@ -1572,11 +1572,25 @@ export function ActivityView({
 
           <div className="flex flex-col gap-1">
             {visible.length === 0 ? (
-              <p className="py-12 text-center text-sm text-muted-foreground">
-                {errorsOnly && !serverFilter
-                  ? `No errors in the last ${entries.length} calls.`
-                  : "No calls match this filter."}
-              </p>
+              <div className="flex flex-col items-center gap-2 py-12 text-center">
+                <p className="text-sm text-muted-foreground">
+                  {errorsOnly && !serverFilter
+                    ? `No errors in the last ${entries.length} calls.`
+                    : "No calls match this filter."}
+                </p>
+                {(serverFilter || errorsOnly) && (
+                  <button
+                    onClick={() => {
+                      setServerFilter("");
+                      setErrorsOnly(false);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  >
+                    <X className="size-3.5" />
+                    Clear filter
+                  </button>
+                )}
+              </div>
             ) : (
               visible.map((e, i) => (
                 <CallRow key={`${e.ts}-${e.server}-${e.tool}-${i}`} e={e} />

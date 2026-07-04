@@ -302,6 +302,15 @@ function ArgField({ name, schema, required, value, onChange }: FieldProps) {
   );
 }
 
+/** Heuristic: does a tool-list failure look like the server needing authentication
+ * (missing/expired credentials, 401/403) rather than a generic transport error? If so
+ * we point the user at the server's Secrets dialog instead of showing a raw backend string. */
+function looksLikeAuthError(message: string): boolean {
+  return /\b(401|403|unauthori[sz]ed|forbidden|authenticat|invalid.{0,15}(token|api.?key|credential)|missing.{0,15}(token|api.?key|credential)|expired.{0,15}(token|credential)|not.{0,15}logged.?in|access.{0,15}denied)\b/i.test(
+    message,
+  );
+}
+
 /** Inline "connecting…" line shared by the resource/prompt panels. */
 function Connecting({ label = "Connecting to server…" }: { label?: string }) {
   return (
@@ -890,7 +899,29 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
             </div>
           )}
 
-          {toolsError && <Callout variant="danger">{toolsError}</Callout>}
+          {toolsError &&
+            (looksLikeAuthError(toolsError) ? (
+              <Callout variant="warning">
+                <span className="font-medium">
+                  {serverEntry?.name ?? "This server"} needs authentication.
+                </span>{" "}
+                Listing its tools failed with what looks like an auth error. Open{" "}
+                <span className="font-medium">Servers</span>, pick this server, and add
+                its credentials (the key icon / Secrets) before testing here.
+                <p className="mt-1.5 font-mono text-xs break-words opacity-70">
+                  {toolsError}
+                </p>
+              </Callout>
+            ) : (
+              <Callout variant="danger">{toolsError}</Callout>
+            ))}
+
+          {/* Server connected but exposes no tools at all. */}
+          {!loadingTools && !toolsError && tools && tools.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              This server advertises no tools.
+            </p>
+          )}
 
           {/* Tool list: click to test, switch to enable/disable per client */}
           {tools && tools.length > 0 && (
@@ -915,9 +946,18 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
                 </div>
               )}
               {filteredTools.length === 0 ? (
-                <p className="rounded-lg border border-dashed px-3 py-6 text-center text-sm text-muted-foreground">
-                  No tools match "{toolFilter.trim()}".
-                </p>
+                <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed px-3 py-6 text-center">
+                  <p className="text-sm text-muted-foreground">
+                    No tools match "{toolFilter.trim()}".
+                  </p>
+                  <button
+                    onClick={() => setToolFilter("")}
+                    className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  >
+                    <X className="size-3.5" />
+                    Clear filter
+                  </button>
+                </div>
               ) : (
                 <div className="flex flex-col divide-y rounded-lg border">
                   {filteredTools.map((t) => {
@@ -1022,13 +1062,19 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
               </div>
 
               {rawMode ? (
-                <textarea
-                  value={rawJson}
-                  onChange={(e) => setRawJson(e.target.value)}
-                  rows={6}
-                  spellCheck={false}
-                  className="w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-sm focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-                />
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    Raw-JSON mode: type the full arguments object yourself. The generated
+                    form is bypassed.
+                  </span>
+                  <textarea
+                    value={rawJson}
+                    onChange={(e) => setRawJson(e.target.value)}
+                    rows={6}
+                    spellCheck={false}
+                    className="w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-sm focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+                  />
+                </div>
               ) : Object.keys(props).length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   This tool takes no arguments.
