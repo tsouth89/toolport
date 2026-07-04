@@ -2160,6 +2160,22 @@ pub fn run() {
             let handle = app.handle().clone();
             std::thread::spawn(move || watch_registry_for_app(handle));
 
+            // One-time, idempotent migration: after the conduit-gateway ->
+            // toolport-gateway rename, re-point any existing client whose config
+            // still names the old binary (Windows/Linux have no compat symlink, so
+            // that path no longer exists). Surgical + backed up; a no-op once every
+            // client is on the current path.
+            std::thread::spawn(|| {
+                let repointed = clients::repoint_stale_gateways();
+                if !repointed.is_empty() {
+                    eprintln!(
+                        "toolport: re-pointed {} client config(s) to the renamed gateway: {}",
+                        repointed.len(),
+                        repointed.join(", ")
+                    );
+                }
+            });
+
             // Start the human-approval broker: it publishes a loopback endpoint that every
             // gateway process dials into, and holds gated tool calls until the user approves
             // or denies them here. Always managed so the approve/deny commands have state.

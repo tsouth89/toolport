@@ -2472,10 +2472,136 @@ pub fn migrate_to_gateway(client_id: &str, profile: Option<&str>) -> Result<Writ
     write_servers(client_id, &[gateway_entry(profile)?])
 }
 
+/// Whether a client's stored gateway command should be re-pointed: it names the
+/// pre-rename binary (`conduit-gateway`), or its path no longer exists on disk, and
+/// it isn't already the current path.
+fn gateway_command_is_stale(stored: &str, current: &str) -> bool {
+    if stored.is_empty() || stored == current {
+        return false;
+    }
+    stored.to_lowercase().contains("conduit-gateway") || !Path::new(stored).exists()
+}
+
+/// Best-effort read of the gateway entry's `CONDUIT_PROFILE` from raw client-config
+/// text, format-tolerantly (JSON `"CONDUIT_PROFILE": "x"`, TOML `= "x"`, YAML `: x`).
+/// The parsed `McpServer` drops env VALUES (they can be secret), so a re-point reads
+/// the profile here to preserve per-client scoping. None if absent/unparseable, in
+/// which case the re-point falls back to the unscoped default, which widens access
+/// rather than breaking it.
+fn profile_from_config_text(content: &str) -> Option<String> {
+    let idx = content.find("CONDUIT_PROFILE")?;
+    let mut rest = content[idx + "CONDUIT_PROFILE".len()..].trim_start();
+    rest = rest.strip_prefix('"').unwrap_or(rest).trim_start(); // JSON key's closing quote
+    rest = rest.trim_start_matches([':', '=']).trim_start(); // the key/value separator
+    if let Some(after) = rest.strip_prefix('"') {
+        let val = after.split('"').next().unwrap_or("").trim();
+        return (!val.is_empty()).then(|| val.to_string());
+    }
+    // Unquoted YAML bareword: up to whitespace / structural punctuation.
+    let val: String = rest
+        .chars()
+        .take_while(|c| !c.is_whitespace() && !matches!(c, ',' | '}' | ']'))
+        .collect();
+    let val = val.trim();
+    (!val.is_empty()).then(|| val.to_string())
+}
+
+fn read_gateway_profile(client_id: &str) -> Option<String> {
+    let def = find_def(client_id)?;
+    let path = (def.path)()?;
+    let content = read_config_file(&path).ok()?;
+    profile_from_config_text(&content)
+}
+
+/// Re-point client configs whose gateway entry still names the pre-rename binary
+/// (or a path that no longer exists) to the current gateway. This closes the
+/// backward-compat gap the `conduit-gateway` -> `toolport-gateway` rename opened on
+/// platforms without the macOS compat symlink (Windows/Linux), where an existing
+/// client would otherwise spawn a binary that no longer exists.
+///
+/// Idempotent (an entry already on the current path is skipped, so it's a no-op
+/// after the first launch), surgical (`install_gateway` rewrites only the gateway
+/// entry and backs the config up first), and profile-preserving. Guarded so it never
+/// writes a path that doesn't exist. Returns the ids of clients it re-pointed.
+pub fn repoint_stale_gateways() -> Vec<String> {
+    let Some(current) = resolve_gateway_path().map(|p| p.to_string_lossy().into_owned()) else {
+        return Vec::new();
+    };
+    // Never re-point onto a binary that isn't there (resolve_gateway_path returns a
+    // best-guess path even when nothing is found, for clearer error messages).
+    if !Path::new(&current).exists() {
+        return Vec::new();
+    }
+    let mut repointed = Vec::new();
+    for client in detect_clients() {
+        if !client.gateway_installed || !client.config_exists || client.error.is_some() {
+            continue;
+        }
+        let stored = client
+            .servers
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(GATEWAY_ENTRY_NAME))
+            .and_then(|s| s.command.as_deref())
+            .unwrap_or("");
+        if !gateway_command_is_stale(stored, &current) {
+            continue;
+        }
+        let profile = read_gateway_profile(&client.id);
+        if install_gateway(&client.id, profile.as_deref()).is_ok() {
+            repointed.push(client.id.clone());
+        }
+    }
+    repointed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::registry::EnvVar;
+
+    #[test]
+    fn gateway_command_stale_detection() {
+        let current = "/opt/toolport/toolport-gateway";
+        // Names the pre-rename binary -> stale (even though this test path is fake).
+        assert!(gateway_command_is_stale(
+            "/Applications/Toolport.app/Contents/MacOS/conduit-gateway",
+            current
+        ));
+        // Points at a path that doesn't exist -> stale.
+        assert!(gateway_command_is_stale(
+            "/nonexistent/toolport-gateway-xyz-does-not-exist",
+            current
+        ));
+        // Already the current path -> not stale (short-circuits before the fs check).
+        assert!(!gateway_command_is_stale(current, current));
+        // Empty -> not stale.
+        assert!(!gateway_command_is_stale("", current));
+    }
+
+    #[test]
+    fn profile_extracted_across_config_formats() {
+        // JSON
+        assert_eq!(
+            profile_from_config_text(r#"{"env":{"CONDUIT_PROFILE":"work"}}"#).as_deref(),
+            Some("work")
+        );
+        // TOML
+        assert_eq!(
+            profile_from_config_text("CONDUIT_PROFILE = \"billing\"").as_deref(),
+            Some("billing")
+        );
+        // YAML, quoted and bareword
+        assert_eq!(
+            profile_from_config_text("  CONDUIT_PROFILE: \"dev\"\n").as_deref(),
+            Some("dev")
+        );
+        assert_eq!(
+            profile_from_config_text("env:\n  CONDUIT_PROFILE: staging\n").as_deref(),
+            Some("staging")
+        );
+        // Absent
+        assert_eq!(profile_from_config_text(r#"{"env":{"OTHER":"x"}}"#), None);
+    }
 
     #[test]
     fn app_present_distinguishes_installed_from_absent() {
