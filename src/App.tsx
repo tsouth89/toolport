@@ -400,7 +400,16 @@ function App() {
           }}
         />
 
-        <main className="flex min-w-0 flex-1 flex-col">
+        <main
+          className="flex min-w-0 flex-1 flex-col"
+          style={{
+            // A soft orange wash at the top of the content, keyed to the accent token, so
+            // the orange controls (toggles, buttons) read as part of an accented
+            // environment instead of isolated dots on flat navy. Subtle and non-scrolling.
+            backgroundImage:
+              "radial-gradient(1100px 460px at 82% -12%, color-mix(in oklch, var(--primary) 10%, transparent), transparent 58%)",
+          }}
+        >
           <header className="flex items-center justify-between gap-4 border-b px-6 py-4">
             <div className="min-w-0 flex-1">
               <h1 className="truncate text-lg font-semibold tracking-tight">
