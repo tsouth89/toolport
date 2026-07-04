@@ -29,6 +29,10 @@
   --color-warning: var(--warning);
   --color-info: var(--info);
   --color-owned: var(--owned);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -60,8 +64,12 @@
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
+  /* Softened brand orange as the primary action color (the pure logo shade lives in
+     --brand, reserved for the mark). One hero accent; semantics stay success/warn/etc. */
+  --primary: oklch(0.68 0.16 48);
+  --primary-foreground: oklch(0.24 0.055 48);
+  --brand: oklch(0.7 0.17 47);
+  --brand-foreground: oklch(0.22 0.05 55);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
@@ -97,37 +105,44 @@
 
 .dark {
   color-scheme: dark;
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  /* Deep-NAVY neutral ramp keyed to the brand navy (#1E3A66, H~258). The greys carry a
+     real blue chroma so the app reads navy + orange (the brand), not black + orange. Dark
+     enough to stay a comfortable dark UI; lightness rises through the ramp for elevation. */
+  --background: oklch(0.19 0.046 258);
+  --foreground: oklch(0.965 0.008 250);
+  --card: oklch(0.238 0.052 258);
+  --card-foreground: oklch(0.965 0.008 250);
+  --popover: oklch(0.238 0.052 258);
+  --popover-foreground: oklch(0.965 0.008 250);
+  /* The real brand orange (#F97316) at the logo's coral hue (~48) - one hero accent. A
+     hair lighter than --brand so dark ink stays legible on filled buttons. */
+  --primary: oklch(0.71 0.185 48);
+  --primary-foreground: oklch(0.24 0.06 48);
+  --brand: oklch(0.705 0.19 48);
+  --brand-foreground: oklch(0.24 0.06 48);
+  --secondary: oklch(0.305 0.05 258);
+  --secondary-foreground: oklch(0.965 0.008 250);
+  --muted: oklch(0.305 0.05 258);
+  --muted-foreground: oklch(0.735 0.032 255);
+  --accent: oklch(0.345 0.056 258);
+  --accent-foreground: oklch(0.965 0.008 250);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --border: oklch(0.72 0.05 258 / 16%);
+  --input: oklch(0.72 0.05 258 / 20%);
+  --ring: oklch(0.71 0.16 48);
+  --chart-1: oklch(0.71 0.185 48);
+  --chart-2: oklch(0.746 0.16 232.661);
+  --chart-3: oklch(0.765 0.177 163.223);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.702 0.183 293.541);
+  --sidebar: oklch(0.165 0.045 258);
+  --sidebar-foreground: oklch(0.965 0.008 250);
+  --sidebar-primary: oklch(0.71 0.185 48);
+  --sidebar-primary-foreground: oklch(0.24 0.06 48);
+  --sidebar-accent: oklch(0.305 0.05 258);
+  --sidebar-accent-foreground: oklch(0.965 0.008 250);
+  --sidebar-border: oklch(0.72 0.05 258 / 16%);
+  --sidebar-ring: oklch(0.71 0.16 48);
 }
 
 @layer base {

@@ -34,10 +34,21 @@ function statusOf(enabled: boolean, health?: ProbeResult): Status {
 
 const DOT: Record<Status, string> = {
   disabled: "bg-muted-foreground/40",
-  checking: "bg-muted-foreground/40 animate-pulse",
+  // Distinct hue so "checking" survives without its pulse under prefers-reduced-motion.
+  checking: "bg-info/70 animate-pulse",
   connected: "bg-success",
   "needs-auth": "bg-warning",
   error: "bg-destructive",
+};
+
+// The status word carries the color too, not just the 8px dot, so a broken or
+// needs-attention server reads at a glance instead of hinging on a tiny dot.
+const STATUS_TEXT: Record<Status, string> = {
+  disabled: "text-muted-foreground",
+  checking: "text-muted-foreground",
+  connected: "text-muted-foreground",
+  "needs-auth": "text-warning",
+  error: "text-destructive",
 };
 
 function statusAriaLabel(status: Status, label: string): string {
@@ -275,7 +286,10 @@ function StatusLabel({
   error: string | null;
 }) {
   const text = (
-    <span aria-hidden="true" className="text-xs whitespace-nowrap text-muted-foreground">
+    <span
+      aria-hidden="true"
+      className={`text-xs font-medium whitespace-nowrap ${STATUS_TEXT[status]}`}
+    >
       {label}
     </span>
   );

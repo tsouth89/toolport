@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Check,
   CheckCircle2,
   ChevronRight,
+  Copy,
   FileText,
   FlaskConical,
   Loader2,
@@ -148,7 +150,7 @@ function ToolOverrideEditor({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={tool.name}
-              className="rounded-md border border-input bg-transparent px-2.5 py-1.5 font-mono text-xs shadow-sm focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+              className="rounded-md border border-input bg-transparent px-2.5 py-1.5 font-mono text-xs shadow-sm focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
             />
           </label>
           <label className="flex flex-col gap-1 text-xs">
@@ -160,7 +162,7 @@ function ToolOverrideEditor({
               onChange={(e) => setDescription(e.target.value)}
               rows={3}
               placeholder={tool.description ?? "(server's description)"}
-              className="rounded-md border border-input bg-transparent px-2.5 py-1.5 text-xs shadow-sm focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+              className="rounded-md border border-input bg-transparent px-2.5 py-1.5 text-xs shadow-sm focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
             />
           </label>
           <div className="flex gap-2">
@@ -307,13 +309,41 @@ function Connecting({ label = "Connecting to server…" }: { label?: string }) {
   );
 }
 
-/** A raw MCP result rendered as pretty JSON (or text). */
+/** Copy-to-clipboard button with a brief confirmation, for raw result / JSON blocks. */
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label="Copy to clipboard"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        } catch {
+          /* clipboard unavailable; no-op */
+        }
+      }}
+      className="ml-auto inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+    >
+      {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+      {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
+/** A raw MCP result rendered as pretty JSON (or text), with a copy button. */
 function ResultBlock({ title, value }: { title: string; value: unknown }) {
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-sm font-medium">{title}</div>
+      <div className="flex items-center gap-2">
+        <div className="text-sm font-medium">{title}</div>
+        <CopyButton text={text} />
+      </div>
       <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-xs whitespace-pre-wrap">
-        {typeof value === "string" ? value : JSON.stringify(value, null, 2)}
+        {text}
       </pre>
     </div>
   );
@@ -820,14 +850,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
                       >
                         <span className="flex min-w-0 items-center gap-2">
                           <span className="truncate font-mono text-sm">{t.name}</span>
-                          {destructive && (
-                            <Badge
-                              variant="outline"
-                              className="border-warning/40 text-warning"
-                            >
-                              destructive
-                            </Badge>
-                          )}
+                          {destructive && <Badge variant="warning">destructive</Badge>}
                           {!exposed && (
                             <span className="text-xs text-muted-foreground">hidden</span>
                           )}
@@ -913,7 +936,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
                   onChange={(e) => setRawJson(e.target.value)}
                   rows={6}
                   spellCheck={false}
-                  className="w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-sm focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
+                  className="w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-sm focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
                 />
               ) : Object.keys(props).length === 0 ? (
                 <p className="text-sm text-muted-foreground">
@@ -960,8 +983,15 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
                   <CheckCircle2 className="size-4 text-success" />
                 )}
                 {result.isError ? "Tool returned an error" : "Result"}
+                <CopyButton text={renderResult(result)} />
               </div>
-              <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-xs whitespace-pre-wrap">
+              <pre
+                className={`max-h-96 overflow-auto rounded-lg border p-3 font-mono text-xs whitespace-pre-wrap ${
+                  result.isError
+                    ? "border-destructive/40 bg-destructive/5"
+                    : "bg-muted/40"
+                }`}
+              >
                 {renderResult(result)}
               </pre>
             </div>

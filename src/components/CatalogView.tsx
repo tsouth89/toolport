@@ -7,6 +7,7 @@ import { addServer, listStacks, popularCatalog, searchCatalog } from "@/lib/api"
 import type { CatalogEntry, Registry, ServerEntry, Stack } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { TransportPill } from "@/components/TransportPill";
 import { ServerDialog } from "@/components/ServerDialog";
 
@@ -232,7 +233,7 @@ export function CatalogView({ registry, onAdded }: Props) {
         browsing && popularLoading ? (
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="h-28 animate-pulse rounded-lg border bg-muted/30" />
+              <Skeleton key={i} className="h-28 rounded-lg" />
             ))}
           </div>
         ) : browsing && popularError ? (

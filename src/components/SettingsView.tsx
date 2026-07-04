@@ -142,6 +142,64 @@ interface Props {
   onRegistryChange: (registry: Registry) => void;
 }
 
+/** A one-line security posture readout at the top of the Security section, so the user can
+ * tell at a glance whether they're protected instead of mentally AND-ing every toggle. */
+function PostureSummary({
+  denyDestructive,
+  confirmDestructive,
+  humanApproval,
+  quarantineOnDrift,
+}: {
+  denyDestructive: boolean;
+  confirmDestructive: boolean;
+  humanApproval: boolean;
+  quarantineOnDrift: boolean;
+}) {
+  const active = [
+    humanApproval && "human approval required",
+    denyDestructive && "destructive tools blocked",
+    confirmDestructive && "destructive calls confirmed",
+    quarantineOnDrift && "drifted tools quarantined",
+  ].filter(Boolean) as string[];
+  // A hard gate (block or human-approval) = guarded; softer measures alone = partial.
+  const gated = humanApproval || denyDestructive;
+  const state = gated ? "guarded" : active.length > 0 ? "partial" : "open";
+  const meta = {
+    guarded: {
+      Icon: ShieldCheck,
+      ring: "border-success/30 bg-success/5",
+      tint: "text-success",
+      label: "Protected",
+    },
+    partial: {
+      Icon: ShieldAlert,
+      ring: "border-warning/35 bg-warning/5",
+      tint: "text-warning",
+      label: "Partly protected",
+    },
+    open: {
+      Icon: ShieldX,
+      ring: "border-destructive/35 bg-destructive/5",
+      tint: "text-destructive",
+      label: "Unprotected",
+    },
+  }[state];
+  const { Icon } = meta;
+  return (
+    <div className={`flex items-start gap-3 rounded-lg border p-3 ${meta.ring}`}>
+      <Icon className={`mt-0.5 size-4 shrink-0 ${meta.tint}`} />
+      <p className="text-sm">
+        <span className={`font-medium ${meta.tint}`}>{meta.label}.</span>{" "}
+        <span className="text-muted-foreground">
+          {state === "open"
+            ? "No blocking or approval is active, so every tool call runs unattended."
+            : `Active: ${active.join(", ")}.`}
+        </span>
+      </p>
+    </div>
+  );
+}
+
 /** Global discovery + security policy. These apply to every client uniformly, so
  * they live here rather than in the per-server Playground. */
 export function SettingsView({ registry, onRegistryChange }: Props) {
@@ -357,6 +415,12 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Security
         </h2>
+        <PostureSummary
+          denyDestructive={denyDestructive}
+          confirmDestructive={confirmDestructive}
+          humanApproval={humanApproval}
+          quarantineOnDrift={quarantineOnDrift}
+        />
         {toggle(
           ShieldAlert,
           denyDestructive,
