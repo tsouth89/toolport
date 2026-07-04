@@ -11,6 +11,7 @@ import {
   Pencil,
   Pin,
   Play,
+  Search,
   ShieldAlert,
   XCircle,
 } from "lucide-react";
@@ -609,6 +610,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
   const [loadingTools, setLoadingTools] = useState(false);
   const [toolsError, setToolsError] = useState<string | null>(null);
   const [selectedTool, setSelectedTool] = useState<string | null>(null);
+  const [toolFilter, setToolFilter] = useState("");
 
   const [args, setArgs] = useState<Record<string, unknown>>({});
   const [rawMode, setRawMode] = useState(false);
@@ -629,6 +631,7 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
     setToolsError(null);
     setTools(null);
     setSelectedTool(null);
+    setToolFilter("");
     setResult(null);
     setCallError(null);
     listServerTools(serverId)
@@ -644,6 +647,18 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
     () => tools?.find((t) => t.name === selectedTool) ?? null,
     [tools, selectedTool],
   );
+
+  // Filter the tool list by name or description. A server can expose dozens of
+  // tools, so scanning a flat list to find one to test is painful without this.
+  const filteredTools = useMemo(() => {
+    const q = toolFilter.trim().toLowerCase();
+    if (!q) return tools ?? [];
+    return (tools ?? []).filter(
+      (t) =>
+        t.name.toLowerCase().includes(q) ||
+        (t.description?.toLowerCase().includes(q) ?? false),
+    );
+  }, [tools, toolFilter]);
   const props = tool?.inputSchema?.properties ?? {};
   const required = useMemo(() => new Set(tool?.inputSchema?.required ?? []), [tool]);
 
@@ -829,66 +844,90 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
           {tools && tools.length > 0 && (
             <div className="flex flex-col gap-1.5">
               <Label className="text-xs text-muted-foreground">
-                Tools ({tools.length})
+                Tools{" "}
+                {toolFilter.trim()
+                  ? `(${filteredTools.length} of ${tools.length})`
+                  : `(${tools.length})`}
               </Label>
-              <div className="flex flex-col divide-y rounded-lg border">
-                {tools.map((t) => {
-                  const destructive = isDestructive(t);
-                  const exposed = isExposed(t);
-                  const selected = t.name === selectedTool;
-                  const perToolOff = disabledSet.has(t.name);
-                  const pinned = pinnedSet.has(t.name);
-                  return (
-                    <div
-                      key={t.name}
-                      className={`flex items-center gap-3 px-3 py-2 ${selected ? "bg-accent" : ""}`}
-                    >
-                      <button
-                        onClick={() => setSelectedTool(t.name)}
-                        aria-pressed={selected}
-                        className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
+              {/* A search box once the list is long enough to be worth scanning. */}
+              {tools.length > 7 && (
+                <div className="relative">
+                  <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={toolFilter}
+                    onChange={(e) => setToolFilter(e.target.value)}
+                    placeholder="Filter tools by name or description"
+                    className="h-9 pl-8"
+                    aria-label="Filter tools"
+                  />
+                </div>
+              )}
+              {filteredTools.length === 0 ? (
+                <p className="rounded-lg border border-dashed px-3 py-6 text-center text-sm text-muted-foreground">
+                  No tools match "{toolFilter.trim()}".
+                </p>
+              ) : (
+                <div className="flex flex-col divide-y rounded-lg border">
+                  {filteredTools.map((t) => {
+                    const destructive = isDestructive(t);
+                    const exposed = isExposed(t);
+                    const selected = t.name === selectedTool;
+                    const perToolOff = disabledSet.has(t.name);
+                    const pinned = pinnedSet.has(t.name);
+                    return (
+                      <div
+                        key={t.name}
+                        className={`flex items-center gap-3 px-3 py-2 ${selected ? "bg-accent" : ""}`}
                       >
-                        <span className="flex min-w-0 items-center gap-2">
-                          <span className="truncate font-mono text-sm">{t.name}</span>
-                          {destructive && <Badge variant="warning">destructive</Badge>}
-                          {!exposed && (
-                            <span className="text-xs text-muted-foreground">hidden</span>
-                          )}
-                        </span>
-                        {t.description && (
-                          <span className="line-clamp-1 text-xs text-muted-foreground">
-                            {t.description}
+                        <button
+                          onClick={() => setSelectedTool(t.name)}
+                          aria-pressed={selected}
+                          className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
+                        >
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="truncate font-mono text-sm">{t.name}</span>
+                            {destructive && <Badge variant="warning">destructive</Badge>}
+                            {!exposed && (
+                              <span className="text-xs text-muted-foreground">
+                                hidden
+                              </span>
+                            )}
                           </span>
-                        )}
-                      </button>
-                      <button
-                        onClick={() => togglePin(t.name, !pinned)}
-                        disabled={policyBusy}
-                        title={
-                          pinned
-                            ? "Pinned: always surfaced in lazy-discovery search"
-                            : "Pin as a prerequisite (always surfaced in search)"
-                        }
-                        aria-label={pinned ? `Unpin ${t.name}` : `Pin ${t.name}`}
-                        aria-pressed={pinned}
-                        className="shrink-0 rounded p-1 hover:bg-muted disabled:opacity-50"
-                      >
-                        <Pin
-                          className={`size-4 ${
-                            pinned ? "fill-current text-owned" : "text-muted-foreground"
-                          }`}
+                          {t.description && (
+                            <span className="line-clamp-1 text-xs text-muted-foreground">
+                              {t.description}
+                            </span>
+                          )}
+                        </button>
+                        <button
+                          onClick={() => togglePin(t.name, !pinned)}
+                          disabled={policyBusy}
+                          title={
+                            pinned
+                              ? "Pinned: always surfaced in lazy-discovery search"
+                              : "Pin as a prerequisite (always surfaced in search)"
+                          }
+                          aria-label={pinned ? `Unpin ${t.name}` : `Pin ${t.name}`}
+                          aria-pressed={pinned}
+                          className="shrink-0 rounded p-1 hover:bg-muted disabled:opacity-50"
+                        >
+                          <Pin
+                            className={`size-4 ${
+                              pinned ? "fill-current text-owned" : "text-muted-foreground"
+                            }`}
+                          />
+                        </button>
+                        <Switch
+                          checked={!perToolOff}
+                          onCheckedChange={(on) => toggleTool(t.name, on)}
+                          disabled={policyBusy}
+                          aria-label={`Enable ${t.name}`}
                         />
-                      </button>
-                      <Switch
-                        checked={!perToolOff}
-                        onCheckedChange={(on) => toggleTool(t.name, on)}
-                        disabled={policyBusy}
-                        aria-label={`Enable ${t.name}`}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
               {denyDestructive && (
                 <p className="text-xs text-muted-foreground">
                   Destructive tools are hidden from clients by the global switch even when
