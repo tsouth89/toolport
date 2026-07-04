@@ -66,8 +66,8 @@
   --popover-foreground: oklch(0.145 0 0);
   /* Softened brand orange as the primary action color (the pure logo shade lives in
      --brand, reserved for the mark). One hero accent; semantics stay success/warn/etc. */
-  --primary: oklch(0.72 0.145 52);
-  --primary-foreground: oklch(0.22 0.05 55);
+  --primary: oklch(0.68 0.16 48);
+  --primary-foreground: oklch(0.24 0.055 48);
   --brand: oklch(0.7 0.17 47);
   --brand-foreground: oklch(0.22 0.05 55);
   --secondary: oklch(0.97 0 0);
@@ -114,10 +114,13 @@
   --card-foreground: oklch(0.965 0.006 260);
   --popover: oklch(0.208 0.022 262);
   --popover-foreground: oklch(0.965 0.006 260);
-  --primary: oklch(0.75 0.13 55);
-  --primary-foreground: oklch(0.22 0.05 55);
+  /* Match the LOGO's coral-orange hue (~48), not an amber (~55): the yellower hue on a
+     dark ground read as "Halloween" and looked like a different orange than the mark. Kept
+     a hair lighter than --brand purely so dark ink stays legible on filled buttons. */
+  --primary: oklch(0.72 0.16 48);
+  --primary-foreground: oklch(0.24 0.055 48);
   --brand: oklch(0.7 0.17 47);
-  --brand-foreground: oklch(0.22 0.05 55);
+  --brand-foreground: oklch(0.24 0.055 48);
   --secondary: oklch(0.272 0.024 262);
   --secondary-foreground: oklch(0.965 0.006 260);
   --muted: oklch(0.272 0.024 262);
@@ -127,20 +130,20 @@
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(0.82 0.04 262 / 12%);
   --input: oklch(0.82 0.04 262 / 16%);
-  --ring: oklch(0.75 0.12 55);
-  --chart-1: oklch(0.75 0.13 55);
+  --ring: oklch(0.72 0.15 48);
+  --chart-1: oklch(0.72 0.16 48);
   --chart-2: oklch(0.746 0.16 232.661);
   --chart-3: oklch(0.765 0.177 163.223);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.702 0.183 293.541);
   --sidebar: oklch(0.128 0.018 262);
   --sidebar-foreground: oklch(0.965 0.006 260);
-  --sidebar-primary: oklch(0.75 0.13 55);
-  --sidebar-primary-foreground: oklch(0.22 0.05 55);
+  --sidebar-primary: oklch(0.72 0.16 48);
+  --sidebar-primary-foreground: oklch(0.24 0.055 48);
   --sidebar-accent: oklch(0.272 0.024 262);
   --sidebar-accent-foreground: oklch(0.965 0.006 260);
   --sidebar-border: oklch(0.82 0.04 262 / 12%);
-  --sidebar-ring: oklch(0.75 0.12 55);
+  --sidebar-ring: oklch(0.72 0.15 48);
 }
 
 @layer base {

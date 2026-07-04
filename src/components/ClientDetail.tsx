@@ -16,6 +16,7 @@ import { toastError } from "@/lib/toast";
 import { addServer, installGateway, migrateClient, uninstallGateway } from "@/lib/api";
 import {
   importableServers,
+  isGatewayServer,
   type DetectedClient,
   type McpServer,
   type Registry,
@@ -72,7 +73,11 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
       ? profiles.find((p) => p.name.toLowerCase() === scopeName.toLowerCase())
       : (profiles.find((p) => p.id === registry?.activeProfileId) ?? profiles[0]);
     if (!target) return 0;
-    const ids = new Set((registry?.servers ?? []).map((s) => s.id));
+    // Exclude Toolport's own gateway entry so the count matches the Servers list (which
+    // filters it out) instead of over-counting by one.
+    const ids = new Set(
+      (registry?.servers ?? []).filter((s) => !isGatewayServer(s)).map((s) => s.id),
+    );
     return target.enabledServerIds.filter((id) => ids.has(id)).length;
   }
 
@@ -84,8 +89,9 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
       : (profiles.find((p) => p.id === registry?.activeProfileId) ?? profiles[0]);
     if (!target) return [];
     const enabled = new Set(target.enabledServerIds);
+    // Never surface the gateway's own "conduit" entry as a reachable server.
     return (registry?.servers ?? [])
-      .filter((s) => enabled.has(s.id))
+      .filter((s) => enabled.has(s.id) && !isGatewayServer(s))
       .map((s) => ({ id: s.id, name: s.name }));
   }
 
