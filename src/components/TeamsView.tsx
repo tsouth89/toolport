@@ -9,6 +9,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Callout } from "@/components/Callout";
@@ -161,10 +162,41 @@ export function TeamsView({
         <div className="rounded-xl border bg-card p-5">
           <h3 className="text-sm font-medium">Connect to a team</h3>
           <p className="mt-1 mb-4 max-w-prose text-sm text-muted-foreground">
-            Paste your team's Toolport Teams server URL and an invite code from your
-            admin. The team's MCP servers will appear in your active profile. Your keys
-            never leave your machine, you'll add each server's secrets locally afterward.
+            Join your team's Toolport Teams server and its shared MCP servers appear in
+            your active profile, kept in sync as your admin updates them.
           </p>
+          <div className="mb-5 grid gap-2.5 sm:grid-cols-3">
+            {[
+              {
+                icon: Server,
+                title: "Shared server set",
+                body: "Your admin curates the MCP servers; they show up in your profile.",
+              },
+              {
+                icon: ShieldCheck,
+                title: "Keys stay local",
+                body: "The team holds config only, never a secret. You vault keys on your machine.",
+              },
+              {
+                icon: RefreshCw,
+                title: "Always in sync",
+                body: "One source of truth; updates arrive when you Sync.",
+              },
+            ].map(({ icon: Icon, title, body }) => (
+              <div
+                key={title}
+                className="rounded-lg border border-border/60 bg-muted/20 p-3"
+              >
+                <div className="flex items-center gap-1.5 text-sm font-medium">
+                  <Icon className="size-3.5 text-primary" />
+                  {title}
+                </div>
+                <p className="mt-1 text-2xs leading-relaxed text-muted-foreground">
+                  {body}
+                </p>
+              </div>
+            ))}
+          </div>
           <div className="grid gap-3">
             <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Team server URL</span>
@@ -292,13 +324,13 @@ export function TeamsView({
                           <span className="truncate font-medium">{s.name}</span>
                           <TransportPill transport={s.transport} />
                           {on ? (
-                            <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-success">
-                              <ShieldCheck className="size-3.5" /> on
-                            </span>
+                            <Badge variant="success" className="ml-auto shrink-0">
+                              <ShieldCheck className="size-3" /> on
+                            </Badge>
                           ) : (
-                            <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-warning">
-                              <AlertTriangle className="size-3.5" /> needs review
-                            </span>
+                            <Badge variant="warning" className="ml-auto shrink-0">
+                              <AlertTriangle className="size-3" /> needs review
+                            </Badge>
                           )}
                         </div>
                         {!on && (

@@ -433,10 +433,10 @@ export function AppSidebar({
     <button
       onClick={onClick}
       aria-current={active ? "page" : undefined}
-      className={`${NAV_ITEM} ${active ? "bg-accent" : ""}`}
+      className={`${NAV_ITEM} ${active ? "bg-accent font-medium text-foreground" : "text-muted-foreground"}`}
     >
       <Icon
-        className={`size-4 shrink-0 ${active ? "text-foreground" : "text-muted-foreground"}`}
+        className={`size-4 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`}
       />
       <span>{label}</span>
     </button>
