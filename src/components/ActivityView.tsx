@@ -602,8 +602,14 @@ function StatsPanel({ stats }: { stats: AuditStats }) {
           <div className="text-2xl font-semibold tabular-nums">{stats.total}</div>
           <div className="text-xs text-muted-foreground">calls logged</div>
         </div>
-        <div className="rounded-lg border p-3">
-          <div className="text-2xl font-semibold tabular-nums">{stats.errors}</div>
+        <div
+          className={`rounded-lg border p-3 ${stats.errors > 0 ? "border-destructive/40 bg-destructive/[0.04]" : ""}`}
+        >
+          <div
+            className={`text-2xl font-semibold tabular-nums ${stats.errors > 0 ? "text-destructive" : ""}`}
+          >
+            {stats.errors}
+          </div>
           <div className="text-xs text-muted-foreground">errors ({errPct}%)</div>
         </div>
         <div className="rounded-lg border p-3">
@@ -826,7 +832,9 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
  * local, bounded. */
 function DiscoveryTraces({ refreshKey }: { refreshKey: number }) {
   const [entries, setEntries] = useState<SearchTrace[]>([]);
-  const [open, setOpen] = useState(true);
+  // Collapsed by default: this is glanceable telemetry, not an alert, and the list can run
+  // to 100 rows. Leading with it open was a big part of the Activity tab feeling busy.
+  const [open, setOpen] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -1085,7 +1093,10 @@ export function ActivityView({
   const [stats, setStats] = useState<AuditStats | null>(null);
   const [savings, setSavings] = useState<SavingsSummary | null>(null);
   const [serverFilter, setServerFilter] = useState<string>("");
-  const [errorsOnly, setErrorsOnly] = useState(true);
+  // Show ALL recent calls by default, not a pre-filtered errors-only view. Defaulting the
+  // filter on made a healthy log read as "everything is failing"; the StatsPanel already
+  // surfaces the true error rate, and the toggle is right there for triage.
+  const [errorsOnly, setErrorsOnly] = useState(false);
   const [security, setSecurity] = useState<SecurityEvent[]>([]);
   const [dismissed, setDismissed] = useState<Set<string>>(loadDismissed);
   const [logOpen, setLogOpen] = useState(false);
@@ -1173,6 +1184,7 @@ export function ActivityView({
 
   const banner = (
     <>
+      {/* Loud lane: the only thing here that may need a decision. */}
       {highSecurity.length > 0 ? (
         <SecurityNotices events={highSecurity} onDismiss={dismissSecurity} />
       ) : (
@@ -1185,10 +1197,13 @@ export function ActivityView({
           onDismissAll={() => dismissAllSecurity(infoSecurity)}
         />
       ) : null}
+      {/* Calm lane: lead with the value stat people actually want to see, then keep the
+          reference panels (discovery / identities / inspector) collapsed below it so they
+          don't stack into a wall on first load. */}
+      {savings && savings.tokensSaved > 0 ? <SavingsBanner savings={savings} /> : null}
       <DiscoveryTraces refreshKey={refreshKey} />
       <ToolIdentities refreshKey={refreshKey} />
       {registry?.liveInspect ? <LiveInspector refreshKey={refreshKey} /> : null}
-      {savings && savings.tokensSaved > 0 ? <SavingsBanner savings={savings} /> : null}
     </>
   );
 
