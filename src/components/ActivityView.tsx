@@ -928,10 +928,22 @@ function ToolIdentityRow({ t }: { t: ToolIdentity }) {
             <dd>{t.profiles.length ? t.profiles.join(", ") : "-"}</dd>
             <dt className="text-muted-foreground">Fingerprint</dt>
             <dd className="font-mono break-all">{t.fingerprint || "-"}</dd>
-            <dt className="text-muted-foreground">First seen</dt>
-            <dd>{fmtDate(t.firstSeen)}</dd>
-            <dt className="text-muted-foreground">Last changed</dt>
-            <dd>{fmtDate(t.lastChanged)}</dd>
+            {t.firstSeen > 0 ? (
+              <>
+                <dt className="text-muted-foreground">First seen</dt>
+                <dd>{fmtDate(t.firstSeen)}</dd>
+                <dt className="text-muted-foreground">Last changed</dt>
+                <dd>{fmtDate(t.lastChanged)}</dd>
+              </>
+            ) : (
+              <>
+                <dt className="text-muted-foreground">History</dt>
+                <dd className="text-muted-foreground/80">
+                  Turn on integrity checking in Settings to track when this tool was first
+                  seen and when it last changed.
+                </dd>
+              </>
+            )}
           </dl>
         </div>
       )}
