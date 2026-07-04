@@ -186,6 +186,27 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       ("a lot of users here use pi for local agent coding"). Registered pi as a
       `JsonMcpServers` client writing its Pi-owned global config at `~/.pi/agent/mcp.json`
       (home-anchored), mirroring the Cursor/BoltAI writers. Bound for the next release.
+- [ ] **Two-layer / hybrid tool search (the "Zillow isn't near 'house'" miss).** Suggested
+      by MajMin5 (r/LocalLLaMA), who independently built the same lazy loader and validated
+      the pattern. Pure semantic (embedding) search misses tools whose name/description
+      doesn't embed near the query even though the association is common knowledge (search
+      "home information" → embeddings skip a `zillow` tool). His fix was a slow LLM fallback
+      (ask a small model "which of these tools fit <task>?"). Our cheaper version: (a) a
+      genuine **hybrid ranker** (lexical/BM25 blended with the existing semantic score, not
+      semantic-alone), and (b) **broaden the candidate set when top scores are low-confidence**
+      so the (already capable) calling model can reason over descriptions instead of us
+      hiding them. Optionally a `search_tools_deep` meta-tool that returns more candidates +
+      full descriptions. No mandatory local model — the client model IS the reasoning layer.
+      Ties into the open "per-candidate lexical+semantic scores" search-trace follow-up. (M)
+- [ ] **Per-client discovery mode + raw/direct passthrough.** Also from MajMin5: clients that
+      already do their own tool-gating/deferral (Claude Desktop, LibreChat, and Claude Code's
+      tool-search) pay a wasteful double hop when forced through our meta-tools (load meta-tools
+      → search → load tool → call) versus just seeing the tools directly and using their native
+      logic. Today `lazy_discovery` is a single **global** bool in the registry (registry.rs);
+      make it **per-client** (and consider auto-defaulting self-managing clients to the direct
+      catalog, weak/local models to lazy). This is the client-agnostic story finished: one
+      place to configure servers, right discovery surface per client. (His stdio→HTTP + mobile
+      asks we already cover — the gateway speaks HTTP/OpenAPI natively.) (M)
 
 ## The core decision: Toolport is a gateway, not a file editor
 
