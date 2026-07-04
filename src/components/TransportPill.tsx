@@ -17,7 +17,7 @@ export function TransportPill({ transport }: { transport: Transport }) {
   return (
     <span
       aria-label={`Transport: ${m.label}`}
-      className="inline-flex items-center gap-1 font-mono text-2xs text-muted-foreground/70"
+      className="inline-flex items-center gap-1 font-mono text-2xs text-muted-foreground"
     >
       <Icon className="size-3 opacity-70" aria-hidden="true" />
       <span aria-hidden="true">{m.label}</span>

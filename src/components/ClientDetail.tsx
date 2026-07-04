@@ -570,7 +570,7 @@ function GatewayFlow({ clientName, servers }: { clientName: string; servers: str
       </div>
       <div className={`${link} bg-gradient-to-r from-border to-primary`} />
       <div className="flex flex-col items-center gap-2 text-center">
-        <div className="grid size-16 place-items-center rounded-2xl border border-primary/45 bg-primary/10 shadow-[0_0_0_5px_rgba(239,147,80,.09),0_16px_34px_-16px_rgba(239,147,80,.5)]">
+        <div className="grid size-16 place-items-center rounded-2xl border border-primary/45 bg-primary/10 shadow-[0_0_0_5px_color-mix(in_oklch,var(--primary)_12%,transparent),0_16px_34px_-16px_color-mix(in_oklch,var(--primary)_50%,transparent)]">
           <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true">
             <circle
               cx="16"
