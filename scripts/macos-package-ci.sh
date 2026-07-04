@@ -54,12 +54,12 @@ die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 [[ -d "$APP" ]] || die "App bundle not found: $APP (did 'tauri build' run for $TARGET?)"
 
-WORK="$RUNNER_TEMP/conduit-sign"
+WORK="$RUNNER_TEMP/toolport-sign"
 mkdir -p "$WORK"
 APP_PROFILE="$WORK/app.provisionprofile"
 GW_PROFILE="$WORK/gateway.provisionprofile"
 CERT_P12="$WORK/cert.p12"
-KEYCHAIN="$WORK/conduit-signing.keychain-db"
+KEYCHAIN="$WORK/toolport-signing.keychain-db"
 KEYCHAIN_PASSWORD="ci-$(date +%s)-$$"
 
 # Restore the user's keychain search list and remove our temp keychain on exit,

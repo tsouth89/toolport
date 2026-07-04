@@ -2267,11 +2267,11 @@ fn connect_one(server: &ServerEntry, dirty: &Arc<AtomicBool>) -> Option<Downstre
                 match secrets::get_secret_result(&server.id, &e.key) {
                     Ok(Some(v)) => env.push((e.key.clone(), v)),
                     Ok(None) => eprintln!(
-                        "conduit: '{}' needs secret '{}' but none is vaulted",
+                        "toolport: '{}' needs secret '{}' but none is vaulted",
                         server.id, e.key
                     ),
                     Err(err) => eprintln!(
-                        "conduit: '{}' could not read secret '{}' from the keychain: {err}",
+                        "toolport: '{}' could not read secret '{}' from the keychain: {err}",
                         server.id, e.key
                     ),
                 }
@@ -2293,13 +2293,13 @@ fn connect_one(server: &ServerEntry, dirty: &Arc<AtomicBool>) -> Option<Downstre
             // them here, off the health-probe path.
             ds.load_resources_prompts();
             let msg = format!("connected '{}' ({} tools)", server.id, ds.tools.len());
-            eprintln!("conduit: {msg}");
+            eprintln!("toolport: {msg}");
             glog(&msg);
             Some(ds)
         }
         Err(e) => {
             let msg = format!("'{}' failed: {e}", server.id);
-            eprintln!("conduit: {msg}");
+            eprintln!("toolport: {msg}");
             glog(&msg);
             None
         }
@@ -2355,7 +2355,7 @@ fn maybe_check_integrity(
         glog(&format!(
             "SECURITY: tool definition {change} on already-approved server \"{server}\": {tool}"
         ));
-        eprintln!("conduit: SECURITY tool drift ({change}) {tool}");
+        eprintln!("toolport: SECURITY tool drift ({change}) {tool}");
     }
     // Block high-risk drift (poisoned / destructive) until re-approved, when enabled.
     quarantine_on && integrity::apply_quarantine(profile, tools, &events)
@@ -2510,7 +2510,7 @@ fn watch_registry(
     http_mode: bool,
     downstream_dirty: Arc<AtomicBool>,
 ) {
-    eprintln!("conduit: watching registry at {}", path.display());
+    eprintln!("toolport: watching registry at {}", path.display());
     let mut last = mtime(&path);
     loop {
         std::thread::sleep(Duration::from_millis(1000));
@@ -2528,13 +2528,13 @@ fn watch_registry(
             // The registry changed: servers may have been added, removed, or
             // reconfigured, so reload and rebuild from scratch. This re-connects
             // everything, which also subsumes any pending downstream change.
-            eprintln!("conduit: registry file changed on disk");
+            eprintln!("toolport: registry file changed on disk");
             // Don't advance `last` until a successful load, so a half-written file
             // (caught mid-save) is retried on the next tick instead of skipped.
             let new_reg = match registry::load_from(&path) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("conduit: reload failed (will retry): {e}");
+                    eprintln!("toolport: reload failed (will retry): {e}");
                     continue;
                 }
             };
@@ -2551,7 +2551,7 @@ fn watch_registry(
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(new_router);
             let tools = requarantine_if_needed(&registry, &router, tools, profile.as_deref());
             persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
-            eprintln!("conduit: registry changed, sent tools/list_changed");
+            eprintln!("toolport: registry changed, sent tools/list_changed");
         } else {
             // A live server announced a tool-list change. Re-query the existing
             // connections in place rather than re-spawning: a runtime or
@@ -2569,7 +2569,7 @@ fn watch_registry(
             };
             let tools = requarantine_if_needed(&registry, &router, tools, profile.as_deref());
             persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
-            eprintln!("conduit: downstream tools/list_changed, refreshed + sent");
+            eprintln!("toolport: downstream tools/list_changed, refreshed + sent");
         }
     }
 }
