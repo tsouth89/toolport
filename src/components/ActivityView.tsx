@@ -1025,8 +1025,9 @@ function ToolIdentityRow({ t }: { t: ToolIdentity }) {
               <>
                 <dt className="text-muted-foreground">History</dt>
                 <dd className="text-muted-foreground/80">
-                  Turn on integrity checking in Settings to track when this tool was first
-                  seen and when it last changed.
+                  This tool&apos;s baseline predates first-seen tracking, so it has no
+                  dates yet. Toolport fills them in automatically the next time a client
+                  lists tools through the gateway.
                 </dd>
               </>
             )}
