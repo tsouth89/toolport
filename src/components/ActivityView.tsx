@@ -18,6 +18,7 @@ import {
 import { toast } from "sonner";
 import { fmtTokens } from "@/lib/utils";
 import { toastError } from "@/lib/toast";
+import { Input } from "@/components/ui/input";
 import {
   getAuditLog,
   getAuditStats,
@@ -287,7 +288,7 @@ function SecurityNotices({
                     {count > 1 && (
                       <span
                         className="rounded-full bg-warning/15 px-1.5 py-0.5 font-medium text-warning"
-                        title={`Fired ${count} times`}
+                        title={`Recurred in ${count} separate time windows`}
                       >
                         ×{count}
                       </span>
@@ -311,7 +312,10 @@ function SecurityNotices({
                   </div>
                   {e.evidence && (
                     <p className="ml-1 max-w-2xl border-l-2 border-warning/40 pl-2 font-mono text-[11px] leading-relaxed break-words text-muted-foreground">
-                      matched: “{e.evidence}”
+                      <span className="mr-1 select-none font-sans text-muted-foreground/70">
+                        matched:
+                      </span>
+                      {e.evidence}
                     </p>
                   )}
                 </li>
@@ -634,6 +638,10 @@ function StatsPanel({ stats }: { stats: AuditStats }) {
   const [tableOpen, setTableOpen] = useState(false);
   if (stats.total === 0) return null;
   const errPct = (stats.errorRate * 100).toFixed(stats.errorRate < 0.1 ? 1 : 0);
+  // Surface how many servers have errors on the collapsed toggle: the aggregate error % can
+  // dilute a single fully-broken server among many healthy ones, so a per-server signal has
+  // to be visible without expanding the table.
+  const serversWithErrors = stats.servers.filter((s) => s.errors > 0).length;
   return (
     <div className="mb-6 flex flex-col gap-3">
       <div className="grid grid-cols-3 gap-3">
@@ -671,6 +679,11 @@ function StatsPanel({ stats }: { stats: AuditStats }) {
         <span className="text-xs font-normal text-muted-foreground/70">
           {stats.servers.length} {stats.servers.length === 1 ? "server" : "servers"}
         </span>
+        {serversWithErrors > 0 && (
+          <span className="rounded-full bg-destructive/10 px-1.5 py-0.5 text-xs font-medium text-destructive">
+            {serversWithErrors} with errors
+          </span>
+        )}
       </button>
 
       {tableOpen && (
@@ -1024,12 +1037,63 @@ function ToolIdentityRow({ t }: { t: ToolIdentity }) {
   );
 }
 
+/** One server's tools inside Tool identities: a collapsible header with a count and the
+ * per-tool rows. Forced open while a search is active so matches are visible without a
+ * click; otherwise collapsed by default so N servers read as N lines, not 378 rows. */
+function IdentityServerGroup({
+  label,
+  items,
+  forceOpen,
+}: {
+  label: string;
+  items: ToolIdentity[];
+  forceOpen: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const shown = forceOpen || open;
+  const quarantined = items.filter((t) => t.quarantined).length;
+  return (
+    <div className="rounded-md border border-border/50">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={shown}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted/30"
+      >
+        <ChevronRight
+          className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${
+            shown ? "rotate-90" : ""
+          }`}
+        />
+        <span className="min-w-0 truncate text-sm font-medium">{label}</span>
+        <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+          {items.length}
+        </span>
+        {quarantined > 0 && (
+          <span className="shrink-0 rounded-full bg-warning/15 px-1.5 py-0.5 text-[11px] font-medium text-warning">
+            {quarantined} quarantined
+          </span>
+        )}
+      </button>
+      {shown && (
+        <div className="flex flex-col gap-1 p-2 pt-0">
+          {items.map((t) => (
+            <ToolIdentityRow key={t.alias} t={t} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Collapsible capability-provenance panel: every pinned tool's identity, so a human
  * can verify which server/profile an alias maps to and whether its definition drifted.
- * Self-hides until the gateway has pinned a baseline. */
+ * Grouped by server and searchable, because a busy setup pins hundreds of tools across
+ * a dozen-plus servers and a flat list is unusable. Self-hides until the gateway has
+ * pinned a baseline. */
 function ToolIdentities({ refreshKey }: { refreshKey: number }) {
   const [rows, setRows] = useState<ToolIdentity[]>([]);
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -1041,7 +1105,42 @@ function ToolIdentities({ refreshKey }: { refreshKey: number }) {
     };
   }, [refreshKey]);
 
+  const q = query.trim().toLowerCase();
+
+  // Group every pinned tool under its source server, servers sorted alphabetically.
+  const groups = useMemo(() => {
+    const m = new Map<string, ToolIdentity[]>();
+    for (const t of rows) {
+      const label = t.serverName || t.serverId || "unattributed";
+      const arr = m.get(label);
+      if (arr) arr.push(t);
+      else m.set(label, [t]);
+    }
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [rows]);
+
+  // A server-name match shows that server's whole block ("vercel" -> all Vercel tools);
+  // otherwise match individual tools by alias or upstream name ("vercel__deploy" -> that
+  // one tool). Empty groups drop out.
+  const filtered = useMemo(() => {
+    if (!q) return groups;
+    return groups
+      .map(([label, items]): [string, ToolIdentity[]] => {
+        if (label.toLowerCase().includes(q)) return [label, items];
+        return [
+          label,
+          items.filter(
+            (t) =>
+              t.alias.toLowerCase().includes(q) || t.upstream.toLowerCase().includes(q),
+          ),
+        ];
+      })
+      .filter(([, items]) => items.length > 0);
+  }, [groups, q]);
+
   if (rows.length === 0) return null;
+
+  const shownTools = filtered.reduce((n, [, items]) => n + items.length, 0);
 
   return (
     <div className="mb-6 rounded-lg border border-border/60 bg-muted/[0.04] p-4">
@@ -1069,11 +1168,42 @@ function ToolIdentities({ refreshKey }: { refreshKey: number }) {
             and when it was first seen or last changed. Prefixing helps the model pick a
             tool; this helps you verify what crossed the boundary.
           </p>
-          <div className="flex flex-col gap-1">
-            {rows.map((t) => (
-              <ToolIdentityRow key={t.alias} t={t} />
-            ))}
+
+          <div className="relative mb-3">
+            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Filter by server or tool name…"
+              aria-label="Filter tool identities"
+              className="h-8 pl-8 text-sm"
+            />
           </div>
+
+          {filtered.length === 0 ? (
+            <p className="py-6 text-center text-xs text-muted-foreground">
+              No server or tool matches “{query}”.
+            </p>
+          ) : (
+            <>
+              {q && (
+                <p className="mb-2 text-xs text-muted-foreground/70">
+                  {shownTools} tool{shownTools === 1 ? "" : "s"} in {filtered.length}{" "}
+                  server{filtered.length === 1 ? "" : "s"}
+                </p>
+              )}
+              <div className="flex flex-col gap-1">
+                {filtered.map(([label, items]) => (
+                  <IdentityServerGroup
+                    key={label}
+                    label={label}
+                    items={items}
+                    forceOpen={q.length > 0}
+                  />
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
     </div>
