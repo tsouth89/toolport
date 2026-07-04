@@ -208,6 +208,55 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       place to configure servers, right discovery surface per client. (His stdio→HTTP + mobile
       asks we already cover — the gateway speaks HTTP/OpenAPI natively.) (M)
 
+## Robustness sprint (2026-07-04, "nothing fails silently")
+
+A 3-surface completeness/edge-case audit (app UX, gateway runtime, Teams). **SHIPPED
+on branch `robustness-sprint`:** downstream **re-spawn on the breaker's half-open probe**
+(a crashed stdio child no longer stays dead until a full registry rebuild; self-heal
+only fired when EVERY server was down); **Playground call timeout + Cancel + elapsed**
+(the one true hang with no escape); **ConfirmDialog on the two credential-deleting
+actions**; **Catalog live-search error-vs-empty** with retry; **embeddings HTTP timeout**
+(a hung endpoint falls back to lexical, no stalled search); **bounded stdio read_line**
+(a newline-less multi-GB line can't grow unbounded); **shaped-result marker honesty**
+(no more "Nothing was lost" over-promise; says held-temporarily + re-run on expiry);
+**tool-cache `{version, tools}` versioning** (stale cache from an old build is discarded);
+and the whole **Teams removed-member/role/auto-sync** fix (new server `GET /me` heartbeat,
+removed members actually disconnect locally, role refreshes every sync, app-level 5-min
+background sync so policy reaches every member; deployed server-side).
+
+**Still open from the audit (not yet built):**
+
+- [ ] **Slowloris read timeout on the HTTP bridge** (tracked) — needs a socket read
+      deadline `tiny_http` doesn't expose; deferred rather than shipped as a fragile
+      threaded-read hack. Low risk (loopback bind + bearer + 4MB + inflight caps).
+- [ ] **Persist OAuth token expiry.** `authenticate_oauth` parses `expires_in` then drops
+      it (`oauth.rs`), so no "re-auth soon" UX is possible. Store issue/expiry ts; then a
+      subtle near/past-expiry hint on the server row (probe stays source of truth). (M)
+- [ ] **Post-connect success signal for first-timers** ("Toolport is now serving N servers
+      to <client>; open it and ask for tools"), and make onboarding's Done step surface
+      probe failures instead of swallowing them to `health=[]`. (M)
+- [ ] **Playground empty/auth states**: explicit "server advertises no tools" copy; detect
+      an auth-required connect failure and link to the server's Secrets dialog; label the
+      raw-JSON fallback when a schema is too complex to form-render. (S-M)
+- [ ] **Settings status panels** distinguish stale-from-poll-failure vs empty (HTTP-bridge
+      status, quarantine 15s / allowed 10s polls swallow errors). Same class as the
+      tracked Activity empty-vs-error item, different screens. (S)
+- [ ] **Client-import preview**: `handleImport` bulk-adds every importable server with only
+      a count toast; reuse the share-link `preview_import`/`ImportItem` review flow. (S-M)
+- [ ] **Recall escape hatch** for lazy discovery: a `list_server_tools`/`search_tools_deep`
+      meta-tool returning more candidates + full descriptions when a search misses, and a
+      "no match" lead that names the empty-query-with-server escape. (M, extends hybrid search)
+- [ ] **Integrity-file cross-process lock.** `tool-pins.json` / `tool-quarantine.json` are
+      atomic-write but unlocked; two gateways detecting drift at once can clobber each
+      other's quarantine set (a lost entry un-blocks a tool). Reload-under-lock or centralize
+      writes in the app. Security-adjacent sibling of the deferred registry cache-coherence. (M)
+- [ ] **Deterministic tool-collision suffixes.** `exposed_name` `_2/_3` depends on add
+      order; a removed-then-readded server can take a different slot and silently rename a
+      tool the client cached, failing in-flight calls with "no route". Derive from
+      `(server_id, tool_name)` content instead of position. (M)
+- [ ] Small: "Clear filter" buttons on zero-match states (Activity recent-calls, Playground
+      tool filter, catalog search); light credential/raw-arg client-side validation. (S)
+
 ## The core decision: Toolport is a gateway, not a file editor
 
 A tool that only edits each client's MCP JSON config is a dead end:
