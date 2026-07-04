@@ -469,7 +469,7 @@ function Provenance({ entry }: { entry: CatalogEntry }) {
       <ShieldCheck className={`size-3 shrink-0 ${tier.cls}`} />
       <span className={tier.cls}>{tier.label}</span>
       {entry.publisher && (
-        <span className="truncate text-muted-foreground/70">· {entry.publisher}</span>
+        <span className="truncate text-muted-foreground">· {entry.publisher}</span>
       )}
     </div>
   );
@@ -511,10 +511,7 @@ function CatalogCard({
       <p className="line-clamp-2 min-h-8 text-xs text-muted-foreground">
         {entry.description}
       </p>
-      <code
-        title={target}
-        className="truncate font-mono text-[11px] text-muted-foreground/70"
-      >
+      <code title={target} className="truncate font-mono text-2xs text-muted-foreground">
         {target}
       </code>
       <Provenance entry={entry} />

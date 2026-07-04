@@ -6,6 +6,51 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+### Added
+
+- **A full visual redesign.** Toolport moves to its brand palette, a deep navy
+  ground with a single orange accent, applied consistently across every tab. Server
+  health now reads as a colored word (not just an 8px dot), the Servers header is a
+  scannable status bar, and the transport label is demoted to neutral so color means
+  health, not metadata.
+- **The connect flow shows the product.** Pointing a client that isn't connected yet
+  now leads with a `client -> Toolport -> your servers` diagram and a clear call to
+  action, instead of a wall of prose.
+- **Tool identities are searchable and grouped by server.** Activity → Tool identities
+  collapses hundreds of tools into per-server sections with a filter box: type a server
+  name to see its whole block, or a tool name to jump to it.
+- **A security posture summary in Settings.** The Security section opens with a
+  one-line read of whether you're protected (guarded / partly / unprotected) and what's
+  active, so you don't have to decode every toggle.
+- **Tool-poison flags now show the matched text.** A flagged tool definition surfaces a
+  short, de-obfuscated excerpt of exactly what tripped the scan, so the alert is
+  verifiable instead of an opaque label.
+
+### Changed
+
+- **The Activity tab is calmer.** New/first-seen tools no longer flood the security
+  lane; recurring notices collapse into a single counted row; the per-server stats table
+  and discovery panel are collapsed by default; the recent-calls log shows all calls
+  rather than defaulting to an errors-only view that read as "everything is failing."
+
+### Fixed
+
+- **First-seen destructive tools are no longer quarantined.** A destructive tool simply
+  appearing for the first time is inventory, not a rug-pull, and no longer gets blocked
+  behind a wall of re-approvals (the call is still gated by the block/confirm/approval
+  policies). Legacy quarantine entries from the old behavior auto-clear.
+- **No more spurious "integrity baseline lost" alarms** from an empty or mid-swap read
+  of the shared pin file, while a genuinely truncated baseline is still treated as
+  tampering (loud), not silently rebuilt.
+- **A benign tool description no longer trips the poison scanner.** The stealth-directive
+  check now requires a real concealment target, so a formatting note like "do not mention
+  if a column is boolean" on a legitimate server is not flagged.
+- **The connect view no longer describes buttons that aren't there,** and no longer lists
+  Toolport's own gateway entry as one of the servers a client can reach (the managed count
+  now matches the Servers list).
+- **Corrected a Settings pointer** in the tool-identity history note that referenced an
+  integrity-checking toggle which does not exist (integrity checking is always on).
+
 ## [1.3.0] - 2026-07-04
 
 ### Added

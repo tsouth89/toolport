@@ -82,7 +82,7 @@
        Values are the Tailwind v4 *-400 palette: emerald, amber, violet, sky. */
   --success: oklch(0.765 0.177 163.223);
   --warning: oklch(0.828 0.189 84.429);
-  --info: oklch(0.702 0.183 293.541);
+  --info: oklch(0.74 0.165 293.541);
   --owned: oklch(0.746 0.16 232.661);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
@@ -123,12 +123,14 @@
   --secondary: oklch(0.305 0.05 258);
   --secondary-foreground: oklch(0.965 0.008 250);
   --muted: oklch(0.305 0.05 258);
-  --muted-foreground: oklch(0.735 0.032 255);
+  /* Raised from 0.735 to reach ~4.5:1 (AA) on the navy card/bg for secondary text. */
+  --muted-foreground: oklch(0.78 0.03 255);
   --accent: oklch(0.345 0.056 258);
   --accent-foreground: oklch(0.965 0.008 250);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(0.72 0.05 258 / 16%);
-  --input: oklch(0.72 0.05 258 / 20%);
+  /* 22% (was 16%) so card edges and row dividers actually read against the navy. */
+  --border: oklch(0.72 0.05 258 / 22%);
+  --input: oklch(0.72 0.05 258 / 22%);
   --ring: oklch(0.71 0.16 48);
   --chart-1: oklch(0.71 0.185 48);
   --chart-2: oklch(0.746 0.16 232.661);
@@ -141,7 +143,7 @@
   --sidebar-primary-foreground: oklch(0.24 0.06 48);
   --sidebar-accent: oklch(0.305 0.05 258);
   --sidebar-accent-foreground: oklch(0.965 0.008 250);
-  --sidebar-border: oklch(0.72 0.05 258 / 16%);
+  --sidebar-border: oklch(0.72 0.05 258 / 22%);
   --sidebar-ring: oklch(0.71 0.16 48);
 }
 

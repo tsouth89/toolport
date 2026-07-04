@@ -446,7 +446,7 @@ export function ServerDialog({
                 </p>
               ))}
               {duplicateName && (
-                <p className="flex items-start gap-1.5 text-amber-600 dark:text-amber-500">
+                <p className="flex items-start gap-1.5 text-warning">
                   <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                   <span>
                     Another server is already named "{nameTrim}". That's fine for multiple
@@ -455,7 +455,7 @@ export function ServerDialog({
                 </p>
               )}
               {test.status === "ok" && (
-                <p className="flex items-start gap-1.5 text-emerald-600 dark:text-emerald-500">
+                <p className="flex items-start gap-1.5 text-success">
                   <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" />
                   <span>{test.message}</span>
                 </p>
