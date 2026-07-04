@@ -51,8 +51,14 @@ pub(crate) const HTTP_RETRY_CAP: Duration = Duration::from_secs(10);
 /// instead of blocking every other agent queued on the same server.
 #[derive(Debug, Clone)]
 pub enum TransportError {
-    /// Non-retryable: the request was processed (or is structurally invalid).
+    /// Non-retryable protocol/application error: the request reached the server and it
+    /// responded with an error (or the response was structurally invalid). Does NOT
+    /// count against server health - a bad tool call is not a dead server.
     Fatal(String),
+    /// The server is unreachable or unresponsive (a read timed out, or the connection
+    /// died). Distinct from `Fatal` so the circuit breaker can trip on a genuinely
+    /// dead/hung server without counting ordinary error responses against it.
+    Unavailable(String),
     /// Retryable: a 429 rate-limit or a connection that never reached the server.
     /// `retry_after` carries the server-advertised delay (Retry-After) if present;
     /// the caller falls back to its own exponential backoff when `None`.
@@ -62,10 +68,20 @@ pub enum TransportError {
     },
 }
 
+impl TransportError {
+    /// True if this reflects the server being unreachable/unhealthy (timeout, dead
+    /// connection, or exhausted connection/rate-limit retries) rather than a normal
+    /// protocol or application error. Only these trip the per-server circuit breaker.
+    pub fn is_health_failure(&self) -> bool {
+        matches!(self, TransportError::Unavailable(_) | TransportError::Retry { .. })
+    }
+}
+
 impl std::fmt::Display for TransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TransportError::Fatal(msg) => write!(f, "{msg}"),
+            TransportError::Unavailable(msg) => write!(f, "{msg}"),
             TransportError::Retry { message, .. } => write!(f, "{message}"),
         }
     }
@@ -735,8 +751,11 @@ impl Transport for StdioTransport {
         let id = self.next_id;
         self.next_id += 1;
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        writeln!(self.stdin, "{msg}").map_err(|e| TransportError::Fatal(e.to_string()))?;
-        self.stdin.flush().map_err(|e| TransportError::Fatal(e.to_string()))?;
+        // A broken stdin pipe means the child is gone: a health failure, not a protocol error.
+        writeln!(self.stdin, "{msg}").map_err(|e| TransportError::Unavailable(e.to_string()))?;
+        self.stdin
+            .flush()
+            .map_err(|e| TransportError::Unavailable(e.to_string()))?;
 
         // Read until the response with our id arrives, skipping notifications.
         // The deadline bounds the whole wait so an unresponsive server fails fast
@@ -749,10 +768,12 @@ impl Transport for StdioTransport {
             let line = match self.rx.recv_timeout(remaining) {
                 Ok(l) => l,
                 Err(RecvTimeoutError::Timeout) => {
-                    return Err(TransportError::Fatal(format!("timed out waiting for '{method}' response")))
+                    return Err(TransportError::Unavailable(format!(
+                        "timed out waiting for '{method}' response"
+                    )))
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(TransportError::Fatal(self.closed_error()))
+                    return Err(TransportError::Unavailable(self.closed_error()))
                 }
             };
             let trimmed = line.trim();

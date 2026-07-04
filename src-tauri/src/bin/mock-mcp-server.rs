@@ -24,6 +24,8 @@ fn tool_list(grown: bool) -> Value {
                 "inputSchema": { "type": "object", "properties": { "a": { "type": "number" }, "b": { "type": "number" } } } }),
         json!({ "name": "grow", "description": "Add a new tool and announce tools/list_changed.",
                 "inputSchema": { "type": "object", "properties": {} } }),
+        json!({ "name": "die", "description": "Exit the process to simulate a mid-session crash.",
+                "inputSchema": { "type": "object", "properties": {} } }),
     ];
     if grown {
         tools.push(json!({ "name": "greet", "description": "Greet someone by name.",
@@ -91,6 +93,11 @@ fn handle(req: &Value, grown: &mut bool) -> Option<Value> {
                 "grow" => {
                     *grown = true;
                     "grew: greet is now available".to_string()
+                }
+                "die" => {
+                    // Crash without responding, so the gateway sees the connection die
+                    // (used to exercise the circuit breaker).
+                    std::process::exit(0);
                 }
                 "greet" => {
                     let who = args.get("name").and_then(|t| t.as_str()).unwrap_or("there");

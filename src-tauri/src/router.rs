@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -169,6 +170,54 @@ impl ToolPolicy {
 struct ServerSlot {
     id: String,
     inner: Mutex<DownstreamServer>,
+    /// Fast-fail state for a server that keeps failing (dead/hung), so we don't pay
+    /// its full read timeout on every call once it's clearly down.
+    breaker: Mutex<Breaker>,
+}
+
+/// After this many consecutive health failures, a server's circuit opens.
+const BREAKER_FAILURE_THRESHOLD: u32 = 3;
+/// How long a tripped circuit stays open before one probe call is let through.
+const BREAKER_COOLDOWN: Duration = Duration::from_secs(20);
+
+/// Per-server circuit breaker. Once a server racks up consecutive health failures
+/// (timeouts / dead connections), the circuit opens and calls fast-fail for a
+/// cooldown instead of each one waiting out the read timeout and piling up worker
+/// threads. `now` is passed in so the transitions are unit-testable without sleeping.
+#[derive(Default)]
+struct Breaker {
+    consecutive_failures: u32,
+    open_until: Option<Instant>,
+}
+
+impl Breaker {
+    /// Remaining open time if the circuit is tripped at `now`. A circuit whose
+    /// cooldown has elapsed transitions to half-open here (clears `open_until` and
+    /// returns `None`) so the next call probes the server.
+    fn open_remaining(&mut self, now: Instant) -> Option<Duration> {
+        match self.open_until {
+            Some(t) if now < t => Some(t - now),
+            Some(_) => {
+                self.open_until = None;
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// A successful call closes the circuit and clears the failure streak.
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.open_until = None;
+    }
+
+    /// A health failure; opens the circuit once the streak hits the threshold.
+    fn record_failure(&mut self, now: Instant) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.consecutive_failures >= BREAKER_FAILURE_THRESHOLD {
+            self.open_until = Some(now + BREAKER_COOLDOWN);
+        }
+    }
 }
 
 /// Cloneable so the dispatcher can hold the live router as a `Mutex<Arc<Router>>`,
@@ -321,6 +370,7 @@ impl Router {
         self.servers.push(Arc::new(ServerSlot {
             id: id.clone(),
             inner: Mutex::new(server),
+            breaker: Mutex::new(Breaker::default()),
         }));
         self.by_id.insert(id, idx);
     }
@@ -448,6 +498,21 @@ impl Router {
     where
         F: FnMut(&mut DownstreamServer) -> Result<T, TransportError>,
     {
+        // Circuit breaker: a server that just failed repeatedly is fast-failed here,
+        // BEFORE taking its `inner` lock, so a dead/hung server neither pays its full
+        // read timeout again nor queues callers behind an in-flight timing-out call.
+        if let Some(remaining) = slot
+            .breaker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .open_remaining(Instant::now())
+        {
+            return Err(format!(
+                "server '{}' is temporarily unavailable (too many recent failures; retrying in {}s)",
+                slot.id,
+                remaining.as_secs() + 1
+            ));
+        }
         let mut attempt = 0u32;
         loop {
             let result = {
@@ -455,14 +520,31 @@ impl Router {
                 f(&mut server)
             };
             match result {
-                Ok(v) => return Ok(v),
+                Ok(v) => {
+                    slot.breaker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .record_success();
+                    return Ok(v);
+                }
                 Err(TransportError::Retry { retry_after, message }) if attempt < HTTP_MAX_RETRIES => {
                     let wait = retry_wait(retry_after, attempt);
                     eprintln!("conduit: retrying downstream call after {wait:?}: {message}");
                     std::thread::sleep(wait);
                     attempt += 1;
                 }
-                Err(e) => return Err(e.to_string()),
+                Err(e) => {
+                    // Only a health failure (timeout / dead connection / exhausted
+                    // retries) counts toward the breaker; a normal error response does
+                    // not disable the server.
+                    if e.is_health_failure() {
+                        slot.breaker
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .record_failure(Instant::now());
+                    }
+                    return Err(e.to_string());
+                }
             }
         }
     }
@@ -536,7 +618,44 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn breaker_opens_after_threshold_then_half_opens_after_cooldown() {
+        let t0 = Instant::now();
+        let mut b = Breaker::default();
+        // Below the threshold the circuit stays closed.
+        for _ in 0..BREAKER_FAILURE_THRESHOLD - 1 {
+            b.record_failure(t0);
+            assert!(b.open_remaining(t0).is_none(), "closed below threshold");
+        }
+        // The threshold-th consecutive failure opens it.
+        b.record_failure(t0);
+        let rem = b.open_remaining(t0).expect("circuit should be open");
+        assert!(rem > Duration::ZERO && rem <= BREAKER_COOLDOWN);
+        // Still open partway through the cooldown.
+        assert!(b.open_remaining(t0 + BREAKER_COOLDOWN / 2).is_some());
+        // Once the cooldown elapses it half-opens: a probe is let through (None) and
+        // the tripped state is cleared.
+        assert!(b.open_remaining(t0 + BREAKER_COOLDOWN).is_none());
+        assert!(b.open_remaining(t0 + BREAKER_COOLDOWN).is_none());
+    }
+
+    #[test]
+    fn breaker_success_resets_the_streak() {
+        let t0 = Instant::now();
+        let mut b = Breaker::default();
+        b.record_failure(t0);
+        b.record_failure(t0);
+        b.record_success(); // a good call clears the streak
+        // Two failures alone no longer open it (needs THRESHOLD consecutive).
+        b.record_failure(t0);
+        b.record_failure(t0);
+        assert!(b.open_remaining(t0).is_none(), "success reset the streak");
+        // The threshold-th consecutive failure opens it.
+        b.record_failure(t0);
+        assert!(b.open_remaining(t0).is_some());
+    }
 
     #[test]
     fn retry_wait_clamps_large_retry_after() {
