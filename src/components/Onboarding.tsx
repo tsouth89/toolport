@@ -6,8 +6,11 @@ import {
   Link2,
   Loader2,
   Plus,
+  ShieldCheck,
+  Sparkles,
   Store,
   Waypoints,
+  Workflow,
 } from "lucide-react";
 import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
@@ -148,15 +151,44 @@ function Welcome({ present, onNext }: { present: DetectedClient[]; onNext: () =>
   const names = present.map((c) => c.name);
   const found =
     names.length === 0
-      ? "We didn't detect any MCP clients yet. You can still add servers now, then connect a client once it's installed."
-      : `We found ${listJoin(names)} on your machine. Toolport will sit between your tools and your servers, so you set each one up once.`;
+      ? "No MCP clients detected yet, you can still add servers now and connect a client once it's installed."
+      : `Found ${listJoin(names)} on your machine, ready to point at the gateway.`;
+  const benefits = [
+    {
+      icon: Workflow,
+      title: "One gateway for every tool",
+      body: "Set each MCP server up once; every AI client shares it.",
+    },
+    {
+      icon: Sparkles,
+      title: "Up to 91% fewer tokens",
+      body: "Your agent loads a few meta-tools instead of hundreds of schemas.",
+    },
+    {
+      icon: ShieldCheck,
+      title: "Watched for tampering",
+      body: "Every server is checked for rug-pulls and prompt injection.",
+    },
+  ];
   return (
     <>
       <StepHeader icon={<Waypoints className="size-5" />} title="Welcome to Toolport">
-        One local gateway for all your MCP servers, shared by every AI tool, so your agent
-        loads 3 tools instead of hundreds (up to 91% fewer tokens) and every server is
-        watched for tampering and prompt injection. {found}
+        One local gateway for all your MCP servers, shared by every AI tool.
       </StepHeader>
+      <div className="grid gap-2.5">
+        {benefits.map(({ icon: Icon, title, body }) => (
+          <div key={title} className="flex items-start gap-3">
+            <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Icon className="size-4" />
+            </div>
+            <div>
+              <div className="text-sm font-medium">{title}</div>
+              <div className="text-xs text-muted-foreground">{body}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-sm text-muted-foreground">{found}</p>
       <Button onClick={onNext} className="self-start">
         Get started
         <ArrowRight className="size-4" />
