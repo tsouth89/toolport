@@ -178,6 +178,30 @@ function dedupeSecurity(events: SecurityEvent[]): SecurityEvent[] {
   return kept;
 }
 
+/** Collapse the loud notices to one row per finding identity (securityKey), keeping the
+ * newest occurrence and a count of how many times it has fired. `dedupeSecurity` only
+ * merges a short window (to fold a per-client burst); this merges across ALL time, so a
+ * finding that recurs hours apart - e.g. the same poison flag re-emitted after each
+ * baseline reset - reads as one "×N, last seen …" row instead of a confusing stack of
+ * identical notices. Dismissing the row clears the whole group (dismissal is by identity). */
+function collapseByIdentity(
+  events: SecurityEvent[],
+): { e: SecurityEvent; count: number }[] {
+  const groups = new Map<string, { e: SecurityEvent; count: number }>();
+  for (const e of events) {
+    const key = securityKey(e);
+    const g = groups.get(key);
+    if (!g) {
+      groups.set(key, { e, count: 1 });
+    } else {
+      g.count += 1;
+      // Keep the newest occurrence so the timestamp and any evidence excerpt are current.
+      if (e.ts > g.e.ts) g.e = e;
+    }
+  }
+  return [...groups.values()].sort((a, b) => b.e.ts - a.e.ts);
+}
+
 function loadDismissed(): Set<string> {
   try {
     const raw = localStorage.getItem(SECURITY_DISMISSED_KEY);
@@ -216,6 +240,8 @@ function SecurityNotices({
   onDismiss: (e: SecurityEvent) => void;
 }) {
   const [open, setOpen] = useState(true);
+  // One row per finding, newest first, with a recurrence count. See collapseByIdentity.
+  const collapsed = collapseByIdentity(events);
   return (
     <div className="mb-4 rounded-lg border border-warning/40 bg-warning/5 p-4">
       <button
@@ -226,7 +252,7 @@ function SecurityNotices({
         <ShieldAlert className="size-4 shrink-0 text-warning" />
         <h3 className="text-sm font-medium text-warning">Tool security notices</h3>
         <span className="rounded-full bg-warning/15 px-1.5 py-0.5 text-xs font-medium text-warning">
-          {events.length}
+          {collapsed.length}
         </span>
         <ChevronRight
           className={`ml-auto size-4 text-warning/70 transition-transform ${
@@ -244,10 +270,10 @@ function SecurityNotices({
             data). Dismiss the ones you've reviewed.
           </p>
           <ul className="space-y-1.5 text-xs">
-            {events.slice(0, 10).map((e) => {
+            {collapsed.slice(0, 10).map(({ e, count }) => {
               const badge = eventBadge(e);
               return (
-                <li key={renderKey(e)} className="flex flex-col gap-1">
+                <li key={securityKey(e)} className="flex flex-col gap-1">
                   <div className="flex items-center gap-2">
                     <span className={`rounded px-1.5 py-0.5 font-medium ${badge.cls}`}>
                       {badge.label}
@@ -258,7 +284,16 @@ function SecurityNotices({
                         ({e.signatures.join(", ")})
                       </span>
                     )}
+                    {count > 1 && (
+                      <span
+                        className="rounded-full bg-warning/15 px-1.5 py-0.5 font-medium text-warning"
+                        title={`Fired ${count} times`}
+                      >
+                        ×{count}
+                      </span>
+                    )}
                     <span className="ml-auto text-muted-foreground">
+                      {count > 1 ? "last " : ""}
                       {new Date(e.ts).toLocaleString(undefined, {
                         month: "short",
                         day: "numeric",
