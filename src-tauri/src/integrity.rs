@@ -478,6 +478,16 @@ pub fn all_baselines() -> BTreeMap<String, ToolBaseline> {
 }
 
 /// The set of quarantined tool names across ALL profiles, for the identity view's badge.
+/// A first-sight ("added") quarantine record from before we stopped blocking tools on
+/// first appearance. Dropped on read EVERYWHERE the quarantine is consumed - display,
+/// enforcement, and the per-profile load alike - so upgrading auto-unblocks these instead
+/// of stranding the user with dozens of re-approvals for destructive tools that only ever
+/// appeared, never changed. Enforcement of a real drift ("changed"/"poison") is untouched.
+/// See `apply_quarantine`, which no longer writes these in the first place.
+fn is_legacy_added(rec: &Value) -> bool {
+    rec.get("change").and_then(Value::as_str) == Some("added")
+}
+
 pub fn all_quarantined_names() -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let Some(dir) = crate::registry::conduit_dir() else {
@@ -498,7 +508,11 @@ pub fn all_quarantined_names() -> BTreeSet<String> {
         }
         if let Ok(s) = std::fs::read_to_string(entry.path()) {
             if let Ok(q) = serde_json::from_str::<Quarantine>(&s) {
-                out.extend(q.into_keys());
+                for (name, rec) in q {
+                    if !is_legacy_added(&rec) {
+                        out.insert(name);
+                    }
+                }
             }
         }
     }
@@ -529,10 +543,7 @@ fn load_quarantine(profile: Option<&str>) -> Quarantine {
         // is inventory, not a rug-pull, and the block/confirm/approval gates already cover
         // it at call time. Drop any such legacy `added` entries so they auto-unblock rather
         // than stranding the user with dozens of re-approvals for tools that never changed.
-        Ok(q) => q
-            .into_iter()
-            .filter(|(_, v)| v.get("change").and_then(Value::as_str) != Some("added"))
-            .collect(),
+        Ok(q) => q.into_iter().filter(|(_, v)| !is_legacy_added(v)).collect(),
         // Present but unparseable: do NOT silently return empty (that would re-expose
         // every quarantined tool with no signal — a fail-OPEN of the supply-chain
         // defense). We can't reconstruct the list, so preserve the corrupt file for
@@ -592,6 +603,9 @@ pub fn all_quarantined() -> Vec<Value> {
         if let Ok(s) = std::fs::read_to_string(entry.path()) {
             if let Ok(q) = serde_json::from_str::<Quarantine>(&s) {
                 for mut rec in q.into_values() {
+                    if is_legacy_added(&rec) {
+                        continue;
+                    }
                     rec["profile"] = json!(slug);
                     out.push(rec);
                 }
@@ -1366,16 +1380,32 @@ mod tests {
         assert!(quarantined(profile).is_empty(), "nothing blocked on first sight");
 
         // A legacy quarantine file that still holds an `added` entry auto-clears on load,
-        // so upgrading doesn't strand the user re-approving tools that never changed.
+        // so upgrading doesn't strand the user re-approving tools that never changed. Use a
+        // uniquely-named probe so the cross-profile assertions below are deterministic even
+        // when other tests' quarantine files exist in the same dir.
+        let probe = "srv__legacy_added_probe";
         let mut legacy = Quarantine::new();
         legacy.insert(
-            "srv__delete_all".to_string(),
-            json!({ "tool": "srv__delete_all", "server": "srv", "change": "added" }),
+            probe.to_string(),
+            json!({ "tool": probe, "server": "srv", "change": "added" }),
         );
         save_quarantine(profile, &legacy);
         assert!(
             quarantined(profile).is_empty(),
-            "legacy added entry is dropped on load"
+            "legacy added entry is dropped on the per-profile load"
+        );
+        // The app's cross-profile views read the files raw, so they must apply the same
+        // filter or the UI keeps showing tools the gateway no longer blocks (the bug the
+        // user hit: dozens of first-sight destructive tools still listed as quarantined).
+        assert!(
+            !all_quarantined_names().contains(probe),
+            "legacy added entry is dropped from the cross-profile enforcement set"
+        );
+        assert!(
+            !all_quarantined()
+                .iter()
+                .any(|r| r.get("tool").and_then(Value::as_str) == Some(probe)),
+            "legacy added entry is dropped from the cross-profile display list"
         );
 
         if let Some(p) = quarantine_path(profile) {
