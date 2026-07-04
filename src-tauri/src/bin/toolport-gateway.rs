@@ -33,7 +33,7 @@ use conduit_lib::inspect;
 use conduit_lib::integrity;
 use conduit_lib::registry::{self, Registry, ServerEntry};
 use conduit_lib::remote;
-use conduit_lib::router::{is_destructive, sanitize_segment, Router, ToolPolicy};
+use conduit_lib::router::{is_destructive, sanitize_segment, Reconnect, Router, ToolPolicy};
 use conduit_lib::approval;
 use conduit_lib::savings;
 use conduit_lib::searchtrace;
@@ -2234,12 +2234,17 @@ fn build_router(
         },
     };
 
-    // Connect concurrently so total time is the slowest server, not the sum.
+    // Connect concurrently so total time is the slowest server, not the sum. Each
+    // thread hands back the server spec + dirty flag alongside the connection so we can
+    // build a reconnect factory (used to re-spawn it if it dies mid-session).
     let handles: Vec<_> = servers
         .into_iter()
         .map(|server| {
             let dirty = Arc::clone(dirty);
-            std::thread::spawn(move || connect_one(&server, &dirty))
+            std::thread::spawn(move || {
+                let ds = connect_one(&server, &dirty);
+                (server, dirty, ds)
+            })
         })
         .collect();
 
@@ -2248,8 +2253,12 @@ fn build_router(
     // since they're applied as each server's tools are added.
     router.set_overrides(reg.tool_overrides.clone());
     for handle in handles {
-        if let Ok(Some(ds)) = handle.join() {
-            router.add(ds);
+        if let Ok((server, dirty, Some(ds))) = handle.join() {
+            // The same `connect_one` used for the initial spawn is the reconnect
+            // factory, so a re-spawn re-injects keychain secrets and re-handshakes
+            // exactly like a fresh connect.
+            let reconnect: Reconnect = Box::new(move || connect_one(&server, &dirty));
+            router.add_with_reconnect(ds, Some(reconnect));
         }
     }
     router

@@ -173,7 +173,18 @@ struct ServerSlot {
     /// Fast-fail state for a server that keeps failing (dead/hung), so we don't pay
     /// its full read timeout on every call once it's clearly down.
     breaker: Mutex<Breaker>,
+    /// Rebuild this server's connection from scratch (re-spawn a crashed stdio child
+    /// / re-dial a dropped remote). Invoked only on the breaker's half-open probe,
+    /// i.e. after the server has failed for a full cooldown, so a live server is never
+    /// needlessly re-spawned on a transient blip. `None` = not reconnectable (e.g. a
+    /// test fixture), in which case a dead server just stays fast-failed as before.
+    reconnect: Option<Reconnect>,
 }
+
+/// Factory that rebuilds a downstream connection on demand. Supplied by the gateway
+/// (which owns the registry + secret injection) so `router` stays free of spawn logic;
+/// returns `None` if the server still can't be reached.
+pub type Reconnect = Box<dyn Fn() -> Option<DownstreamServer> + Send + Sync>;
 
 /// After this many consecutive health failures, a server's circuit opens.
 const BREAKER_FAILURE_THRESHOLD: u32 = 3;
@@ -364,6 +375,13 @@ impl Router {
     }
 
     pub fn add(&mut self, server: DownstreamServer) {
+        self.add_with_reconnect(server, None);
+    }
+
+    /// Add a server whose connection can be rebuilt on demand (see [`Reconnect`]). The
+    /// router re-spawns it automatically if it dies mid-session; `add` is the
+    /// non-reconnectable variant kept for tests and callers with no factory.
+    pub fn add_with_reconnect(&mut self, server: DownstreamServer, reconnect: Option<Reconnect>) {
         let id = server.id.clone();
         self.index_server(&id, &server.tools, &server.resources, &server.prompts);
         let idx = self.servers.len();
@@ -371,6 +389,7 @@ impl Router {
             id: id.clone(),
             inner: Mutex::new(server),
             breaker: Mutex::new(Breaker::default()),
+            reconnect,
         }));
         self.by_id.insert(id, idx);
     }
@@ -501,18 +520,25 @@ impl Router {
         // Circuit breaker: a server that just failed repeatedly is fast-failed here,
         // BEFORE taking its `inner` lock, so a dead/hung server neither pays its full
         // read timeout again nor queues callers behind an in-flight timing-out call.
-        if let Some(remaining) = slot
-            .breaker
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .open_remaining(Instant::now())
-        {
-            return Err(format!(
-                "server '{}' is temporarily unavailable (too many recent failures; retrying in {}s)",
-                slot.id,
-                remaining.as_secs() + 1
-            ));
-        }
+        // A call that gets past this after the cooldown is the half-open PROBE: if it
+        // still fails, the server has been down for a full cooldown and we try to
+        // re-spawn it (below) rather than fast-failing forever.
+        let is_probe = {
+            let mut breaker = slot
+                .breaker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(remaining) = breaker.open_remaining(Instant::now()) {
+                return Err(format!(
+                    "server '{}' is temporarily unavailable (too many recent failures; retrying in {}s)",
+                    slot.id,
+                    remaining.as_secs() + 1
+                ));
+            }
+            // Cooldown elapsed but the failure streak is still at/over threshold: this
+            // call is the half-open probe of a tripped breaker.
+            breaker.consecutive_failures >= BREAKER_FAILURE_THRESHOLD
+        };
         let mut attempt = 0u32;
         loop {
             let result = {
@@ -538,6 +564,17 @@ impl Router {
                     // retries) counts toward the breaker; a normal error response does
                     // not disable the server.
                     if e.is_health_failure() {
+                        // The server has now failed for a full cooldown and the probe
+                        // confirms it's still down. Re-spawn the connection once and
+                        // retry: this recovers a crashed stdio child or a dropped remote
+                        // that the plain breaker would otherwise fast-fail forever (its
+                        // self-heal only fires when EVERY server is dead). Gated on the
+                        // probe so a live server is never re-spawned on a transient blip.
+                        if is_probe {
+                            if let Some(v) = self.reconnect_and_retry(slot, &mut f) {
+                                return v;
+                            }
+                        }
                         slot.breaker
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -547,6 +584,43 @@ impl Router {
                 }
             }
         }
+    }
+
+    /// Re-spawn a slot's downstream connection and retry the call once on the fresh
+    /// transport. Returns `Some(result)` when a reconnect was attempted (so the caller
+    /// stops), or `None` when the slot has no reconnect factory (fall through to the
+    /// normal breaker-failure path). The spawn runs without holding the `inner` lock so
+    /// a slow re-spawn doesn't wedge other callers to the same server.
+    fn reconnect_and_retry<T, F>(&self, slot: &Arc<ServerSlot>, f: &mut F) -> Option<Result<T, String>>
+    where
+        F: FnMut(&mut DownstreamServer) -> Result<T, TransportError>,
+    {
+        let factory = slot.reconnect.as_ref()?;
+        eprintln!("conduit: server '{}' is down; re-spawning it", slot.id);
+        let Some(fresh) = factory() else {
+            eprintln!("conduit: re-spawn of '{}' failed; leaving it fast-failed", slot.id);
+            return None; // still unreachable: fall through to record_failure
+        };
+        let retry = {
+            let mut server = slot.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            *server = fresh; // swap the live child/connection for the fresh one
+            f(&mut server)
+        };
+        let mut breaker = slot
+            .breaker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(match retry {
+            Ok(v) => {
+                eprintln!("conduit: server '{}' recovered after re-spawn", slot.id);
+                breaker.record_success();
+                Ok(v)
+            }
+            Err(e) => {
+                breaker.record_failure(Instant::now());
+                Err(e.to_string())
+            }
+        })
     }
 
     /// Forward an exposed tool call to its owning downstream server, using that
@@ -794,6 +868,71 @@ mod tests {
         // Mirror the gateway: load resources/prompts after connect.
         ds.load_resources_prompts();
         ds
+    }
+
+    /// Handshakes fine (so it can be constructed) but every `tools/call` reports the
+    /// connection is dead - i.e. a crashed/hung stdio child mid-session.
+    struct DeadOnCallTransport;
+    impl Transport for DeadOnCallTransport {
+        fn request(&mut self, method: &str, _params: Value) -> Result<Value, TransportError> {
+            match method {
+                "initialize" => Ok(json!({ "protocolVersion": "2025-06-18", "capabilities": {} })),
+                "tools/list" => Ok(json!({ "tools": [{ "name": "echo" }] })),
+                "tools/call" => Err(TransportError::Unavailable("broken pipe".into())),
+                _ => Ok(json!({})),
+            }
+        }
+        fn notify(&mut self, _method: &str, _params: Value) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    fn dead_slot(reconnect: Option<Reconnect>) -> Arc<ServerSlot> {
+        Arc::new(ServerSlot {
+            id: "s".into(),
+            inner: Mutex::new(
+                DownstreamServer::connect("s".into(), Box::new(DeadOnCallTransport)).unwrap(),
+            ),
+            breaker: Mutex::new(Breaker::default()),
+            reconnect,
+        })
+    }
+
+    #[test]
+    fn reconnect_and_retry_recovers_a_dead_server() {
+        let router = Router::new();
+        // Factory hands back a healthy connection, mirroring a re-spawn that succeeds.
+        let slot = dead_slot(Some(Box::new(|| Some(mock_server("s")))));
+        let out = router.reconnect_and_retry(&slot, &mut |ds| ds.call("echo", json!({})));
+        // The probe re-spawned the server and the retried call went through.
+        let value = out.expect("reconnect attempted").expect("call recovered");
+        assert!(serde_json::to_string(&value).unwrap().contains("s:echo"));
+        // The live connection was swapped in, so subsequent calls hit the healthy one.
+        assert!(slot.inner.lock().unwrap().call("echo", json!({})).is_ok());
+        // A successful recovery closes the breaker.
+        assert!(slot.breaker.lock().unwrap().open_remaining(Instant::now()).is_none());
+    }
+
+    #[test]
+    fn reconnect_and_retry_gives_up_when_respawn_fails() {
+        let router = Router::new();
+        // Factory still can't reach the server (returns None): no recovery, and the
+        // caller must fall through to record the failure.
+        let slot = dead_slot(Some(Box::new(|| None)));
+        let out: Option<Result<Value, String>> =
+            router.reconnect_and_retry(&slot, &mut |ds| ds.call("echo", json!({})));
+        assert!(out.is_none(), "a failed re-spawn falls through to the breaker");
+    }
+
+    #[test]
+    fn reconnect_and_retry_noops_without_a_factory() {
+        let router = Router::new();
+        // A slot with no reconnect factory (e.g. a test fixture) behaves as before:
+        // reconnect is skipped and the breaker path handles the failure.
+        let slot = dead_slot(None);
+        let out: Option<Result<Value, String>> =
+            router.reconnect_and_retry(&slot, &mut |ds| ds.call("echo", json!({})));
+        assert!(out.is_none());
     }
 
     #[test]
