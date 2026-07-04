@@ -1,9 +1,10 @@
 //! A minimal MCP server used as a test fixture for the gateway's downstream
 //! proxying. Exposes `echo` (returns its `text` arg), `add` (returns `a + b`),
-//! and `grow`. Calling `grow` adds a `greet` tool to the list and emits a
-//! `notifications/tools/list_changed`, simulating a server that changes its own
-//! tool set mid-session, so the gateway's live tool-refresh can be exercised.
-//! Self-contained: no dependency on conduit_lib.
+//! and `grow`, plus a baseline resource and prompt. Calling `grow` adds a `greet`
+//! tool, a `mock://grown` resource, and a `grown_prompt`, then emits the tools,
+//! resources, and prompts `list_changed` notifications, simulating a server that
+//! changes its own catalog mid-session so the gateway's live refresh can be
+//! exercised for all three kinds. Self-contained: no dependency on conduit_lib.
 
 use std::io::{BufRead, Write};
 
@@ -31,6 +32,26 @@ fn tool_list(grown: bool) -> Value {
     json!({ "tools": tools })
 }
 
+/// The advertised resource list. `grown` adds a second resource, modeling a
+/// runtime `resources/list_changed`.
+fn resource_list(grown: bool) -> Value {
+    let mut resources = vec![json!({ "uri": "mock://base", "name": "base" })];
+    if grown {
+        resources.push(json!({ "uri": "mock://grown", "name": "grown" }));
+    }
+    json!({ "resources": resources })
+}
+
+/// The advertised prompt list. `grown` adds a second prompt, modeling a runtime
+/// `prompts/list_changed`.
+fn prompt_list(grown: bool) -> Value {
+    let mut prompts = vec![json!({ "name": "hi", "description": "Say hi." })];
+    if grown {
+        prompts.push(json!({ "name": "grown_prompt", "description": "A newly grown prompt." }));
+    }
+    json!({ "prompts": prompts })
+}
+
 /// Handle one request, returning its response. `grown` is flipped on by a `grow`
 /// call so the next `tools/list` reflects the larger set.
 fn handle(req: &Value, grown: &mut bool) -> Option<Value> {
@@ -45,11 +66,17 @@ fn handle(req: &Value, grown: &mut bool) -> Option<Value> {
             id,
             json!({
                 "protocolVersion": "2025-06-18",
-                "capabilities": { "tools": { "listChanged": true } },
+                "capabilities": {
+                    "tools": { "listChanged": true },
+                    "resources": { "listChanged": true },
+                    "prompts": { "listChanged": true }
+                },
                 "serverInfo": { "name": "mock-mcp-server", "version": "0.1.0" }
             }),
         )),
         "tools/list" => Some(success(id, tool_list(*grown))),
+        "resources/list" => Some(success(id, resource_list(*grown))),
+        "prompts/list" => Some(success(id, prompt_list(*grown))),
         "tools/call" => {
             let params = req.get("params");
             let name = params.and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("");
@@ -106,12 +133,18 @@ fn main() {
             }
             let _ = out.flush();
         }
-        // A `grow` call just changed the tool set: announce it (after the call
-        // response) so a watching gateway re-fetches and surfaces the new tool.
+        // A `grow` call just changed all three lists: announce each (after the call
+        // response) so a watching gateway re-fetches and surfaces the new entries.
         if grown && !was_grown {
-            let notif = json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" });
-            if writeln!(out, "{notif}").is_err() {
-                break;
+            for method in [
+                "notifications/tools/list_changed",
+                "notifications/resources/list_changed",
+                "notifications/prompts/list_changed",
+            ] {
+                let notif = json!({ "jsonrpc": "2.0", "method": method });
+                if writeln!(out, "{notif}").is_err() {
+                    return;
+                }
             }
             let _ = out.flush();
         }

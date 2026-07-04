@@ -9,7 +9,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -220,23 +220,41 @@ pub trait Transport: Send {
     fn arm_tools_watch(&mut self) {}
 }
 
-/// True if `line` is a downstream `notifications/tools/list_changed` message: a
-/// JSON-RPC notification (a `method` of that name, no `id`). Lets the stdout drain
-/// spot when a server changes its own tool set mid-session.
-fn is_list_changed(line: &str) -> bool {
+/// Bitmask of which downstream list a `notifications/.../list_changed` announces.
+/// The gateway watches one flag per transport and, per set bit, re-queries that
+/// list and forwards the matching notification on to the client.
+pub mod change {
+    pub const TOOLS: u8 = 1;
+    pub const RESOURCES: u8 = 2;
+    pub const PROMPTS: u8 = 4;
+}
+
+/// Which downstream list `line` announces a change to (a [`change`] bit), or 0 if
+/// it isn't a `list_changed` notification. Lets the stdout drain spot when a server
+/// changes its own tools / resources / prompts mid-session.
+fn list_changed_kind(line: &str) -> u8 {
     // Cheap gate: skip the JSON parse for the overwhelming majority of lines
-    // (ordinary responses to our requests) that can't be this notification.
-    if !line.contains("tools/list_changed") {
-        return false;
+    // (ordinary responses to our requests) that can't be one of these.
+    if !line.contains("list_changed") {
+        return 0;
     }
-    serde_json::from_str::<Value>(line.trim())
+    match serde_json::from_str::<Value>(line.trim())
         .ok()
-        .and_then(|v| {
-            v.get("method")
-                .and_then(|m| m.as_str())
-                .map(|m| m == "notifications/tools/list_changed")
-        })
-        .unwrap_or(false)
+        .as_ref()
+        .and_then(|v| v.get("method"))
+        .and_then(|m| m.as_str())
+    {
+        Some("notifications/tools/list_changed") => change::TOOLS,
+        Some("notifications/resources/list_changed") => change::RESOURCES,
+        Some("notifications/prompts/list_changed") => change::PROMPTS,
+        _ => 0,
+    }
+}
+
+/// True if `line` is specifically a `tools/list_changed` notification.
+#[cfg(test)]
+fn is_list_changed(line: &str) -> bool {
+    list_changed_kind(line) == change::TOOLS
 }
 
 /// Forward one drained stdout line to the request loop, first flagging `dirty` if
@@ -245,12 +263,15 @@ fn is_list_changed(line: &str) -> bool {
 fn forward_line(
     line: String,
     tx: &Sender<String>,
-    dirty: &Option<Arc<AtomicBool>>,
+    dirty: &Option<Arc<AtomicU8>>,
     armed: &Arc<AtomicBool>,
 ) -> bool {
     if let Some(flag) = dirty {
-        if armed.load(Ordering::SeqCst) && is_list_changed(&line) {
-            flag.store(true, Ordering::SeqCst);
+        if armed.load(Ordering::SeqCst) {
+            let kind = list_changed_kind(&line);
+            if kind != 0 {
+                flag.fetch_or(kind, Ordering::SeqCst);
+            }
         }
     }
     tx.send(line).is_ok()
@@ -575,15 +596,16 @@ impl StdioTransport {
         Self::spawn_inner(command, args, env, None)
     }
 
-    /// Like [`spawn`], but flips `dirty` to true whenever the downstream server
-    /// emits `notifications/tools/list_changed` (after `arm_tools_watch`). The
-    /// gateway watches that flag and rebuilds, so a server changing its own tool
-    /// set mid-session reaches the client instead of being silently dropped.
+    /// Like [`spawn`], but sets a [`change`] bit in `dirty` whenever the downstream
+    /// server emits a `tools` / `resources` / `prompts` `list_changed` notification
+    /// (after `arm_tools_watch`). The gateway watches that flag and re-queries the
+    /// affected list, so a server changing its own catalog mid-session reaches the
+    /// client instead of being silently dropped.
     pub fn spawn_watched(
         command: &str,
         args: &[String],
         env: &[(String, String)],
-        dirty: Arc<AtomicBool>,
+        dirty: Arc<AtomicU8>,
     ) -> Result<Self, String> {
         Self::spawn_inner(command, args, env, Some(dirty))
     }
@@ -592,7 +614,7 @@ impl StdioTransport {
         command: &str,
         args: &[String],
         env: &[(String, String)],
-        dirty: Option<Arc<AtomicBool>>,
+        dirty: Option<Arc<AtomicU8>>,
     ) -> Result<Self, String> {
         // Supply-chain guard: refuse code-smuggling / container-escape args AND
         // code-injecting env vars before we hand the command to the OS. Applies to
@@ -1106,6 +1128,35 @@ impl DownstreamServer {
         self.transport.set_read_timeout(STDIO_READ_TIMEOUT);
     }
 
+    /// Re-fetch the resource list on the existing connection after the server
+    /// announced a `resources/list_changed`. Mirrors [`refresh_tools`]; best-effort
+    /// (an error keeps the previous list), and a no-op if the server never
+    /// advertised resources.
+    pub fn refresh_resources(&mut self) {
+        if !self.caps_resources {
+            return;
+        }
+        self.transport.set_read_timeout(STDIO_CONNECT_TIMEOUT);
+        if let Ok(r) = self.transport.request("resources/list", json!({})) {
+            self.resources = extract_array(&r, "resources");
+        }
+        self.transport.set_read_timeout(STDIO_READ_TIMEOUT);
+    }
+
+    /// Re-fetch the prompt list on the existing connection after the server
+    /// announced a `prompts/list_changed`. Mirrors [`refresh_tools`]; best-effort,
+    /// and a no-op if the server never advertised prompts.
+    pub fn refresh_prompts(&mut self) {
+        if !self.caps_prompts {
+            return;
+        }
+        self.transport.set_read_timeout(STDIO_CONNECT_TIMEOUT);
+        if let Ok(r) = self.transport.request("prompts/list", json!({})) {
+            self.prompts = extract_array(&r, "prompts");
+        }
+        self.transport.set_read_timeout(STDIO_READ_TIMEOUT);
+    }
+
     /// Fetch the resources and prompts the server advertised. Best-effort: an
     /// error or empty response just leaves the list empty. Kept out of `connect`
     /// so only the gateway (which actually proxies these) pays the cost.
@@ -1434,33 +1485,71 @@ mod tests {
     }
 
     #[test]
+    fn classifies_each_list_changed_kind() {
+        use super::{change, list_changed_kind};
+        assert_eq!(
+            list_changed_kind(r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#),
+            change::TOOLS
+        );
+        assert_eq!(
+            list_changed_kind(
+                r#"{"jsonrpc":"2.0","method":"notifications/resources/list_changed"}"#
+            ),
+            change::RESOURCES
+        );
+        assert_eq!(
+            list_changed_kind(
+                r#"{"jsonrpc":"2.0","method":"notifications/prompts/list_changed"}"#
+            ),
+            change::PROMPTS
+        );
+        // resources/updated is a different notification, not a list change.
+        assert_eq!(
+            list_changed_kind(r#"{"jsonrpc":"2.0","method":"notifications/resources/updated"}"#),
+            0
+        );
+        assert_eq!(list_changed_kind("not json"), 0);
+        assert_eq!(list_changed_kind(""), 0);
+    }
+
+    #[test]
     fn forward_line_flags_dirty_only_when_armed() {
-        use super::forward_line;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use super::{change, forward_line};
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
         use std::sync::Arc;
 
         let notif = r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
-        let dirty = Some(Arc::new(AtomicBool::new(false)));
+        let dirty = Some(Arc::new(AtomicU8::new(0)));
         let armed = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
 
         // Unarmed (still in the handshake window): the line is forwarded but the
         // change is not acted on.
         assert!(forward_line(notif.to_string(), &tx, &dirty, &armed));
-        assert!(!dirty.as_ref().unwrap().load(Ordering::SeqCst));
+        assert_eq!(dirty.as_ref().unwrap().load(Ordering::SeqCst), 0);
         assert_eq!(rx.recv().unwrap(), notif);
 
-        // Armed: the same notification now flips the dirty flag.
+        // Armed: the same notification now sets the TOOLS bit.
         armed.store(true, Ordering::SeqCst);
         assert!(forward_line(notif.to_string(), &tx, &dirty, &armed));
-        assert!(dirty.as_ref().unwrap().load(Ordering::SeqCst));
+        assert_eq!(dirty.as_ref().unwrap().load(Ordering::SeqCst), change::TOOLS);
         assert_eq!(rx.recv().unwrap(), notif);
+
+        // A resources/list_changed sets the RESOURCES bit alongside it (OR, not
+        // overwrite), so distinct changes between watcher ticks aren't lost.
+        let res_notif = r#"{"jsonrpc":"2.0","method":"notifications/resources/list_changed"}"#;
+        assert!(forward_line(res_notif.to_string(), &tx, &dirty, &armed));
+        assert_eq!(
+            dirty.as_ref().unwrap().load(Ordering::SeqCst),
+            change::TOOLS | change::RESOURCES
+        );
+        assert_eq!(rx.recv().unwrap(), res_notif);
 
         // An ordinary line is always forwarded and never flags a change.
         let resp = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
-        let dirty2 = Some(Arc::new(AtomicBool::new(false)));
+        let dirty2 = Some(Arc::new(AtomicU8::new(0)));
         assert!(forward_line(resp.to_string(), &tx, &dirty2, &armed));
-        assert!(!dirty2.as_ref().unwrap().load(Ordering::SeqCst));
+        assert_eq!(dirty2.as_ref().unwrap().load(Ordering::SeqCst), 0);
         assert_eq!(rx.recv().unwrap(), resp);
 
         // A closed receiver makes forward_line report "stop".

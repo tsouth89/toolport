@@ -367,6 +367,32 @@ impl Router {
         self.rebuild_aggregation();
     }
 
+    /// Re-query every live server's resource list (a downstream announced a
+    /// `resources/list_changed`) and rebuild the exposed aggregation in place.
+    /// Mirrors [`refresh_tools`].
+    pub fn refresh_resources(&mut self) {
+        for slot in &self.servers {
+            slot.inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refresh_resources();
+        }
+        self.rebuild_aggregation();
+    }
+
+    /// Re-query every live server's prompt list (a downstream announced a
+    /// `prompts/list_changed`) and rebuild the exposed aggregation in place.
+    /// Mirrors [`refresh_tools`].
+    pub fn refresh_prompts(&mut self) {
+        for slot in &self.servers {
+            slot.inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refresh_prompts();
+        }
+        self.rebuild_aggregation();
+    }
+
     /// Replace the quarantine set and re-derive the exposed aggregation so newly
     /// quarantined tools are hidden (or re-approved ones restored) without re-querying
     /// downstream. Cheap: it only re-applies the policy to the cached tool lists.

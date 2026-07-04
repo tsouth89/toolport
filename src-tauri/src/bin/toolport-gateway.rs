@@ -20,7 +20,7 @@
 
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use conduit_lib::audit;
 use conduit_lib::clients;
-use conduit_lib::downstream::{DownstreamServer, StdioTransport, PROTOCOL_VERSION};
+use conduit_lib::downstream::{self, DownstreamServer, StdioTransport, PROTOCOL_VERSION};
 use conduit_lib::inspect;
 use conduit_lib::integrity;
 use conduit_lib::registry::{self, Registry, ServerEntry};
@@ -2194,7 +2194,7 @@ fn build_router(
     reg: &Registry,
     profile: Option<&str>,
     http_mode: bool,
-    dirty: &Arc<AtomicBool>,
+    dirty: &Arc<AtomicU8>,
 ) -> Router {
     // In HTTP mode one process serves every registered client, so connect the
     // union of all their profiles (per-request filtering scopes each one down).
@@ -2257,7 +2257,7 @@ fn build_router(
 
 /// Connect a single enabled server (stdio with keychain secret injection, or
 /// remote with refresh-aware auth). Returns None on failure.
-fn connect_one(server: &ServerEntry, dirty: &Arc<AtomicBool>) -> Option<DownstreamServer> {
+fn connect_one(server: &ServerEntry, dirty: &Arc<AtomicU8>) -> Option<DownstreamServer> {
     let result = if let Some(command) = &server.command {
         let mut env: Vec<(String, String)> = Vec::new();
         for e in &server.env {
@@ -2311,14 +2311,17 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 }
 
 fn notify_tools_changed(stdout: &Arc<Mutex<std::io::Stdout>>) {
+    notify_list_changed(stdout, "notifications/tools/list_changed");
+}
+
+/// Emit a bare JSON-RPC `list_changed` notification to the client so it re-fetches
+/// the named list. Used for resources/prompts (which have no persisted cache) and,
+/// via `notify_tools_changed`, for tools.
+fn notify_list_changed(stdout: &Arc<Mutex<std::io::Stdout>>, method: &str) {
     let mut out = stdout
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _ = writeln!(
-        out,
-        "{}",
-        json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" })
-    );
+    let _ = writeln!(out, "{}", json!({ "jsonrpc": "2.0", "method": method }));
     let _ = out.flush();
 }
 
@@ -2508,7 +2511,7 @@ fn watch_registry(
     cached_tools: Arc<Mutex<Vec<Value>>>,
     profile: Option<String>,
     http_mode: bool,
-    downstream_dirty: Arc<AtomicBool>,
+    downstream_dirty: Arc<AtomicU8>,
 ) {
     eprintln!("toolport: watching registry at {}", path.display());
     let mut last = mtime(&path);
@@ -2517,10 +2520,10 @@ fn watch_registry(
         // A live downstream server that changed its own tool set (sent
         // tools/list_changed) sets this. Swap before acting so a notification
         // arriving mid-refresh is caught on the next tick rather than lost.
-        let downstream_changed = downstream_dirty.swap(false, Ordering::SeqCst);
+        let downstream_changed = downstream_dirty.swap(0, Ordering::SeqCst);
         let current = mtime(&path);
         let file_changed = current != last;
-        if !file_changed && !downstream_changed {
+        if !file_changed && downstream_changed == 0 {
             continue;
         }
 
@@ -2553,23 +2556,46 @@ fn watch_registry(
             persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
             eprintln!("toolport: registry changed, sent tools/list_changed");
         } else {
-            // A live server announced a tool-list change. Re-query the existing
-            // connections in place rather than re-spawning: a runtime or
-            // session-scoped change (the usual reason a server sends this) would
-            // be lost by a fresh process that never saw it.
-            let tools = {
-                let mut guard = router
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                // Re-query in place on the published router (make_mut forks it only if a
-                // request still holds the prior Arc), keeping live connections.
-                let r = Arc::make_mut(&mut guard);
-                r.refresh_tools();
-                r.aggregated_tools()
-            };
-            let tools = requarantine_if_needed(&registry, &router, tools, profile.as_deref());
-            persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
-            eprintln!("toolport: downstream tools/list_changed, refreshed + sent");
+            // One or more live servers announced a list change. Re-query only the
+            // affected list(s) in place rather than re-spawning: a runtime or
+            // session-scoped change (the usual reason a server sends this) would be
+            // lost by a fresh process that never saw it. Each kind forwards its own
+            // notification so the client re-fetches exactly what changed. (make_mut
+            // forks the router only if a request still holds the prior Arc, keeping
+            // live connections.)
+            if downstream_changed & downstream::change::TOOLS != 0 {
+                let tools = {
+                    let mut guard = router
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let r = Arc::make_mut(&mut guard);
+                    r.refresh_tools();
+                    r.aggregated_tools()
+                };
+                let tools = requarantine_if_needed(&registry, &router, tools, profile.as_deref());
+                persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
+                eprintln!("toolport: downstream tools/list_changed, refreshed + sent");
+            }
+            if downstream_changed & downstream::change::RESOURCES != 0 {
+                {
+                    let mut guard = router
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    Arc::make_mut(&mut guard).refresh_resources();
+                }
+                notify_list_changed(&stdout, "notifications/resources/list_changed");
+                eprintln!("toolport: downstream resources/list_changed, refreshed + sent");
+            }
+            if downstream_changed & downstream::change::PROMPTS != 0 {
+                {
+                    let mut guard = router
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    Arc::make_mut(&mut guard).refresh_prompts();
+                }
+                notify_list_changed(&stdout, "notifications/prompts/list_changed");
+                eprintln!("toolport: downstream prompts/list_changed, refreshed + sent");
+            }
         }
     }
 }
@@ -2596,7 +2622,7 @@ struct GatewayState {
     cached_tools: Arc<Mutex<Vec<Value>>>,
     stdout: Arc<Mutex<std::io::Stdout>>,
     ready: Arc<AtomicBool>,
-    downstream_dirty: Arc<AtomicBool>,
+    downstream_dirty: Arc<AtomicU8>,
     lazy: bool,
     profile: Option<String>,
     /// True when this process is the HTTP/OpenAPI bridge (vs a stdio client's
@@ -3422,7 +3448,7 @@ fn main() {
     // Flipped by any downstream transport that emits notifications/tools/list_changed.
     // The registry watcher polls it and rebuilds, so a server that changes its own
     // tool set mid-session propagates to the client instead of being dropped.
-    let downstream_dirty = Arc::new(AtomicBool::new(false));
+    let downstream_dirty = Arc::new(AtomicU8::new(0));
     glog(&format!(
         "loaded tool cache: {} tools",
         cached_tools
@@ -3643,7 +3669,7 @@ mod tests {
             cached_tools: Arc::new(Mutex::new(Vec::new())),
             stdout: Arc::new(Mutex::new(std::io::stdout())),
             ready: Arc::new(AtomicBool::new(true)),
-            downstream_dirty: Arc::new(AtomicBool::new(false)),
+            downstream_dirty: Arc::new(AtomicU8::new(0)),
             lazy,
             profile: None,
             http: true,
