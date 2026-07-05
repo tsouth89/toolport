@@ -52,6 +52,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Production dependency audit
+        run: npm run audit:prod
+
       # Enforce consistent formatting before anything else — fails fast on
       # formatting-only issues so the contributor doesn't wait for a full build.
       - name: Check formatting
@@ -73,4 +76,4 @@ jobs:
       # tests too; checking only that the binary compiled let a gateway test fail
       # silently, so run them.
       - name: Rust tests (lib + binaries)
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --bins
+        run: npm run test:rust

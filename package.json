@@ -18,6 +18,9 @@
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --lib --bins",
+    "test:rust:windows": "powershell -ExecutionPolicy Bypass -File scripts/test-rust-windows.ps1",
+    "audit:prod": "npm audit --omit=dev",
     "prepare": "husky"
   },
   "dependencies": {

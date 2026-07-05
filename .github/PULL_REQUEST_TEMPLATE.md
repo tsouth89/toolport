@@ -8,8 +8,10 @@
 
 <!-- How did you verify this? -->
 
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` passes
-- [ ] `npx tsc --noEmit && npm run build` passes
+- [ ] `npm run build` passes
+- [ ] `npm run test` passes
+- [ ] `npm run audit:prod` passes
+- [ ] `npm run test:rust` passes (`npm run test:rust:windows` on Windows if the debug gateway binary is locked)
 - [ ] Ran the app (`npm run tauri dev`) and checked the change by hand
 
 ## Notes

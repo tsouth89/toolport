@@ -22,6 +22,7 @@ import {
   teamPush,
   setServerEnabled,
 } from "@/lib/api";
+import { teamUrlError } from "@/lib/teamUrl";
 import { isEnabled, activeProfile } from "@/lib/types";
 import type { Registry } from "@/lib/types";
 
@@ -94,8 +95,12 @@ export function TeamsView({
 
   const onConnect = () =>
     run("connect", async () => {
-      if (!serverUrl.trim() || !inviteCode.trim()) {
-        throw new Error("Server URL and invite code are both required.");
+      const urlError = teamUrlError(serverUrl);
+      if (urlError) {
+        throw new Error(urlError);
+      }
+      if (!inviteCode.trim()) {
+        throw new Error("Invite code is required.");
       }
       const r = await teamConnect(
         serverUrl.trim(),
