@@ -603,6 +603,25 @@ pub struct StdioTransport {
     armed: Arc<AtomicBool>,
 }
 
+/// Tolerate a config that packed the whole invocation into `command` (e.g.
+/// `"npx -y @scope/pkg"`) with empty `args`. Left as-is, the OS is asked to spawn an
+/// executable literally named that whole string and fails with a cryptic "cannot find
+/// the path specified". Only splits when args are empty AND the first token is a bare
+/// program name (no `/` or `\`), so a genuine executable path — even one with spaces —
+/// and any config that already passes args separately are left untouched. The split
+/// output is what gets screened and spawned, so the real inner program is still guarded.
+pub fn normalize_invocation(command: &str, args: &[String]) -> (String, Vec<String>) {
+    if args.is_empty() {
+        let mut parts = command.split_whitespace();
+        let first = parts.next().unwrap_or("");
+        let rest: Vec<String> = parts.map(String::from).collect();
+        if !rest.is_empty() && !first.contains('/') && !first.contains('\\') {
+            return (first.to_string(), rest);
+        }
+    }
+    (command.to_string(), args.to_vec())
+}
+
 impl StdioTransport {
     /// Spawn a downstream server without watching for its tool-list changes.
     /// Used by one-shot callers (the app's health probe and playground) that
@@ -631,6 +650,11 @@ impl StdioTransport {
         env: &[(String, String)],
         dirty: Option<Arc<AtomicU8>>,
     ) -> Result<Self, String> {
+        // Split a command that packed its args into the `command` string, so a
+        // mis-shaped config spawns correctly instead of erroring cryptically.
+        let (command_owned, args_owned) = normalize_invocation(command, args);
+        let command = command_owned.as_str();
+        let args = args_owned.as_slice();
         // Supply-chain guard: refuse code-smuggling / container-escape args AND
         // code-injecting env vars before we hand the command to the OS. Applies to
         // every spawn path (probe, playground, gateway) so a booby-trapped config
@@ -1693,6 +1717,34 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 2);
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn normalize_invocation_splits_unsplit_command() {
+        use super::normalize_invocation;
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // The bug case: whole invocation packed into `command`, empty args.
+        assert_eq!(
+            normalize_invocation("npx -y @modelcontextprotocol/server-github", &[]),
+            ("npx".into(), s(&["-y", "@modelcontextprotocol/server-github"])),
+        );
+        // Args with slashes (a package path or a filesystem root) survive the split.
+        assert_eq!(
+            normalize_invocation("npx -y @scope/fs /srv", &[]),
+            ("npx".into(), s(&["-y", "@scope/fs", "/srv"])),
+        );
+        // Already-split configs are untouched.
+        assert_eq!(
+            normalize_invocation("npx", &s(&["-y", "pkg"])),
+            ("npx".into(), s(&["-y", "pkg"])),
+        );
+        // A bare command with no args stays bare.
+        assert_eq!(normalize_invocation("uvx", &[]), ("uvx".into(), vec![]));
+        // A real executable path (has a slash) is never split, even with spaces.
+        assert_eq!(
+            normalize_invocation("/usr/bin/my tool", &[]),
+            ("/usr/bin/my tool".into(), vec![]),
+        );
     }
 
     #[test]
