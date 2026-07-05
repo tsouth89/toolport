@@ -312,6 +312,11 @@ pub struct TeamConnection {
     /// Last config version pulled, for change display and ETag polling.
     #[serde(default)]
     pub last_version: i64,
+    /// The exact ETag the server returned on the last pull. Echoed back as If-None-Match
+    /// so the 304 fast-path works even for access-restricted members, whose server ETag
+    /// carries a per-member suffix that a reconstructed "v{n}" would never match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_etag: Option<String>,
 }
 
 /// Settings for embedding-based search re-ranking. The embedding API key, if the
