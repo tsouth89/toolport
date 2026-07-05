@@ -413,6 +413,10 @@ fn tool_prefix(t: &Value) -> String {
 /// Field weights: a token hit in the tool NAME counts far more than in its description.
 const NAME_W: f64 = 3.0;
 const DESC_W: f64 = 1.0;
+/// How much a fully-on-the-nose tool name (query explains all its tokens) is boosted
+/// over a longer sibling that merely contains the same words. Small: it only tips
+/// near-ties toward the more specific tool, never overrides a stronger keyword signal.
+const NAME_SPECIFICITY_W: f64 = 0.35;
 
 /// Split a camelCase/PascalCase word into lowercased pieces ("listProjects" -> [list, projects]).
 fn split_camel(word: &str) -> Vec<String> {
@@ -715,6 +719,25 @@ fn search_catalog_with(
                         }
                     }
                     score += best;
+                }
+                // Specificity boost: a tool whose NAME is "on the nose" for the query
+                // (few tokens beyond what the query explains) beats a longer sibling that
+                // merely contains the same words. Without this the ranker ties
+                // `create_customer` with `create_customer_session` for "create customer",
+                // since both name-match every query token. Multiplicative so it only
+                // separates near-ties, never overrides a stronger IDF signal; skipped on
+                // a zero score so non-matches stay out.
+                if score > 0.0 && !name_set.is_empty() {
+                    let explained = name_set
+                        .iter()
+                        .filter(|nt| {
+                            q_tokens.iter().any(|qt| {
+                                qt == *nt || synonym_group(qt).contains(&nt.as_str())
+                            })
+                        })
+                        .count();
+                    let coverage = explained as f64 / name_set.len() as f64;
+                    score *= 1.0 + NAME_SPECIFICITY_W * coverage;
                 }
                 (score, *t)
             })
@@ -4509,6 +4532,84 @@ mod tests {
         assert!(hits.iter().any(|h| h["name"] == "rc__list_offerings"));
         assert!(!hits.iter().any(|h| h["name"] == "stripe__list_charges"));
         assert_eq!(total, 2);
+    }
+
+    /// Data-driven recall measurement (not a pass/fail unit test): set
+    /// STRIPE_TOOLS_JSON + STRIPE_INTENTS_JSON to fixture paths and run with
+    /// `--nocapture` to print recall@k of the REAL lexical ranker over a generated
+    /// tool set. No-ops (passes) when the env vars are unset, so CI is unaffected.
+    #[test]
+    fn recall_report() {
+        let (Ok(tp), Ok(ip)) = (
+            std::env::var("STRIPE_TOOLS_JSON"),
+            std::env::var("STRIPE_INTENTS_JSON"),
+        ) else {
+            return;
+        };
+        let server = std::env::var("RECALL_SERVER").unwrap_or_else(|_| "stripe".into());
+        let limit: usize = std::env::var("RECALL_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(25);
+        let tools: Vec<Value> =
+            serde_json::from_str(&std::fs::read_to_string(&tp).unwrap()).unwrap();
+        let intents: Vec<Value> =
+            serde_json::from_str(&std::fs::read_to_string(&ip).unwrap()).unwrap();
+        let (mut r5, mut r10, mut r25) = (0usize, 0usize, 0usize);
+        let mut misses: Vec<String> = Vec::new();
+        println!(
+            "\n=== recall @ limit {limit} over {} tools, {} intents (server={server}) ===",
+            tools.len(),
+            intents.len()
+        );
+        for it in &intents {
+            let q = it["q"].as_str().unwrap_or("");
+            let oks: Vec<&str> = it["ok"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            let (hits, total) = search_catalog(&tools, q, Some(server.as_str()), limit);
+            let names: Vec<&str> = hits
+                .iter()
+                .filter_map(|h| h.get("name").and_then(|v| v.as_str()))
+                .collect();
+            let rank = oks
+                .iter()
+                .filter_map(|o| names.iter().position(|n| n == o))
+                .min();
+            match rank {
+                Some(r) => {
+                    if r < 5 {
+                        r5 += 1;
+                    }
+                    if r < 10 {
+                        r10 += 1;
+                    }
+                    r25 += 1;
+                    println!("  #{:<2} {:<34} -> {}", r + 1, q, names[r]);
+                }
+                None => {
+                    misses.push(q.to_string());
+                    println!(
+                        "  MISS   {:<34} (matched {total} tools; target not in top {limit})",
+                        q
+                    );
+                }
+            }
+        }
+        let n = intents.len().max(1) as f64;
+        println!(
+            "\n  recall@5:  {r5}/{}  ({:.0}%)\n  recall@10: {r10}/{}  ({:.0}%)\n  recall@{limit}: {r25}/{}  ({:.0}%)",
+            intents.len(),
+            100.0 * r5 as f64 / n,
+            intents.len(),
+            100.0 * r10 as f64 / n,
+            intents.len(),
+            100.0 * r25 as f64 / n
+        );
+        if !misses.is_empty() {
+            println!("  misses: {misses:?}");
+        }
     }
 
     #[test]
