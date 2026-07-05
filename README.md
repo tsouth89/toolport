@@ -91,13 +91,11 @@ fixes both.
 - **Tool integrity (rug-pull + poisoning detection).** Toolport fingerprints each tool
   when you connect a server and flags it if the definition later changes or a server
   quietly adds one (a "rug pull"), or if a description or schema carries injection-like
-  content ("tool poisoning"). Detection only, on by default, entirely local
-  ([details](docs/specs/mcp-integrity.md)).
+  content ("tool poisoning"). Detection only, on by default, entirely local.
 - **Content defense (anti-agentjacking).** When a tool _returns_ untrusted content (a
   Sentry error, a web page, an issue body) with injection-like instructions, Toolport
   flags it and marks it as external data, not instructions, the separation that blunts
-  indirect prompt injection. Never blocks, on by default
-  ([details](docs/specs/content-defense.md)).
+  indirect prompt injection. Never blocks, on by default.
 - **Governance and audit.** Toggle any tool on or off, or hide every destructive tool
   from every client with one switch. Every call is recorded with per-server latency and
   error rates.
@@ -216,8 +214,7 @@ gateway entry, written for you when you connect a client:
 at any `/v1/embeddings` endpoint (LM Studio, Ollama, or a cloud provider) to blend in
 embedding similarity for paraphrased queries: `CONDUIT_SEMANTIC=on`,
 `CONDUIT_EMBED_ENDPOINT`, `CONDUIT_EMBED_MODEL`, plus optional `CONDUIT_EMBED_KEY`
-(endpoint auth) and `CONDUIT_EMBED_BLEND`. See
-[docs/specs/semantic-search.md](docs/specs/semantic-search.md).
+(endpoint auth) and `CONDUIT_EMBED_BLEND`.
 
 **Multiple accounts for the same service.** Credentials belong to a server, not a
 profile. To use, say, a work and a personal GitHub, add GitHub twice as two

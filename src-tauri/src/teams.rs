@@ -31,6 +31,36 @@ fn base(server_url: &str) -> String {
     server_url.trim_end_matches('/').to_string()
 }
 
+/// Team bearer tokens must not ride over cleartext except to a local dev server.
+fn require_secure_team_url(server_url: &str) -> Result<(), String> {
+    let lower = server_url.trim().to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return Ok(());
+    }
+    if !lower.starts_with("http://") {
+        return Err("team server URL must start with https://".to_string());
+    }
+
+    let host = crate::oauth::host_of_url(server_url).unwrap_or_default();
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".localhost")
+        || host.parse::<std::net::IpAddr>().ok().map_or(false, |ip| match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback(),
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6
+                        .to_ipv4_mapped()
+                        .map(|v4| v4.is_loopback())
+                        .unwrap_or(false)
+            }
+        });
+    if loopback {
+        Ok(())
+    } else {
+        Err("team server URL must use https:// unless it is loopback HTTP for local development".to_string())
+    }
+}
+
 /// A ureq agent with a connect + read timeout. The team commands run on the Tauri
 /// command thread, so a slow or black-holed team server must not hang the UI: bare
 /// `ureq::get/post/put` have no timeout, this does.
@@ -51,6 +81,7 @@ pub struct Joined {
 
 /// Redeem an invite code, returning the member token, team id, and role.
 pub fn join(server_url: &str, invite_code: &str, member_name: Option<&str>) -> Result<Joined, String> {
+    require_secure_team_url(server_url)?;
     let url = format!("{}/join", base(server_url));
     let body = serde_json::json!({ "invite_code": invite_code, "member_name": member_name });
     let resp = agent().post(&url).send_json(body).map_err(stringify)?;
@@ -74,6 +105,7 @@ pub fn pull_config(
     token: &str,
     last_version: i64,
 ) -> Result<Option<(i64, Value)>, String> {
+    require_secure_team_url(server_url)?;
     let url = format!("{}/teams/{}/config", base(server_url), team_id);
     let etag = format!("\"v{last_version}\"");
     let req = agent()
@@ -122,6 +154,7 @@ pub enum MembershipCheck {
 /// 401/403 (the authoritative "you're no longer a member" signal); any transport
 /// error is surfaced as `Err` so a flaky network doesn't masquerade as removal.
 pub fn fetch_me(server_url: &str, team_id: &str, token: &str) -> Result<MembershipCheck, String> {
+    require_secure_team_url(server_url)?;
     let url = format!("{}/teams/{}/me", base(server_url), team_id);
     match agent()
         .get(&url)
@@ -146,6 +179,7 @@ pub fn fetch_me(server_url: &str, team_id: &str, token: &str) -> Result<Membersh
 
 /// Admin push of the team config. Returns the new version.
 pub fn push_config(server_url: &str, team_id: &str, token: &str, config: &Value) -> Result<i64, String> {
+    require_secure_team_url(server_url)?;
     let url = format!("{}/teams/{}/config", base(server_url), team_id);
     let body = serde_json::json!({ "config": config });
     let resp = agent()
@@ -743,6 +777,17 @@ mod tests {
         assert_eq!(sp.get("forceContentDefense").and_then(Value::as_bool), Some(true));
         assert_eq!(sp.get("forceQuarantineOnDrift").and_then(Value::as_bool), Some(true));
         assert_eq!(sp.get("forceHumanApproval").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn team_url_requires_https_except_loopback_http() {
+        assert!(require_secure_team_url("https://teams.example.com").is_ok());
+        assert!(require_secure_team_url("http://127.0.0.1:8787").is_ok());
+        assert!(require_secure_team_url("http://localhost:8787").is_ok());
+        assert!(require_secure_team_url("http://[::1]:8787").is_ok());
+        assert!(require_secure_team_url("http://192.168.1.10:8787").is_err());
+        assert!(require_secure_team_url("http://teams.example.com").is_err());
+        assert!(require_secure_team_url("teams.example.com").is_err());
     }
 
     #[test]

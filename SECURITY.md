@@ -22,11 +22,12 @@ from the [Releases](https://github.com/tsouth89/toolport/releases) page.
 
 ## Security design
 
-- **Local-first.** Toolport runs entirely on your machine. The desktop app is a
-  manager; the gateway is a local process each AI client spawns over stdio. There
-  is **no Toolport server, account, or telemetry**, nothing phones home. The only
-  network traffic is between the gateway and the upstream MCP servers _you_
-  configure.
+- **Local-first.** Toolport's core gateway runs on your machine. The desktop app
+  is a manager; the gateway is a local process each AI client spawns over stdio.
+  There is no telemetry. Routine tool traffic is between the gateway and the
+  upstream MCP servers _you_ configure. Optional hosted features make explicit
+  user-initiated requests: shared setup links use `toolport.app`, and Teams uses
+  the team server URL you choose.
 - **Secrets in the OS keychain.** API keys and OAuth tokens are stored in the
   platform keychain (macOS Keychain, Windows Credential Manager, Linux Secret
   Service), never in plaintext config files and never written to logs.
