@@ -281,7 +281,7 @@ export function TeamsView({
             <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Invite code</span>
               <Input
-                placeholder="ci_..."
+                placeholder="Paste your invite code"
                 value={inviteCode}
                 onChange={(e) => setInviteCode(e.target.value)}
               />
