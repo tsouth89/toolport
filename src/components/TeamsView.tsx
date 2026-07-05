@@ -376,12 +376,16 @@ export function TeamsView({
             ) : (
               <>
                 {(() => {
-                  const review = teamServers.filter(
-                    (s) => !(registry ? isEnabled(registry, s.id) : false),
-                  );
-                  const active = teamServers.filter(
-                    (s) => registry && isEnabled(registry, s.id),
-                  );
+                  // Attention-needed servers first (their own section), then the rest, each
+                  // sorted alphabetically so the list is predictable to scan.
+                  const byName = (a: (typeof teamServers)[number], b: typeof a) =>
+                    a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+                  const review = teamServers
+                    .filter((s) => !(registry ? isEnabled(registry, s.id) : false))
+                    .sort(byName);
+                  const active = teamServers
+                    .filter((s) => registry && isEnabled(registry, s.id))
+                    .sort(byName);
                   return (
                     <>
                       {review.length > 0 && (
