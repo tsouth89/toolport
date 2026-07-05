@@ -371,7 +371,14 @@ fn team_export(reg: &Registry) -> Value {
     let servers: Vec<Value> = reg
         .servers
         .iter()
-        .filter(|s| s.source.as_deref().map(|x| !x.starts_with("team:")).unwrap_or(true))
+        // The member's own servers only: exclude team-sourced ones (avoid echoing the
+        // team's set back), AND Toolport's own gateway entry — it's the local infra
+        // process, not a shareable MCP server, so pushing it added a bogus
+        // "conduit-gateway.exe" server to every teammate.
+        .filter(|s| {
+            let own = s.source.as_deref().map(|x| !x.starts_with("team:")).unwrap_or(true);
+            own && !crate::clients::is_gateway_server(s)
+        })
         .map(|s| {
             serde_json::json!({
                 "id": s.id,
@@ -796,6 +803,43 @@ mod tests {
         assert_eq!(sp.get("forceContentDefense").and_then(Value::as_bool), Some(true));
         assert_eq!(sp.get("forceQuarantineOnDrift").and_then(Value::as_bool), Some(true));
         assert_eq!(sp.get("forceHumanApproval").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn team_export_excludes_gateway_and_team_servers() {
+        let mut r = base_registry(); // has "mine" (manual)
+        // Toolport's own gateway entry: infra, must never be pushed to the team.
+        r.servers.push(ServerEntry {
+            id: "toolport".into(),
+            name: "Toolport".into(),
+            transport: "stdio".into(),
+            command: Some(r"C:\projects\personal\conduit\src-tauri\target\debug\conduit-gateway.exe".into()),
+            args: vec![],
+            env: vec![],
+            url: None,
+            source: Some("manual".into()),
+            disabled_tools: vec![],
+        });
+        // A team-sourced server: excluded too (don't echo the team's own set back).
+        r.servers.push(ServerEntry {
+            id: "shared".into(),
+            name: "Shared".into(),
+            transport: "http".into(),
+            command: None,
+            args: vec![],
+            env: vec![],
+            url: Some("https://example.com/mcp".into()),
+            source: Some("team:abc".into()),
+            disabled_tools: vec![],
+        });
+        let cfg = team_export(&r);
+        let ids: Vec<&str> = cfg["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["mine"], "only the member's own non-gateway server is pushed");
     }
 
     #[test]
