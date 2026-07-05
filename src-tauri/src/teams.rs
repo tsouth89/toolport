@@ -104,10 +104,16 @@ pub fn pull_config(
     team_id: &str,
     token: &str,
     last_version: i64,
-) -> Result<Option<(i64, Value)>, String> {
+    last_etag: Option<&str>,
+) -> Result<Option<(i64, Value, Option<String>)>, String> {
     require_secure_team_url(server_url)?;
     let url = format!("{}/teams/{}/config", base(server_url), team_id);
-    let etag = format!("\"v{last_version}\"");
+    // Echo the exact ETag the server last gave us. A restricted member's ETag carries a
+    // per-member access suffix ("v{n}-m{hash}"), so a reconstructed "v{n}" would never
+    // 304 for them; fall back to "v{n}" only before we've ever stored one.
+    let etag = last_etag
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("\"v{last_version}\""));
     let req = agent()
         .get(&url)
         .set("authorization", &format!("Bearer {token}"))
@@ -117,6 +123,8 @@ pub fn pull_config(
             if resp.status() == 304 {
                 return Ok(None);
             }
+            // Capture the fresh ETag before the body consumes `resp`.
+            let new_etag = resp.header("etag").map(str::to_string);
             let v: Value = resp.into_json().map_err(|e| e.to_string())?;
             // Guard a malformed-but-200 body: without a real server list we must NOT
             // proceed, since apply_team_config would read the missing list as "the team
@@ -130,7 +138,7 @@ pub fn pull_config(
             let version = v["version"]
                 .as_i64()
                 .ok_or("team server returned a config without a version")?;
-            Ok(Some((version, config)))
+            Ok(Some((version, config, new_etag)))
         }
         Err(ureq::Error::Status(304, _)) => Ok(None),
         Err(e) => Err(stringify(e)),
@@ -227,13 +235,17 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
         role: joined.role.clone(),
         member_name: member_name.map(String::from),
         last_version: 0,
+        last_etag: None,
     };
     reg.team = Some(conn);
     let mut outcome = MergeOutcome::default();
-    if let Some((version, cfg)) = pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0)? {
+    if let Some((version, cfg, etag)) =
+        pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0, None)?
+    {
         outcome = apply_team_config(&mut reg, &joined.team_id, &cfg);
         if let Some(t) = reg.team.as_mut() {
             t.last_version = version;
+            t.last_etag = etag;
         }
     }
     crate::registry::save(&reg)?;
@@ -282,7 +294,13 @@ pub fn sync_now() -> Result<SyncResult, String> {
     };
     let role_changed = role != conn.role;
 
-    let pulled = pull_config(&conn.server_url, &conn.team_id, &token, conn.last_version)?;
+    let pulled = pull_config(
+        &conn.server_url,
+        &conn.team_id,
+        &token,
+        conn.last_version,
+        conn.last_etag.as_deref(),
+    )?;
 
     // Re-load a FRESH registry now, AFTER the (possibly multi-second) network round
     // trips, and apply the deltas to it. Loading at the top and saving here would clobber
@@ -299,10 +317,11 @@ pub fn sync_now() -> Result<SyncResult, String> {
 
     let applied = match pulled {
         None => None,
-        Some((version, cfg)) => {
+        Some((version, cfg, etag)) => {
             let outcome = apply_team_config(&mut reg, &conn.team_id, &cfg);
             if let Some(t) = reg.team.as_mut() {
                 t.last_version = version;
+                t.last_etag = etag;
             }
             Some((version, outcome))
         }
