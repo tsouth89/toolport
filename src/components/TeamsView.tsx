@@ -140,6 +140,69 @@ export function TeamsView({
       setNotice("Enabled. That server now runs in your active profile.");
     });
 
+  // One row in the Shared-servers list. Extracted so the review and active groups
+  // below can each render it.
+  const renderTeamServer = (s: (typeof teamServers)[number]) => {
+    const on = registry ? isEnabled(registry, s.id) : false;
+    const isLocal = s.transport === "stdio" || !!s.command;
+    const detail = s.command ? [s.command, ...(s.args ?? [])].join(" ") : (s.url ?? "");
+    return (
+      <li
+        key={s.id}
+        className={`rounded-lg border px-3 py-2 text-sm ${on ? "border-border/60" : "border-warning/40 bg-warning/5"}`}
+      >
+        <div className="flex items-center gap-2">
+          <Server className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="truncate font-medium">{s.name}</span>
+          <TransportPill transport={s.transport} />
+          {on ? (
+            <Badge variant="success" className="ml-auto shrink-0">
+              <ShieldCheck className="size-3" /> on
+            </Badge>
+          ) : (
+            <Badge variant="warning" className="ml-auto shrink-0">
+              <AlertTriangle className="size-3" /> needs review
+            </Badge>
+          )}
+        </div>
+        {!on && (
+          <div className="mt-2 flex items-end justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs text-muted-foreground">
+                {isLocal
+                  ? "Runs this local command on your machine:"
+                  : "Connects to this private/LAN address:"}
+              </p>
+              <code className="block truncate font-mono text-xs text-foreground">
+                {detail}
+              </code>
+            </div>
+            <ConfirmDialog
+              trigger={
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy !== null}
+                  className="shrink-0"
+                >
+                  Enable
+                </Button>
+              }
+              title={`Enable "${s.name}"?`}
+              description={
+                isLocal
+                  ? `This runs a local command on your machine: ${detail}. Only enable it if you trust your team and recognize this command.`
+                  : `This connects Toolport to ${detail}, a private/LAN address. Only enable it if you trust your team.`
+              }
+              confirmLabel="Enable"
+              onConfirm={() => onEnable(s.id)}
+            />
+          </div>
+        )}
+      </li>
+    );
+  };
+
   return (
     <div className="mx-auto max-w-2xl">
       <div className="mb-5 flex items-center gap-2">
@@ -312,70 +375,41 @@ export function TeamsView({
               </p>
             ) : (
               <>
-                <ul className="mt-2 grid gap-2">
-                  {teamServers.map((s) => {
-                    const on = registry ? isEnabled(registry, s.id) : false;
-                    const isLocal = s.transport === "stdio" || !!s.command;
-                    const detail = s.command
-                      ? [s.command, ...(s.args ?? [])].join(" ")
-                      : (s.url ?? "");
-                    return (
-                      <li
-                        key={s.id}
-                        className={`rounded-lg border px-3 py-2 text-sm ${on ? "border-border/60" : "border-warning/40 bg-warning/5"}`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <Server className="size-3.5 shrink-0 text-muted-foreground" />
-                          <span className="truncate font-medium">{s.name}</span>
-                          <TransportPill transport={s.transport} />
-                          {on ? (
-                            <Badge variant="success" className="ml-auto shrink-0">
-                              <ShieldCheck className="size-3" /> on
-                            </Badge>
-                          ) : (
-                            <Badge variant="warning" className="ml-auto shrink-0">
-                              <AlertTriangle className="size-3" /> needs review
-                            </Badge>
-                          )}
-                        </div>
-                        {!on && (
-                          <div className="mt-2 flex items-end justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="text-xs text-muted-foreground">
-                                {isLocal
-                                  ? "Runs this local command on your machine:"
-                                  : "Connects to this private/LAN address:"}
-                              </p>
-                              <code className="block truncate font-mono text-xs text-foreground">
-                                {detail}
-                              </code>
-                            </div>
-                            <ConfirmDialog
-                              trigger={
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={busy !== null}
-                                  className="shrink-0"
-                                >
-                                  Enable
-                                </Button>
-                              }
-                              title={`Enable "${s.name}"?`}
-                              description={
-                                isLocal
-                                  ? `This runs a local command on your machine: ${detail}. Only enable it if you trust your team and recognize this command.`
-                                  : `This connects Toolport to ${detail}, a private/LAN address. Only enable it if you trust your team.`
-                              }
-                              confirmLabel="Enable"
-                              onConfirm={() => onEnable(s.id)}
-                            />
+                {(() => {
+                  const review = teamServers.filter(
+                    (s) => !(registry ? isEnabled(registry, s.id) : false),
+                  );
+                  const active = teamServers.filter(
+                    (s) => registry && isEnabled(registry, s.id),
+                  );
+                  return (
+                    <>
+                      {review.length > 0 && (
+                        <div className="mt-3">
+                          <div className="flex items-center gap-1.5 text-xs font-medium text-warning">
+                            <AlertTriangle className="size-3.5" /> Needs review (
+                            {review.length})
                           </div>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
+                          <p className="mt-1 mb-2 text-xs text-muted-foreground">
+                            These run a local command or reach a LAN address, so they stay
+                            off until you review and enable each one.
+                          </p>
+                          <ul className="grid gap-2">{review.map(renderTeamServer)}</ul>
+                        </div>
+                      )}
+                      {active.length > 0 && (
+                        <div className="mt-4">
+                          <div className="flex items-center gap-1.5 text-xs font-medium text-success">
+                            <ShieldCheck className="size-3.5" /> Active ({active.length})
+                          </div>
+                          <ul className="mt-2 grid gap-2">
+                            {active.map(renderTeamServer)}
+                          </ul>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
                 <p className="mt-3 text-xs text-muted-foreground">
                   Add each server's secrets in the Servers tab, they stay in your OS
                   keychain.
