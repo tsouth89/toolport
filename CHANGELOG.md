@@ -6,10 +6,11 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-07-04
+## [1.5.0] - 2026-07-05
 
-A robustness release: the gateway, app, and Teams client now recover cleanly from
-failure modes that used to fail silently.
+A robustness release (the gateway, app, and Teams client now recover cleanly from
+failure modes that used to fail silently), plus the Teams polish batch for the
+Toolport for Teams launch.
 
 ### Added
 
@@ -19,6 +20,9 @@ failure modes that used to fail silently.
 - **Teams: automatic background sync.** A member's shared server set and security policy
   now stay current on their own (on launch and on a modest interval), so an admin's
   change reaches every member, not just those who click "Sync now".
+- **Teams: synced servers grouped by state.** Servers your team shares now split into
+  "Needs review" (on top, awaiting your enable) and "Active", so a fresh sync can't
+  hide below the fold. (#190)
 
 ### Changed
 
@@ -27,6 +31,13 @@ failure modes that used to fail silently.
 - **Catalog search failures are distinguishable from empty.** A registry or network
   error during a catalog search now shows an error with a retry, not a misleading
   "no results".
+- **Search ranks the on-the-nose tool first.** In lazy discovery, a tool whose name
+  matches your query exactly now wins near-ties instead of losing to a chattier
+  description. (#189)
+- **Teams and Playground polish.** The shared-server list is sorted, the Playground's
+  invoke panel is hoisted above the fold, filters gained clear affordances, and the
+  Playground shows proper empty/auth states. (#184, #196)
+- **Catalog: removed the dead Railway entry** (its MCP endpoint 404s). (#195)
 
 ### Fixed
 
@@ -37,6 +48,18 @@ failure modes that used to fail silently.
 - **Teams: removed members are actually cut off.** A removed or demoted member's app now
   disconnects the team locally and refreshes their role on sync, instead of quietly
   keeping the team's servers and stale security policy.
+- **Gateway tolerates an unsplit command.** A server config whose `command` is one
+  string ("npx -y some-server" with no args array) now just works instead of failing
+  with "cannot find the path specified (os error 3)". (#191)
+- **Teams: restricted members get 304s again.** The app echoes the server's exact
+  team-config ETag, restoring the not-modified fast path for members behind per-server
+  access rules. (#192)
+- **"Push my setup" no longer pushes the gateway itself** as if it were one of your
+  team's servers. (#194)
+- **The invite-code field no longer implies a `ci_` prefix** codes don't have. (#193)
+- **Onboarding surfaces a failed health probe** on the final step instead of a
+  green-looking finish over a server that never started. (#186)
+- **Settings: security panels distinguish a failed poll from genuinely empty.** (#185)
 - Under-the-hood hardening: the embeddings endpoint is time-boxed so a hung model falls
   back to lexical search, stdio reads are size-bounded, the tool cache is versioned so a
   stale cache from an older build is rebuilt, and shaped-result messaging no longer
