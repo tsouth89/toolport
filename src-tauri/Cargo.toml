@@ -1,6 +1,6 @@
 [package]
 name = "conduit"
-version = "1.5.0"
+version = "1.5.1"
 description = "Local MCP gateway: manage all your MCP servers in one place, set up once and shared by every AI client, with ~90% fewer tokens per request"
 authors = ["South Forge AI"]
 edition = "2021"
@@ -57,4 +57,3 @@ core-foundation = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
-
