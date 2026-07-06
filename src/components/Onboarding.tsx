@@ -23,7 +23,7 @@ import {
   type Registry,
   type Stack,
 } from "@/lib/types";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternal } from "@/lib/openUrl";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 
@@ -330,7 +330,7 @@ function AddServers({
                   <span className="font-medium text-foreground">{e.name}</span>
                   {e.credentialsUrl && (
                     <button
-                      onClick={() => openUrl(e.credentialsUrl!)}
+                      onClick={() => openExternal(e.credentialsUrl)}
                       className="text-info hover:underline"
                     >
                       get key

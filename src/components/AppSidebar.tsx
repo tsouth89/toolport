@@ -19,7 +19,7 @@ import {
   Zap,
 } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternal } from "@/lib/openUrl";
 import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
 import type { Update } from "@tauri-apps/plugin-updater";
@@ -115,7 +115,8 @@ function VersionFooter({
         description: "You can download it manually from the releases page.",
         action: {
           label: "Open",
-          onClick: () => openUrl("https://github.com/tsouth89/toolport/releases/latest"),
+          onClick: () =>
+            openExternal("https://github.com/tsouth89/toolport/releases/latest"),
         },
       });
     }

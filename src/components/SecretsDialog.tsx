@@ -2,7 +2,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { Check, ExternalLink, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternal } from "@/lib/openUrl";
 import {
   authenticateOauth,
   clearAuthToken,
@@ -283,7 +283,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                       {authInfo.instructions}
                       {authInfo.tokenUrl && (
                         <button
-                          onClick={() => openUrl(authInfo.tokenUrl!)}
+                          onClick={() => openExternal(authInfo.tokenUrl)}
                           className="ml-1 inline-flex items-center gap-0.5 text-owned hover:underline"
                         >
                           get a token
@@ -413,7 +413,7 @@ export function SecretsDialog({ server, onSaved, trigger, onChanged }: Props) {
                   {keyHint.hint}
                   {keyHint.url && (
                     <button
-                      onClick={() => openUrl(keyHint.url)}
+                      onClick={() => openExternal(keyHint.url)}
                       className="ml-1 inline-flex items-center gap-0.5 text-owned hover:underline"
                     >
                       get your key

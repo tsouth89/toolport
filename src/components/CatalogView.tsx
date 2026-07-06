@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, ExternalLink, Loader2, Plus, Search, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternal } from "@/lib/openUrl";
 import { addServer, listStacks, popularCatalog, searchCatalog } from "@/lib/api";
 import type { CatalogEntry, Registry, ServerEntry, Stack } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -482,7 +482,7 @@ function StackCard({
               )}
               {e.credentialsUrl && (
                 <button
-                  onClick={() => openUrl(e.credentialsUrl!)}
+                  onClick={() => openExternal(e.credentialsUrl)}
                   className="ml-1 inline-flex items-center gap-0.5 text-info hover:underline"
                 >
                   get credential
@@ -538,7 +538,7 @@ function CatalogCard({
           <span className="truncate text-sm font-medium">{entry.name}</span>
           {entry.homepage && (
             <button
-              onClick={() => openUrl(entry.homepage!)}
+              onClick={() => openExternal(entry.homepage)}
               aria-label="Open docs"
               className="shrink-0 text-muted-foreground/60 hover:text-foreground"
             >

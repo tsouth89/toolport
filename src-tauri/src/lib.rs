@@ -1633,7 +1633,7 @@ fn preview_import(state: State<RegistryState>, json: String) -> Result<Vec<Impor
 /// userinfo (scheme://user:pass@host). Used to redact args before sharing, since
 /// some servers (e.g. Postgres) take a connection string with a password in args.
 /// Biased toward over-redacting: for a share, a false positive is harmless.
-fn arg_looks_secret(arg: &str) -> bool {
+pub(crate) fn arg_looks_secret(arg: &str) -> bool {
     let lower = arg.to_ascii_lowercase();
     const NEEDLES: [&str; 8] = [
         "password=", "pwd=", "token=", "apikey=", "api_key=", "secret=", "accountkey=",
@@ -1652,6 +1652,25 @@ fn arg_looks_secret(arg: &str) -> bool {
         }
     }
     false
+}
+
+/// Redact credentials embedded in a URL's authority: `scheme://user:pass@host/x`
+/// (or `scheme://token@host/x`) becomes `scheme://<redacted>@host/x`. A URL is a
+/// legitimate place for a secret (HTTP basic, token-as-username), so it must be
+/// stripped anywhere a setup leaves the machine - env/arg redaction alone misses the
+/// `url` field. Returns the input unchanged when there is no userinfo. Best-effort
+/// string surgery (no URL-crate dependency): only the span between `://` and the
+/// first `/?#` is touched, and ANY `@` there is treated as a userinfo separator.
+pub(crate) fn redact_url_userinfo(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(auth_end);
+    match authority.rsplit_once('@') {
+        Some((_userinfo, host)) => format!("{scheme}://<redacted>@{host}{tail}"),
+        None => url.to_string(),
+    }
 }
 
 /// Build a shareable setup document: server definitions only, with the gateway
@@ -1690,6 +1709,12 @@ fn build_export(
                 if arg_looks_secret(a) {
                     *a = "<redacted>".to_string();
                 }
+            }
+            // A remote server's URL can carry inline credentials
+            // (`https://user:pass@host`); strip them too - the env/arg passes miss
+            // the `url` field, which would otherwise leak through the share link.
+            if let Some(u) = &s.url {
+                s.url = Some(redact_url_userinfo(u));
             }
             s
         })
@@ -2385,6 +2410,54 @@ mod tests {
         assert_eq!(subset["servers"].as_array().unwrap().len(), 1);
         let empty = build_export(&reg, None, None, Some(&["does-not-exist".to_string()]));
         assert_eq!(empty["servers"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn redact_url_userinfo_strips_credentials_only() {
+        // Password AND token-as-username are both stripped; the host/path survive.
+        assert_eq!(
+            redact_url_userinfo("https://user:s3cr3t@mcp.example.com/mcp"),
+            "https://<redacted>@mcp.example.com/mcp"
+        );
+        assert_eq!(
+            redact_url_userinfo("https://gh_tok3n@api.example.com/v1?x=1"),
+            "https://<redacted>@api.example.com/v1?x=1"
+        );
+        // No userinfo -> unchanged (host with '@' only after a '/' is not authority).
+        assert_eq!(
+            redact_url_userinfo("https://api.githubcopilot.com/mcp/"),
+            "https://api.githubcopilot.com/mcp/"
+        );
+        assert_eq!(
+            redact_url_userinfo("https://host.example.com/path/u@v"),
+            "https://host.example.com/path/u@v"
+        );
+        // Non-URL input is returned verbatim.
+        assert_eq!(redact_url_userinfo("not a url"), "not a url");
+    }
+
+    #[test]
+    fn export_redacts_url_embedded_credentials() {
+        // A remote server whose URL carries inline creds must not leak them in a share.
+        let mut reg = Registry::default();
+        reg.add_server(ServerEntry {
+            id: "remote".into(),
+            name: "Remote".into(),
+            transport: "http".into(),
+            command: None,
+            args: vec![],
+            env: vec![],
+            url: Some("https://user:hunter2@mcp.example.com/mcp".into()),
+            source: None,
+            disabled_tools: vec![],
+        });
+        let doc = build_export(&reg, None, None, None);
+        let serialized = serde_json::to_string(&doc).unwrap();
+        assert!(!serialized.contains("hunter2"), "url password leaked: {serialized}");
+        assert_eq!(
+            doc["servers"][0]["url"].as_str().unwrap(),
+            "https://<redacted>@mcp.example.com/mcp"
+        );
     }
 
     #[test]

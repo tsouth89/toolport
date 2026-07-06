@@ -361,6 +361,10 @@ fn map_server(server: &Value) -> Option<CatalogEntry> {
         .get("repository")
         .and_then(|r| r.get("url"))
         .and_then(|v| v.as_str())
+        // SECURITY: this flows to the OS opener in the UI. A registry entry could set
+        // it to file:// (Windows SMB -> NTLM-hash leak) or a custom-scheme handler
+        // URI; only hand real web links onward. Mirrors the remotes[].url guard below.
+        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
         .map(String::from);
     // Registry ids are namespaced (`io.github.acme/widget`); the namespace tells
     // you who published it - a provenance signal we surface in the catalog.

@@ -380,13 +380,29 @@ fn team_export(reg: &Registry) -> Value {
             own && !crate::clients::is_gateway_server(s)
         })
         .map(|s| {
+            // Same secret-stripping as the public share path (build_export): env
+            // values are already dropped below, but a credential can also ride in an
+            // inline-connection-string arg or in URL userinfo. Redact both, or the
+            // admin push leaks them to the org control plane and every teammate.
+            let args: Vec<String> = s
+                .args
+                .iter()
+                .map(|a| {
+                    if crate::arg_looks_secret(a) {
+                        "<redacted>".to_string()
+                    } else {
+                        a.clone()
+                    }
+                })
+                .collect();
+            let url = s.url.as_deref().map(crate::redact_url_userinfo);
             serde_json::json!({
                 "id": s.id,
                 "name": s.name,
                 "transport": s.transport,
                 "command": s.command,
-                "args": s.args,
-                "url": s.url,
+                "args": args,
+                "url": url,
                 "env": s.env.iter().map(|e| serde_json::json!({ "key": e.key, "secret": e.secret })).collect::<Vec<_>>(),
                 "disabledTools": s.disabled_tools,
             })
