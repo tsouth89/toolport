@@ -203,6 +203,111 @@ fn disable_server_tool_def() -> Value {
     })
 }
 
+// --- Grouped discovery mode (CONDUIT_DISCOVERY=grouped) ---
+//
+// Between `lazy` (a constant handful of meta-tools; best for a capable model that
+// can invent a good search query) and `full` (the entire namespaced catalog; huge),
+// grouped mode advertises the lazy meta-tools PLUS a per-server `help_<server>`
+// browse tool. A model too weak to invent a search query can instead pick a server
+// by name - an *enumerable* choice - and list its tools. `help_<server>` is just a
+// server-scoped `toolport_search_tools` (see the tools/call rewrite), and dispatch
+// still goes through `toolport_call_tool`, so the audited call path is unchanged and
+// there is no new execution surface. Enabled per-client via the env var; grouped
+// implies not-lazy (the lazy resolver only returns true for `=lazy`).
+
+/// True when this gateway runs in grouped discovery mode. Read fresh: the env var is
+/// process-constant and this is never on a hot path.
+fn grouped_discovery() -> bool {
+    std::env::var("CONDUIT_DISCOVERY")
+        .map(|v| v.eq_ignore_ascii_case("grouped"))
+        .unwrap_or(false)
+}
+
+/// The server prefix of a *namespaced* tool (`server__tool`). `None` for a bare name
+/// (a meta-tool), so those never spawn a spurious `help_<meta>` browse tool. (Guard:
+/// `tool_prefix` returns the whole name when there is no `__`.)
+fn namespaced_prefix(t: &Value) -> Option<String> {
+    let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if name.contains("__") {
+        let p = tool_prefix(t);
+        (!p.is_empty()).then_some(p)
+    } else {
+        None
+    }
+}
+
+/// Distinct server prefixes in a catalog, in first-seen order, so the advertised
+/// `help_<server>` tools have a stable order across lists.
+fn distinct_server_prefixes(catalog: &[Value]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for t in catalog {
+        if let Some(p) = namespaced_prefix(t) {
+            if seen.insert(p.clone()) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// The `help_<server>` browse tool advertised in grouped mode.
+fn help_tool_def(prefix: &str, tool_count: usize) -> Value {
+    json!({
+        "name": format!("help_{prefix}"),
+        "description": format!(
+            "Browse the {tool_count} tool(s) on the \"{prefix}\" server: returns each tool's exact \
+             name, what it does, and its input schema. Pick one and run it with toolport_call_tool \
+             (name = the exact name shown). Pass an optional `query` to filter to a capability \
+             (recommended when a server has many tools)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Optional keywords to filter this server's tools (empty lists them)." }
+            },
+            "additionalProperties": false
+        }
+    })
+}
+
+/// The tool set advertised in grouped mode: the lazy meta-tools (so cross-server
+/// search and call still work) plus one `help_<server>` browse tool per server.
+/// `catalog` must already be scoped to the calling client. Takes the two registry
+/// flags directly so callers needn't hold the registry lock across the router lock.
+fn grouped_tool_defs(allow_agent_control: bool, confirm_destructive: bool, catalog: &[Value]) -> Vec<Value> {
+    let mut tools = vec![
+        status_tool_def(),
+        search_tool_def(),
+        call_tool_def(),
+        fetch_result_tool_def(),
+    ];
+    if allow_agent_control {
+        tools.push(enable_server_tool_def());
+        tools.push(disable_server_tool_def());
+    }
+    if confirm_destructive {
+        tools.push(confirm_tool_def());
+    }
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for t in catalog {
+        if let Some(p) = namespaced_prefix(t) {
+            *counts.entry(p).or_insert(0) += 1;
+        }
+    }
+    for prefix in distinct_server_prefixes(catalog) {
+        let n = counts.get(&prefix).copied().unwrap_or(0);
+        tools.push(help_tool_def(&prefix, n));
+    }
+    tools
+}
+
+/// If `name` is a grouped `help_<server>` browse tool, return the server prefix. The
+/// tools/call handler rewrites it into a server-scoped `toolport_search_tools`.
+fn grouped_help_target(name: &str) -> Option<&str> {
+    name.strip_prefix("help_").filter(|p| !p.is_empty())
+}
+
 /// Apply an agent-initiated enable/disable of a server. Gated behind the user's
 /// `allow_agent_control` opt-in (re-checked against a fresh on-disk copy to close
 /// the toggle-off-mid-request window), resolves the target by id or name, writes
@@ -1538,6 +1643,36 @@ fn handle_request(
                 ));
                 return Some(success(id, json!({ "tools": tools })));
             }
+            // Grouped mode: the lazy meta-tools plus a per-server help_<server> browse
+            // tool, so a weak model can pick a server by name instead of inventing a
+            // search query. Scoped to the client's servers, same as full mode.
+            if grouped_discovery() {
+                let agg;
+                let catalog: &[Value] = if cached.is_empty() {
+                    agg = router.aggregated_tools();
+                    &agg
+                } else {
+                    cached
+                };
+                let scoped = scope_tools(catalog, allowed);
+                let tools =
+                    grouped_tool_defs(reg.allow_agent_control, reg.confirm_destructive, &scoped);
+                // Savings vs. advertising the whole (scoped) catalog + status.
+                let status = status_tool_def();
+                let full_tokens = savings::estimate_tokens(&scoped)
+                    + savings::estimate_tokens(std::slice::from_ref(&status));
+                savings::record(
+                    full_tokens,
+                    savings::estimate_tokens(&tools),
+                    scoped.len() as u64 + 1,
+                );
+                gtrace(&format!(
+                    "tools/list -> {} tools (grouped: {} server browse tools)",
+                    tools.len(),
+                    distinct_server_prefixes(&scoped).len()
+                ));
+                return Some(success(id, json!({ "tools": tools })));
+            }
             let mut tools = vec![status_tool_def(), fetch_result_tool_def()];
             // The confirm tool is advertised only while confirmation is on.
             if reg.confirm_destructive {
@@ -1584,6 +1719,22 @@ fn handle_request(
             // was already reviewed). Skips the destructive-interception check
             // below so the confirmed call isn't re-intercepted in a loop.
             let mut confirmed = false;
+
+            // Grouped mode: a per-server browse tool `help_<server>` is the enumerable
+            // alternative to inventing a search query. Rewrite it into a server-scoped
+            // toolport_search_tools so it reuses the exact ranking/listing path, and
+            // dispatch of the chosen tool still goes through toolport_call_tool below.
+            if grouped_discovery() {
+                if let Some(prefix) = grouped_help_target(&name) {
+                    let q = arguments
+                        .get("query")
+                        .cloned()
+                        .unwrap_or_else(|| json!(""));
+                    let server = prefix.to_string();
+                    name = "toolport_search_tools".to_string();
+                    arguments = json!({ "query": q, "server": server });
+                }
+            }
 
             // Anything other than a search breaks the search-thrash streak.
             if name != "toolport_search_tools" {
@@ -2824,12 +2975,34 @@ fn http_port() -> Option<u16> {
 /// The tools the HTTP surface exposes, mirroring `tools/list`: the meta-tools
 /// in lazy mode, or status + fetch + the full namespaced catalog in full mode.
 /// Agent-control tools appear only when the registry opts in.
-fn http_tool_defs(state: &GatewayState) -> Vec<Value> {
-    let allow_agent = state
-        .registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .allow_agent_control;
+fn http_tool_defs(
+    state: &GatewayState,
+    allowed: Option<&std::collections::HashSet<String>>,
+) -> Vec<Value> {
+    let (allow_agent, confirm_destructive) = {
+        let r = state
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (r.allow_agent_control, r.confirm_destructive)
+    };
+    // The namespaced catalog (cached, or live on a cold cache).
+    let catalog = || {
+        let cached = state
+            .cached_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if cached.is_empty() {
+            state
+                .router
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .aggregated_tools()
+        } else {
+            cached
+        }
+    };
     if state.lazy {
         let mut tools = vec![
             status_tool_def(),
@@ -2842,24 +3015,15 @@ fn http_tool_defs(state: &GatewayState) -> Vec<Value> {
             tools.push(disable_server_tool_def());
         }
         tools
+    } else if grouped_discovery() {
+        // Grouped: the meta-tools plus a per-server help_<server> browse tool. Scope
+        // the catalog to this client FIRST so the help tools (which read as meta-tools
+        // to the later scope pass) can't leak an out-of-scope server's browse entry.
+        let scoped = scope_tools(&catalog(), allowed);
+        grouped_tool_defs(allow_agent, confirm_destructive, &scoped)
     } else {
         let mut tools = vec![status_tool_def(), fetch_result_tool_def()];
-        let cached = state
-            .cached_tools
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if cached.is_empty() {
-            tools.extend(
-                state
-                    .router
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .aggregated_tools(),
-            );
-        } else {
-            tools.extend(cached);
-        }
+        tools.extend(catalog());
         tools
     }
 }
@@ -2873,7 +3037,7 @@ fn openapi_spec(
 ) -> Value {
     // Scope the advertised tools to the client's allowed servers (no-op when
     // unscoped), so a registered client's spec never lists out-of-scope tools.
-    let defs = scope_tools(&http_tool_defs(state), allowed);
+    let defs = scope_tools(&http_tool_defs(state, allowed), allowed);
     // The gateway's error envelope is always `{ "error": "<message>" }`; point
     // every non-2xx response at the shared Error schema so a client can model it.
     let err_resp = |desc: &str| {
@@ -4862,6 +5026,85 @@ mod tests {
                 "query {q} must not escalate"
             );
         }
+    }
+
+    #[test]
+    fn grouped_mode_advertises_meta_plus_per_server_help() {
+        // The catalog: two servers, github with 2 tools, stripe with 1.
+        let catalog = vec![
+            json!({ "name": "github__create_issue", "description": "Create an issue", "inputSchema": {} }),
+            json!({ "name": "github__list_repos", "description": "List repos", "inputSchema": {} }),
+            json!({ "name": "stripe__create_charge", "description": "Create a charge", "inputSchema": {} }),
+        ];
+        let defs = grouped_tool_defs(false, false, &catalog);
+        let names: Vec<&str> = defs
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+            .collect();
+        // The lazy meta-tools are present (so search/call still work)...
+        for m in [
+            "toolport_status",
+            "toolport_search_tools",
+            "toolport_call_tool",
+            "toolport_fetch_result",
+        ] {
+            assert!(names.contains(&m), "missing meta-tool {m}");
+        }
+        // ...plus one enumerable browse tool per server, in first-seen order...
+        assert!(names.contains(&"help_github"));
+        assert!(names.contains(&"help_stripe"));
+        assert!(
+            names.iter().position(|n| *n == "help_github")
+                < names.iter().position(|n| *n == "help_stripe"),
+            "help tools keep first-seen order"
+        );
+        // ...and NOT the raw namespaced tools (that's what full mode would dump).
+        assert!(!names.iter().any(|n| n.contains("__")));
+        // The github help tool states its tool count so the model knows the scope.
+        let gh = defs.iter().find(|t| t["name"] == "help_github").unwrap();
+        assert!(gh["description"].as_str().unwrap().contains("2 tool"));
+        // Agent-control and confirm tools stay gated off when their flags are off.
+        assert!(!names.contains(&"toolport_enable_server"));
+        assert!(!names.contains(&"toolport_confirm"));
+    }
+
+    #[test]
+    fn grouped_mode_gates_agent_and_confirm_tools() {
+        let catalog = vec![
+            json!({ "name": "s__t", "description": "x", "inputSchema": {} }),
+        ];
+        let defs = grouped_tool_defs(true, true, &catalog);
+        let names: Vec<&str> = defs
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+            .collect();
+        assert!(names.contains(&"toolport_enable_server"));
+        assert!(names.contains(&"toolport_disable_server"));
+        assert!(names.contains(&"toolport_confirm"));
+        assert!(names.contains(&"help_s"));
+    }
+
+    #[test]
+    fn distinct_server_prefixes_dedups_in_first_seen_order() {
+        let catalog = vec![
+            json!({ "name": "b__one", "inputSchema": {} }),
+            json!({ "name": "a__one", "inputSchema": {} }),
+            json!({ "name": "b__two", "inputSchema": {} }),
+            json!({ "name": "toolport_status", "inputSchema": {} }), // bare name -> no prefix
+        ];
+        assert_eq!(
+            distinct_server_prefixes(&catalog),
+            vec!["b".to_string(), "a".to_string()]
+        );
+    }
+
+    #[test]
+    fn grouped_help_target_extracts_server_prefix() {
+        assert_eq!(grouped_help_target("help_github"), Some("github"));
+        assert_eq!(grouped_help_target("help_a__b"), Some("a__b"));
+        assert_eq!(grouped_help_target("toolport_status"), None);
+        assert_eq!(grouped_help_target("help_"), None);
+        assert_eq!(grouped_help_target("github__create"), None);
     }
 
     #[test]
