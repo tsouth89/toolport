@@ -260,7 +260,7 @@ terminal. The package name is `toolport`.
 
 ```bash
 # Update to a newer version: just install the new .deb, it upgrades in place.
-sudo apt install ./Toolport_1.5.0_amd64.deb
+sudo apt install ./Toolport_1.5.1_amd64.deb
 
 # Uninstall (keeps your config + saved secrets).
 sudo apt remove toolport

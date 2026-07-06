@@ -6,8 +6,8 @@ Releases are built by CI on a version tag (`.github/workflows/release.yml`).
    - `src-tauri/tauri.conf.json` (`version`), drives the installer filename
    - `src-tauri/Cargo.toml` (`version`)
    - `package.json` (`version`)
-   - `server.json` (TWO fields: the top-level `version` and the npm package `version`)
    - `src-tauri/Cargo.lock` (run `cargo check` after bumping `Cargo.toml` to refresh it)
+   - `server.json` only when publishing a matching standalone `@tsouth89/conduit-gateway` package
 2. Commit the bump.
 3. Tag and push:
 
