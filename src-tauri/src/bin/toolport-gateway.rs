@@ -215,12 +215,71 @@ fn disable_server_tool_def() -> Value {
 // there is no new execution surface. Enabled per-client via the env var; grouped
 // implies not-lazy (the lazy resolver only returns true for `=lazy`).
 
-/// True when this gateway runs in grouped discovery mode. Read fresh: the env var is
-/// process-constant and this is never on a hot path.
+/// The three tool-discovery modes. Resolved once at gateway start (env or registry)
+/// and cached in `DISCOVERY_MODE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscoveryMode {
+    Lazy,
+    Grouped,
+    Full,
+}
+
+static DISCOVERY_MODE: std::sync::OnceLock<DiscoveryMode> = std::sync::OnceLock::new();
+
+/// Resolve the discovery mode: an explicit `CONDUIT_DISCOVERY` env var wins (per
+/// client), otherwise the registry's `discovery_mode` override, otherwise its
+/// `lazy_discovery` bool. A SET-but-unrecognized env value maps to `Full`, matching
+/// the pre-3-way behavior (env was `== "lazy"` ? lazy : not-lazy) so nothing regresses.
+fn resolve_discovery_mode() -> DiscoveryMode {
+    let env = std::env::var("CONDUIT_DISCOVERY").ok();
+    let reg = registry::load_resolved().ok();
+    resolve_mode_from(
+        env.as_deref(),
+        reg.as_ref().and_then(|r| r.discovery_mode.as_deref()),
+        reg.as_ref().map(|r| r.lazy_discovery).unwrap_or(true),
+    )
+}
+
+/// Pure precedence: env override, then the registry's `discovery_mode`, then its
+/// `lazy_discovery` bool. A SET env value that isn't lazy/grouped resolves to Full
+/// (exactly the old `env == "lazy" ? lazy : not-lazy`); an unrecognized registry
+/// override is ignored (falls through to the bool).
+fn resolve_mode_from(
+    env: Option<&str>,
+    registry_mode: Option<&str>,
+    lazy_discovery: bool,
+) -> DiscoveryMode {
+    if let Some(v) = env {
+        return match v.trim().to_ascii_lowercase().as_str() {
+            "lazy" => DiscoveryMode::Lazy,
+            "grouped" => DiscoveryMode::Grouped,
+            _ => DiscoveryMode::Full,
+        };
+    }
+    if let Some(m) = registry_mode {
+        match m.trim().to_ascii_lowercase().as_str() {
+            "grouped" => return DiscoveryMode::Grouped,
+            "full" => return DiscoveryMode::Full,
+            "lazy" => return DiscoveryMode::Lazy,
+            _ => {}
+        }
+    }
+    if lazy_discovery {
+        DiscoveryMode::Lazy
+    } else {
+        DiscoveryMode::Full
+    }
+}
+
+/// The resolved mode. Defaults to `Lazy` before `main` sets it (only unit tests, which
+/// don't run `main` and test the grouped helpers directly, ever observe that default).
+fn discovery_mode() -> DiscoveryMode {
+    DISCOVERY_MODE.get().copied().unwrap_or(DiscoveryMode::Lazy)
+}
+
+/// True when this gateway runs in grouped discovery mode (see [`grouped_tool_defs`]).
 fn grouped_discovery() -> bool {
-    std::env::var("CONDUIT_DISCOVERY")
-        .map(|v| v.eq_ignore_ascii_case("grouped"))
-        .unwrap_or(false)
+    discovery_mode() == DiscoveryMode::Grouped
 }
 
 /// The server prefix of a *namespaced* tool (`server__tool`). `None` for a bare name
@@ -3830,16 +3889,14 @@ fn main() {
         std::process::exit(0);
     }
 
-    // Lazy discovery resolves from an explicit env override first (per-client),
-    // then the registry's global setting. Reading the registry means lazy mode
-    // applies to EVERY client, including ones that don't forward env vars to the
-    // gateway process (e.g. Antigravity) or servers added by hand in a client UI.
-    let lazy = match std::env::var("CONDUIT_DISCOVERY") {
-        Ok(v) => v.eq_ignore_ascii_case("lazy"),
-        Err(_) => registry::load_resolved()
-            .map(|r| r.lazy_discovery)
-            .unwrap_or(true),
-    };
+    // Discovery mode resolves from an explicit env override first (per-client), then
+    // the registry (its `discovery_mode` override, else the `lazy_discovery` bool), so
+    // it applies to EVERY client, including ones that don't forward env vars to the
+    // gateway (e.g. Antigravity). Resolved once and cached; `lazy` is derived so its
+    // behavior is unchanged, and grouped mode reads the same cached value.
+    let mode = resolve_discovery_mode();
+    let _ = DISCOVERY_MODE.set(mode);
+    let lazy = matches!(mode, DiscoveryMode::Lazy);
     // Per-client scoping: this gateway exposes only the named profile's servers.
     let profile = std::env::var("CONDUIT_PROFILE")
         .ok()
@@ -5393,6 +5450,32 @@ mod tests {
         assert_eq!(grouped_help_target("toolport_status"), None);
         assert_eq!(grouped_help_target("help_"), None);
         assert_eq!(grouped_help_target("github__create"), None);
+    }
+
+    #[test]
+    fn discovery_mode_precedence_and_no_regression() {
+        use DiscoveryMode::*;
+        // Env override wins over everything (per-client).
+        assert_eq!(resolve_mode_from(Some("grouped"), Some("lazy"), true), Grouped);
+        assert_eq!(resolve_mode_from(Some("lazy"), None, false), Lazy);
+        assert_eq!(resolve_mode_from(Some("full"), Some("grouped"), true), Full);
+        assert_eq!(resolve_mode_from(Some(" GROUPED "), None, true), Grouped);
+        // Old behavior preserved: a SET-but-unrecognized/empty env is Full (was the
+        // `env == "lazy" ? lazy : not-lazy` branch), NOT a fall-through to the registry.
+        assert_eq!(resolve_mode_from(Some("typo"), Some("grouped"), true), Full);
+        assert_eq!(resolve_mode_from(Some(""), Some("grouped"), true), Full);
+
+        // No env: the registry override wins over the lazy_discovery bool.
+        assert_eq!(resolve_mode_from(None, Some("grouped"), true), Grouped);
+        assert_eq!(resolve_mode_from(None, Some("full"), true), Full);
+        assert_eq!(resolve_mode_from(None, Some("lazy"), false), Lazy);
+        // An unrecognized override is ignored, falling through to the bool.
+        assert_eq!(resolve_mode_from(None, Some("weird"), true), Lazy);
+
+        // BACK-COMPAT: no env, no discovery_mode override (every pre-existing registry)
+        // resolves to exactly the old lazy_discovery bool behavior.
+        assert_eq!(resolve_mode_from(None, None, true), Lazy);
+        assert_eq!(resolve_mode_from(None, None, false), Full);
     }
 
     #[test]

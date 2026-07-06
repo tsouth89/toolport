@@ -240,6 +240,13 @@ pub struct Registry {
     /// Defaults on, since clients commonly cap the tool list.
     #[serde(default = "default_true")]
     pub lazy_discovery: bool,
+    /// Discovery-mode override: `"lazy"` | `"grouped"` | `"full"`. When set, it takes
+    /// precedence over `lazy_discovery`; `None` (the default, and every pre-existing
+    /// registry) falls back to that bool. An explicit `CONDUIT_DISCOVERY` env var still
+    /// overrides this. Lets a user pick grouped mode once - for weak/local models that
+    /// browse per-server instead of searching - instead of setting a per-client env var.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_mode: Option<String>,
     /// Opt-in agent control: when true, an agent may turn servers on or off via
     /// the gateway's `conduit_enable_server` / `conduit_disable_server` tools.
     /// Off by default. The `deny_destructive` safety switch is never agent-
@@ -369,6 +376,7 @@ impl Default for Registry {
             pinned_tools: HashMap::new(),
             quarantine_on_drift: false,
             lazy_discovery: true,
+            discovery_mode: None,
             allow_agent_control: false,
             integrity_check: true,
             content_defense: true,
@@ -625,6 +633,25 @@ impl Registry {
     /// Set lazy discovery mode (gateway exposes meta-tools vs the full catalog).
     pub fn set_lazy_discovery(&mut self, lazy: bool) {
         self.lazy_discovery = lazy;
+    }
+
+    /// Set the discovery-mode override. `"lazy"`/`"grouped"`/`"full"` are honored;
+    /// any other value (including clearing to the empty string) resets to `None`, so
+    /// resolution falls back to `lazy_discovery`. Keeps `lazy_discovery` in sync for
+    /// the "lazy"/"full" cases so an older gateway reading only that bool still agrees.
+    pub fn set_discovery_mode(&mut self, mode: &str) {
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "lazy" => {
+                self.discovery_mode = Some("lazy".into());
+                self.lazy_discovery = true;
+            }
+            "full" => {
+                self.discovery_mode = Some("full".into());
+                self.lazy_discovery = false;
+            }
+            "grouped" => self.discovery_mode = Some("grouped".into()),
+            _ => self.discovery_mode = None,
+        }
     }
 
     /// Turn live request/response inspection on or off. When on, the gateway
@@ -1203,6 +1230,35 @@ mod tests {
     fn cannot_remove_last_profile() {
         let mut r = Registry::default();
         assert!(r.remove_profile("default").is_err());
+    }
+
+    #[test]
+    fn discovery_mode_setter_and_backcompat() {
+        let mut r = Registry::default();
+        // Absent by default (and every pre-existing registry).
+        assert_eq!(r.discovery_mode, None);
+        assert!(r.lazy_discovery);
+
+        r.set_discovery_mode("grouped");
+        assert_eq!(r.discovery_mode.as_deref(), Some("grouped"));
+        // grouped doesn't touch the bool; lazy/full keep it in sync for old gateways.
+        r.set_discovery_mode("full");
+        assert_eq!(r.discovery_mode.as_deref(), Some("full"));
+        assert!(!r.lazy_discovery);
+        r.set_discovery_mode("lazy");
+        assert_eq!(r.discovery_mode.as_deref(), Some("lazy"));
+        assert!(r.lazy_discovery);
+        // An unknown value clears the override (falls back to lazy_discovery).
+        r.set_discovery_mode("nonsense");
+        assert_eq!(r.discovery_mode, None);
+
+        // Serde: None is skipped, so a default registry serializes exactly as before
+        // (no new key), and that JSON - which lacks the field, like every old registry -
+        // round-trips back to None.
+        let json = serde_json::to_string(&Registry::default()).unwrap();
+        assert!(!json.contains("discovery_mode"), "None must not be serialized");
+        let back: Registry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.discovery_mode, None);
     }
 
     #[test]
