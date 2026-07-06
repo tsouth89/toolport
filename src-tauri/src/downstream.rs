@@ -6,6 +6,7 @@
 //! its tools. The transport is abstracted so the router can be tested with a mock
 //! instead of spawning real processes.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -66,6 +67,180 @@ pub enum TransportError {
         retry_after: Option<Duration>,
         message: String,
     },
+}
+
+/// Tracks client-side JSON-RPC request ids that are currently proxied to a
+/// downstream stdio server. A later `notifications/cancelled` from the client can
+/// forward cancellation to the downstream server's own request id.
+#[derive(Clone, Default)]
+pub struct CancelRegistry {
+    inner: Arc<Mutex<CancelState>>,
+}
+
+#[derive(Default)]
+struct CancelState {
+    active: HashSet<String>,
+    cancelled: HashMap<String, CancelledRequest>,
+    in_flight: HashMap<String, CancelEntry>,
+}
+
+#[derive(Clone, Default)]
+struct CancelledRequest {
+    reason: Option<String>,
+    forwarded: bool,
+}
+
+#[derive(Clone)]
+struct CancelEntry {
+    stdin: Arc<Mutex<ChildStdin>>,
+    downstream_id: Value,
+}
+
+/// Cancellation context for one proxied client request.
+#[derive(Clone)]
+pub struct CancelContext {
+    client_request_id: String,
+    registry: CancelRegistry,
+}
+
+struct CancelGuard {
+    client_request_id: String,
+    registry: CancelRegistry,
+}
+
+impl CancelRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn begin_client_request(&self, client_request_id: String) -> bool {
+        let mut state = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active.contains(&client_request_id) {
+            return false;
+        }
+        state.active.insert(client_request_id);
+        true
+    }
+
+    pub fn finish_client_request(&self, client_request_id: &str) {
+        let mut state = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active.remove(client_request_id);
+        state.cancelled.remove(client_request_id);
+        state.in_flight.remove(client_request_id);
+    }
+
+    pub fn context(&self, client_request_id: String) -> CancelContext {
+        CancelContext { client_request_id, registry: self.clone() }
+    }
+
+    /// Mark an active client request as cancelled and, if it has already reached a
+    /// stdio downstream, forward `notifications/cancelled` with that downstream id.
+    /// Returns true when the referenced client request is still active.
+    pub fn cancel(&self, client_request_id: &str, reason: Option<&str>) -> bool {
+        let forward = {
+            let mut state = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !state.active.contains(client_request_id) {
+                return false;
+            }
+            let reason = normalize_cancel_reason(reason);
+            let cancelled = state
+                .cancelled
+                .entry(client_request_id.to_string())
+                .or_default();
+            if reason.is_some() {
+                cancelled.reason = reason;
+            }
+            prepare_cancel_forward(&mut state, client_request_id)
+        };
+        if let Some((entry, reason)) = forward {
+            entry.send_cancel_async(reason);
+        }
+        true
+    }
+
+    pub fn is_cancelled(&self, client_request_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancelled
+            .contains_key(client_request_id)
+    }
+
+    fn forward_cancel_if_ready(&self, client_request_id: &str) {
+        let forward = {
+            let mut state = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            prepare_cancel_forward(&mut state, client_request_id)
+        };
+        if let Some((entry, reason)) = forward {
+            entry.send_cancel_async(reason);
+        }
+    }
+
+    fn register(&self, client_request_id: String, entry: CancelEntry) -> CancelGuard {
+        let mut state = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.in_flight.insert(client_request_id.clone(), entry);
+        if let Some(cancelled) = state.cancelled.get_mut(&client_request_id) {
+            cancelled.forwarded = false;
+        }
+        CancelGuard { client_request_id, registry: self.clone() }
+    }
+}
+
+impl CancelEntry {
+    fn send_cancel_async(&self, reason: Option<String>) {
+        let entry = self.clone();
+        std::thread::spawn(move || {
+            if let Err(err) = entry.send_cancel(reason.as_deref()) {
+                eprintln!("toolport: failed to forward cancellation downstream: {err}");
+            }
+        });
+    }
+
+    fn send_cancel(&self, reason: Option<&str>) -> Result<(), String> {
+        let mut params = serde_json::Map::new();
+        params.insert("requestId".to_string(), self.downstream_id.clone());
+        if let Some(reason) = reason.filter(|s| !s.trim().is_empty()) {
+            params.insert("reason".to_string(), Value::String(reason.to_string()));
+        }
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": Value::Object(params)
+        });
+        let mut stdin = self.stdin.lock().map_err(|_| "downstream stdin lock poisoned".to_string())?;
+        writeln!(stdin, "{msg}").map_err(|e| e.to_string())?;
+        stdin.flush().map_err(|e| e.to_string())
+    }
+}
+
+fn normalize_cancel_reason(reason: Option<&str>) -> Option<String> {
+    reason
+        .filter(|s| !s.trim().is_empty())
+        .map(std::string::ToString::to_string)
+}
+
+fn prepare_cancel_forward(
+    state: &mut CancelState,
+    client_request_id: &str,
+) -> Option<(CancelEntry, Option<String>)> {
+    let cancelled = state.cancelled.get_mut(client_request_id)?;
+    if cancelled.forwarded {
+        return None;
+    }
+    let entry = state.in_flight.get(client_request_id)?.clone();
+    cancelled.forwarded = true;
+    Some((entry, cancelled.reason.clone()))
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.registry
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .in_flight
+            .remove(&self.client_request_id);
+    }
 }
 
 impl TransportError {
@@ -223,6 +398,19 @@ pub fn resolve_command(command: &str) -> String {
 /// A bidirectional JSON-RPC channel to one downstream server.
 pub trait Transport: Send {
     fn request(&mut self, method: &str, params: Value) -> Result<Value, TransportError>;
+    fn request_with_cancel(
+        &mut self,
+        method: &str,
+        params: Value,
+        cancel: Option<CancelContext>,
+    ) -> Result<Value, TransportError> {
+        if cancel.is_some() {
+            downstream_trace(&format!(
+                "cancellation not supported for downstream transport method {method}"
+            ));
+        }
+        self.request(method, params)
+    }
     fn notify(&mut self, method: &str, params: Value) -> Result<(), TransportError>;
     /// Bound how long a single `request` waits for its response. Used to fail the
     /// connect handshake fast. Default no-op: transports with their own fixed
@@ -233,6 +421,26 @@ pub trait Transport: Send {
     /// tools during startup doesn't trigger a needless rebuild. Default no-op:
     /// transports without a live notification stream ignore it.
     fn arm_tools_watch(&mut self) {}
+}
+
+fn downstream_trace(msg: &str) {
+    if std::env::var_os("CONDUIT_DEBUG").is_none() {
+        return;
+    }
+    let Some(path) = crate::registry::gateway_log_path() else {
+        eprintln!("toolport: {msg}");
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{msg}");
+    }
 }
 
 /// Bitmask of which downstream list a `notifications/.../list_changed` announces.
@@ -587,7 +795,7 @@ fn container_escape_flag(args: &[String]) -> Option<&str> {
 /// (a blocking `read_line` on an unresponsive child would otherwise hang forever).
 pub struct StdioTransport {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Arc<Mutex<ChildStdin>>,
     rx: Receiver<String>,
     /// Tail of the child's stderr, drained on a background thread. A server that
     /// dies on startup (bad package name, missing API key) explains itself here,
@@ -682,7 +890,7 @@ impl StdioTransport {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("failed to spawn '{command}': {e}"))?;
-        let stdin = child.stdin.take().ok_or("no child stdin")?;
+        let stdin = Arc::new(Mutex::new(child.stdin.take().ok_or("no child stdin")?));
         let stdout = child.stdout.take().ok_or("no child stdout")?;
         let stderr = child.stderr.take().ok_or("no child stderr")?;
 
@@ -782,14 +990,48 @@ impl StdioTransport {
 
 impl Transport for StdioTransport {
     fn request(&mut self, method: &str, params: Value) -> Result<Value, TransportError> {
+        self.request_with_cancel(method, params, None)
+    }
+
+    fn request_with_cancel(
+        &mut self,
+        method: &str,
+        params: Value,
+        cancel: Option<CancelContext>,
+    ) -> Result<Value, TransportError> {
         let id = self.next_id;
         self.next_id += 1;
-        let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let downstream_id = json!(id);
+        let msg = json!({ "jsonrpc": "2.0", "id": downstream_id.clone(), "method": method, "params": params });
+
         // A broken stdin pipe means the child is gone: a health failure, not a protocol error.
-        writeln!(self.stdin, "{msg}").map_err(|e| TransportError::Unavailable(e.to_string()))?;
-        self.stdin
-            .flush()
-            .map_err(|e| TransportError::Unavailable(e.to_string()))?;
+        let mut cancel_after_write = None;
+        let cancel_guard;
+        {
+            let mut stdin = self.stdin.lock().map_err(|_| {
+                TransportError::Unavailable("downstream stdin lock poisoned".into())
+            })?;
+            cancel_guard = if let Some(ctx) = cancel {
+                let client_request_id = ctx.client_request_id.clone();
+                let registry = ctx.registry.clone();
+                let guard = registry.register(
+                    client_request_id.clone(),
+                    CancelEntry { stdin: Arc::clone(&self.stdin), downstream_id },
+                );
+                cancel_after_write = Some((registry, client_request_id));
+                Some(guard)
+            } else {
+                None
+            };
+            writeln!(stdin, "{msg}").map_err(|e| TransportError::Unavailable(e.to_string()))?;
+            stdin.flush().map_err(|e| TransportError::Unavailable(e.to_string()))?;
+        }
+        if let Some((registry, client_request_id)) = cancel_after_write {
+            if registry.is_cancelled(&client_request_id) {
+                registry.forward_cancel_if_ready(&client_request_id);
+            }
+        }
+        let _cancel_guard = cancel_guard;
 
         // Read until the response with our id arrives, skipping notifications.
         // The deadline bounds the whole wait so an unresponsive server fails fast
@@ -818,7 +1060,7 @@ impl Transport for StdioTransport {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            if value.get("id").and_then(|i| i.as_i64()) == Some(id) {
+            if ids_match(value.get("id"), Some(&json!(id))) {
                 if let Some(err) = value.get("error") {
                     return Err(TransportError::Fatal(err.to_string()));
                 }
@@ -829,8 +1071,12 @@ impl Transport for StdioTransport {
 
     fn notify(&mut self, method: &str, params: Value) -> Result<(), TransportError> {
         let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        writeln!(self.stdin, "{msg}").map_err(|e| TransportError::Fatal(e.to_string()))?;
-        self.stdin.flush().map_err(|e| TransportError::Fatal(e.to_string()))
+        let mut stdin = self
+            .stdin
+            .lock()
+            .map_err(|_| TransportError::Fatal("downstream stdin lock poisoned".into()))?;
+        writeln!(stdin, "{msg}").map_err(|e| TransportError::Fatal(e.to_string()))?;
+        stdin.flush().map_err(|e| TransportError::Fatal(e.to_string()))
     }
 
     fn set_read_timeout(&mut self, timeout: Duration) {
@@ -1229,20 +1475,52 @@ impl DownstreamServer {
     }
 
     pub fn call(&mut self, tool: &str, arguments: Value) -> Result<Value, TransportError> {
-        self.transport
-            .request("tools/call", json!({ "name": tool, "arguments": arguments }))
+        self.call_with_cancel(tool, arguments, None)
+    }
+
+    pub fn call_with_cancel(
+        &mut self,
+        tool: &str,
+        arguments: Value,
+        cancel: Option<CancelContext>,
+    ) -> Result<Value, TransportError> {
+        self.transport.request_with_cancel(
+            "tools/call",
+            json!({ "name": tool, "arguments": arguments }),
+            cancel,
+        )
     }
 
     /// Read one resource by its (original, downstream) uri.
     pub fn read_resource(&mut self, uri: &str) -> Result<Value, TransportError> {
+        self.read_resource_with_cancel(uri, None)
+    }
+
+    pub fn read_resource_with_cancel(
+        &mut self,
+        uri: &str,
+        cancel: Option<CancelContext>,
+    ) -> Result<Value, TransportError> {
         self.transport
-            .request("resources/read", json!({ "uri": uri }))
+            .request_with_cancel("resources/read", json!({ "uri": uri }), cancel)
     }
 
     /// Get one prompt by its (original, downstream) name.
     pub fn get_prompt(&mut self, name: &str, arguments: Value) -> Result<Value, TransportError> {
-        self.transport
-            .request("prompts/get", json!({ "name": name, "arguments": arguments }))
+        self.get_prompt_with_cancel(name, arguments, None)
+    }
+
+    pub fn get_prompt_with_cancel(
+        &mut self,
+        name: &str,
+        arguments: Value,
+        cancel: Option<CancelContext>,
+    ) -> Result<Value, TransportError> {
+        self.transport.request_with_cancel(
+            "prompts/get",
+            json!({ "name": name, "arguments": arguments }),
+            cancel,
+        )
     }
 }
 
@@ -1257,7 +1535,10 @@ fn extract_array(result: &Value, key: &str) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_command, screen_resolved_addrs, screen_spawn_command, screen_spawn_env};
+    use super::{
+        resolve_command, screen_resolved_addrs, screen_spawn_command, screen_spawn_env,
+        CancelRegistry,
+    };
 
     #[test]
     fn ssrf_resolver_screens_resolved_addresses() {
@@ -1292,6 +1573,45 @@ mod tests {
     #[test]
     fn paths_with_extension_pass_through() {
         assert_eq!(resolve_command("C:\\tools\\foo.exe"), "C:\\tools\\foo.exe");
+    }
+
+    #[test]
+    fn cancel_registry_tracks_active_requests() {
+        let registry = CancelRegistry::new();
+        assert!(!registry.cancel("7", Some("too slow")));
+
+        assert!(registry.begin_client_request("7".to_string()));
+        assert!(registry.cancel("7", Some("too slow")));
+        assert!(registry.is_cancelled("7"));
+
+        registry.finish_client_request("7");
+        assert!(!registry.is_cancelled("7"));
+        assert!(!registry.cancel("7", None));
+    }
+
+    #[test]
+    fn cancel_registry_rejects_duplicate_active_ids() {
+        let registry = CancelRegistry::new();
+        assert!(registry.begin_client_request("7".to_string()));
+        assert!(!registry.begin_client_request("7".to_string()));
+
+        registry.finish_client_request("7");
+        assert!(registry.begin_client_request("7".to_string()));
+    }
+
+    #[test]
+    fn cancel_registry_persists_reason_for_deferred_forward() {
+        let registry = CancelRegistry::new();
+        assert!(registry.begin_client_request("7".to_string()));
+        assert!(registry.cancel("7", Some("too slow")));
+
+        let state = registry
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cancelled = state.cancelled.get("7").expect("cancelled state");
+        assert_eq!(cancelled.reason.as_deref(), Some("too slow"));
+        assert!(!cancelled.forwarded);
     }
 
     fn argv(parts: &[&str]) -> Vec<String> {

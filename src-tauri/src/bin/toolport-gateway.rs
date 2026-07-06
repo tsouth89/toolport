@@ -1553,6 +1553,7 @@ fn request_human_decision(mut req: approval::ApprovalRequest) -> approval::Appro
     decide_via_broker(desc, &mut req)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn handle_request(
     req: &Value,
@@ -1564,6 +1565,28 @@ fn handle_request(
     guard: &SearchGuard,
     confirm: &ConfirmGuard,
     allowed: Option<&std::collections::HashSet<String>>,
+    // The client this request is attributed to (a registered HTTP client's audit
+    // label), threaded in rather than stored on the shared router so concurrent
+    // requests can't cross-contaminate and dispatch needn't hold the router lock.
+    client: Option<&str>,
+) -> Option<Value> {
+    handle_request_with_cancel(
+        req, reg, router, cached, lazy, profile, guard, confirm, allowed, None, client,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_request_with_cancel(
+    req: &Value,
+    reg: &Registry,
+    router: &Router,
+    cached: &[Value],
+    lazy: bool,
+    profile: Option<&str>,
+    guard: &SearchGuard,
+    confirm: &ConfirmGuard,
+    allowed: Option<&std::collections::HashSet<String>>,
+    cancel: Option<downstream::CancelContext>,
     // The client this request is attributed to (a registered HTTP client's audit
     // label), threaded in rather than stored on the shared router so concurrent
     // requests can't cross-contaminate and dispatch needn't hold the router lock.
@@ -2192,7 +2215,7 @@ fn handle_request(
             };
 
             let started = Instant::now();
-            match router.route_call(name, arguments) {
+            match router.route_call_with_cancel(name, arguments, cancel.clone()) {
                 Ok(mut result) => {
                     let ok = !result
                         .get("isError")
@@ -2298,7 +2321,7 @@ fn handle_request(
                     return Some(error(id, -32602, &format!("Toolport: no server owns resource '{uri}'")));
                 }
             }
-            match router.read_resource(uri) {
+            match router.read_resource_with_cancel(uri, cancel.clone()) {
                 Ok(mut result) => {
                     // Content defense: a resource is as attacker-controllable as a tool
                     // result, so scan it for injection and label any flagged text as data.
@@ -2346,7 +2369,7 @@ fn handle_request(
                     return Some(error(id, -32602, &format!("Toolport: no route for prompt '{name}'")));
                 }
             }
-            match router.get_prompt(name, arguments) {
+            match router.get_prompt_with_cancel(name, arguments, cancel.clone()) {
                 Ok(mut result) => {
                     // Content defense: a prompt's messages are attacker-controllable too;
                     // scan for injection and label any flagged text as data.
@@ -2825,6 +2848,33 @@ struct GatewayState {
     http: bool,
 }
 
+fn rpc_id_key(v: &Value) -> Option<String> {
+    match v {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn request_id_key(req: &Value) -> Option<String> {
+    req.get("id").filter(|id| !id.is_null()).and_then(rpc_id_key)
+}
+
+fn cancellation_request_id(req: &Value) -> Option<String> {
+    if req.get("method").and_then(|m| m.as_str()) != Some("notifications/cancelled") {
+        return None;
+    }
+    req.get("params")
+        .and_then(|p| p.get("requestId"))
+        .and_then(rpc_id_key)
+}
+
+fn cancellation_reason(req: &Value) -> Option<&str> {
+    req.get("params")
+        .and_then(|p| p.get("reason"))
+        .and_then(|r| r.as_str())
+}
+
 /// One request in, one response out: wait for a cold cache / live router when
 /// the method needs it, self-heal an empty router on a call, then dispatch.
 /// Shared by the stdio loop and the HTTP server so they can't diverge.
@@ -2834,6 +2884,7 @@ fn process_request(
     guard: &SearchGuard,
     confirm: &ConfirmGuard,
     allowed: Option<&std::collections::HashSet<String>>,
+    cancel: Option<downstream::CancelContext>,
     client: Option<&str>,
 ) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -2924,7 +2975,7 @@ fn process_request(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    handle_request(
+    handle_request_with_cancel(
         req,
         &reg,
         &router,
@@ -2934,8 +2985,70 @@ fn process_request(
         guard,
         confirm,
         allowed,
+        cancel,
         client,
     )
+}
+
+fn write_stdio_response(
+    stdout: &Arc<Mutex<std::io::Stdout>>,
+    response: &Value,
+    stdout_broken: &Arc<AtomicBool>,
+) -> bool {
+    let result = {
+        let mut out = stdout
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        writeln!(out, "{response}").and_then(|_| out.flush())
+    };
+    if let Err(err) = result {
+        stdout_broken.store(true, Ordering::SeqCst);
+        glog(&format!("stdio client write failed; stopping reader loop: {err}"));
+        return false;
+    }
+    true
+}
+
+fn handle_stdio_request(
+    state: GatewayState,
+    req: Value,
+    request_key: String,
+    search_guard: Arc<SearchGuard>,
+    confirm_guard: Arc<ConfirmGuard>,
+    cancel_registry: downstream::CancelRegistry,
+    stdout_broken: Arc<AtomicBool>,
+) {
+    let cancel_context = cancel_registry.context(request_key.clone());
+    // A panic in a handler must not kill the gateway: catch it, log it, and
+    // return a JSON-RPC internal error for this request unless the client
+    // cancelled it while it was in flight.
+    let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        process_request(
+            &state,
+            &req,
+            &search_guard,
+            &confirm_guard,
+            None,
+            Some(cancel_context),
+            None,
+        )
+    }))
+    .unwrap_or_else(|_| {
+        let id = req.get("id").cloned().unwrap_or(Value::Null);
+        glog("panic while handling a request; returned an internal error, gateway still up");
+        Some(error(id, -32603, "internal error"))
+    });
+
+    if cancel_registry.is_cancelled(&request_key) {
+        glog(&format!("suppressing response for cancelled request {request_key}"));
+        cancel_registry.finish_client_request(&request_key);
+        return;
+    }
+    cancel_registry.finish_client_request(&request_key);
+
+    if let Some(resp) = response {
+        let _ = write_stdio_response(&state.stdout, &resp, &stdout_broken);
+    }
 }
 
 /// Resolve the HTTP port. `--http [port]` on the command line wins; otherwise
@@ -3222,7 +3335,7 @@ fn handle_http(
                 "method": "tools/call",
                 "params": { "name": name, "arguments": args }
             });
-            match process_request(state, &req, guard, confirm, allowed, client) {
+            match process_request(state, &req, guard, confirm, allowed, None, client) {
                 Some(resp) => {
                     if let Some(err) = resp.get("error") {
                         let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("error");
@@ -3256,11 +3369,12 @@ fn handle_http(
 /// an unauthenticated caller from forcing the gateway to buffer a huge body.
 const MAX_HTTP_BODY: u64 = 4 * 1024 * 1024;
 
-/// Cap on concurrently-handled HTTP requests (across both loopback listeners). Each
-/// in-flight request runs on its own worker thread; past this many, new requests are
-/// handled inline (serially) rather than spawning without bound. Sized well above any
-/// realistic local concurrency: the approval broker caps simultaneous holds at 64, and
-/// non-held calls finish in milliseconds, so this backstop is only ever a flood guard.
+/// Cap on concurrently-handled gateway requests. HTTP and stdio both use this
+/// worker backstop so their concurrency semantics do not drift. Past this many,
+/// new requests are handled inline (serially) rather than spawning without bound.
+/// Sized well above any realistic local concurrency: the approval broker caps
+/// simultaneous holds at 64, and non-held calls finish in milliseconds, so this
+/// backstop is only ever a flood guard.
 const MAX_HTTP_INFLIGHT: usize = 256;
 
 /// Parse a `Bearer <token>` Authorization value. Pure, so it's unit-testable.
@@ -3379,6 +3493,53 @@ impl Drop for InflightGuard {
     }
 }
 
+fn try_acquire_inflight(inflight: &Arc<AtomicUsize>) -> Option<InflightGuard> {
+    let mut current = inflight.load(Ordering::Relaxed);
+    loop {
+        if current >= MAX_HTTP_INFLIGHT {
+            return None;
+        }
+        match inflight.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Some(InflightGuard(Arc::clone(inflight))),
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn spawn_or_run_inflight<F>(
+    inflight: &Arc<AtomicUsize>,
+    job: F,
+) -> Option<std::thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    let Some(guard) = try_acquire_inflight(inflight) else {
+        job();
+        return None;
+    };
+    Some(std::thread::spawn(move || {
+        let _dec = guard;
+        job();
+    }))
+}
+
+fn reap_finished_workers(workers: &mut Vec<std::thread::JoinHandle<()>>) {
+    let mut i = 0;
+    while i < workers.len() {
+        if workers[i].is_finished() {
+            let handle = workers.swap_remove(i);
+            let _ = handle.join();
+        } else {
+            i += 1;
+        }
+    }
+}
+
 fn serve_http_loop(
     server: tiny_http::Server,
     state: GatewayState,
@@ -3388,27 +3549,13 @@ fn serve_http_loop(
 ) {
     let inflight = Arc::new(AtomicUsize::new(0));
     for request in server.incoming_requests() {
-        // Backstop against a pathological flood: never exceed the cap. At the cap we
-        // handle inline (degrading to serial for the overflow) rather than spawn
-        // unbounded threads or drop the request. Realistic local concurrency, bounded
-        // by the broker's own hold cap plus a handful of fast calls, stays far below it.
-        if inflight.load(Ordering::Relaxed) >= MAX_HTTP_INFLIGHT {
-            handle_connection(request, &state, &token, &search, &confirm);
-            continue;
-        }
-        inflight.fetch_add(1, Ordering::Relaxed);
-        let (state, token, search, confirm, inflight) = (
+        let (state, token, search, confirm) = (
             state.clone(),
             token.clone(),
             Arc::clone(&search),
             Arc::clone(&confirm),
-            Arc::clone(&inflight),
         );
-        std::thread::spawn(move || {
-            // Decrement on the way out even if a handler panics before the response
-            // (a panic outside handle_http's catch_unwind), so the count can't leak
-            // and wedge the pool at the cap.
-            let _dec = InflightGuard(inflight);
+        let _ = spawn_or_run_inflight(&inflight, move || {
             handle_connection(request, &state, &token, &search, &confirm);
         });
     }
@@ -3762,9 +3909,17 @@ fn main() {
     let stdin = std::io::stdin();
     // stdio serves one client on one thread, so no sharing is needed, but the guards
     // are now interior-mutable (&self methods) to match the shared HTTP path.
-    let search_guard = SearchGuard::default();
-    let confirm_guard = ConfirmGuard::new();
+    let search_guard = Arc::new(SearchGuard::default());
+    let confirm_guard = Arc::new(ConfirmGuard::new());
+    let cancel_registry = downstream::CancelRegistry::new();
+    let stdio_inflight = Arc::new(AtomicUsize::new(0));
+    let stdout_broken = Arc::new(AtomicBool::new(false));
+    let mut stdio_workers = Vec::new();
     for line in stdin.lock().lines() {
+        reap_finished_workers(&mut stdio_workers);
+        if stdout_broken.load(Ordering::SeqCst) {
+            break;
+        }
         let line = match line {
             Ok(l) => l,
             Err(_) => break,
@@ -3781,28 +3936,51 @@ fn main() {
             "request: {}",
             req.get("method").and_then(|m| m.as_str()).unwrap_or("")
         ));
-        // A panic in a handler must not unwind out of this loop and kill the gateway:
-        // stdio has no supervisor (unlike the HTTP listener, which catches per request),
-        // so one panic would drop the whole MCP connection and take every tool with it.
-        // Catch it, log it, and return a JSON-RPC internal error for this request.
-        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            process_request(&state, &req, &search_guard, &confirm_guard, None, None)
-        }))
-        .unwrap_or_else(|_| {
+        if let Some(cancel_id) = cancellation_request_id(&req) {
+            if cancel_registry.cancel(&cancel_id, cancellation_reason(&req)) {
+                glog(&format!("client cancelled in-flight request {cancel_id}"));
+            } else {
+                gtrace(&format!("ignored cancellation for unknown request {cancel_id}"));
+            }
+            continue;
+        }
+
+        let Some(request_key) = request_id_key(&req) else {
+            let _ = process_request(&state, &req, &search_guard, &confirm_guard, None, None, None);
+            continue;
+        };
+        if !cancel_registry.begin_client_request(request_key.clone()) {
+            gtrace(&format!("rejected duplicate in-flight request id {request_key}"));
             let id = req.get("id").cloned().unwrap_or(Value::Null);
-            glog("panic while handling a request; returned an internal error, gateway still up");
-            Some(error(id, -32603, "internal error"))
-        });
-        if let Some(resp) = response {
-            let mut out = state
-                .stdout
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if writeln!(out, "{resp}").is_err() {
+            let resp = error(id, -32600, "duplicate in-flight request id");
+            if !write_stdio_response(&state.stdout, &resp, &stdout_broken) {
                 break;
             }
-            let _ = out.flush();
+            continue;
         }
+
+        let state = state.clone();
+        let search_guard = Arc::clone(&search_guard);
+        let confirm_guard = Arc::clone(&confirm_guard);
+        let cancel_registry = cancel_registry.clone();
+        let stdout_broken_for_worker = Arc::clone(&stdout_broken);
+        let job = move || {
+            handle_stdio_request(
+                state,
+                req,
+                request_key,
+                search_guard,
+                confirm_guard,
+                cancel_registry,
+                stdout_broken_for_worker,
+            );
+        };
+        if let Some(handle) = spawn_or_run_inflight(&stdio_inflight, job) {
+            stdio_workers.push(handle);
+        }
+    }
+    for worker in stdio_workers {
+        let _ = worker.join();
     }
 }
 
@@ -3991,6 +4169,19 @@ mod tests {
         // The slow call still completes correctly.
         let slow_resp = slow.join().unwrap();
         assert!(slow_resp.contains("done"), "slow response was: {slow_resp}");
+    }
+
+    #[test]
+    fn inflight_guard_caps_and_releases_workers() {
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let guards: Vec<_> = (0..MAX_HTTP_INFLIGHT)
+            .map(|_| try_acquire_inflight(&inflight).expect("permit under cap"))
+            .collect();
+
+        assert!(try_acquire_inflight(&inflight).is_none());
+        drop(guards);
+        assert_eq!(inflight.load(Ordering::SeqCst), 0);
+        assert!(try_acquire_inflight(&inflight).is_some());
     }
 
     #[test]

@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::downstream::{
-    backoff_delay, DownstreamServer, TransportError, HTTP_MAX_RETRIES, HTTP_RETRY_CAP,
+    backoff_delay, CancelContext, DownstreamServer, TransportError, HTTP_MAX_RETRIES,
+    HTTP_RETRY_CAP,
 };
 use crate::registry::ToolOverride;
 
@@ -628,6 +629,15 @@ impl Router {
     /// server, so concurrent calls to different servers run in parallel while
     /// calls to the same server (one stdio pipe) serialize.
     pub fn route_call(&self, exposed_name: &str, arguments: Value) -> Result<Value, String> {
+        self.route_call_with_cancel(exposed_name, arguments, None)
+    }
+
+    pub fn route_call_with_cancel(
+        &self,
+        exposed_name: &str,
+        arguments: Value,
+        cancel: Option<CancelContext>,
+    ) -> Result<Value, String> {
         if let Some(reason) = self.blocked.get(exposed_name) {
             return Err(format!("tool '{exposed_name}' is {reason}"));
         }
@@ -637,7 +647,9 @@ impl Router {
             .cloned()
             .ok_or_else(|| format!("no route for tool '{exposed_name}'"))?;
         let slot = self.slot_for(&server_id)?;
-        self.call_with_retry(&slot, |server| server.call(&tool, arguments.clone()))
+        self.call_with_retry(&slot, |server| {
+            server.call_with_cancel(&tool, arguments.clone(), cancel.clone())
+        })
     }
 
     /// Every downstream resource, uris unchanged.
@@ -665,32 +677,53 @@ impl Router {
     /// Read a resource by uri from whichever server advertised it. `&self`: locks
     /// only the owning server (see `route_call`).
     pub fn read_resource(&self, uri: &str) -> Result<Value, String> {
+        self.read_resource_with_cancel(uri, None)
+    }
+
+    pub fn read_resource_with_cancel(
+        &self,
+        uri: &str,
+        cancel: Option<CancelContext>,
+    ) -> Result<Value, String> {
         let server_id = self
             .resource_routes
             .get(uri)
             .cloned()
             .ok_or_else(|| format!("no server owns resource '{uri}'"))?;
         let slot = self.slot_for(&server_id)?;
-        self.call_with_retry(&slot, |server| server.read_resource(uri))
+        self.call_with_retry(&slot, |server| {
+            server.read_resource_with_cancel(uri, cancel.clone())
+        })
     }
 
     /// Get a prompt by its exposed name, forwarding the server's real name.
     /// `&self`: locks only the owning server (see `route_call`).
     pub fn get_prompt(&self, exposed_name: &str, arguments: Value) -> Result<Value, String> {
+        self.get_prompt_with_cancel(exposed_name, arguments, None)
+    }
+
+    pub fn get_prompt_with_cancel(
+        &self,
+        exposed_name: &str,
+        arguments: Value,
+        cancel: Option<CancelContext>,
+    ) -> Result<Value, String> {
         let (server_id, name) = self
             .prompt_routes
             .get(exposed_name)
             .cloned()
             .ok_or_else(|| format!("no route for prompt '{exposed_name}'"))?;
         let slot = self.slot_for(&server_id)?;
-        self.call_with_retry(&slot, |server| server.get_prompt(&name, arguments.clone()))
+        self.call_with_retry(&slot, |server| {
+            server.get_prompt_with_cancel(&name, arguments.clone(), cancel.clone())
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -806,7 +839,7 @@ mod tests {
         assert_eq!(schema["properties"]["alias"]["minLength"], 1);
         assert!(!serde_json::to_string(&schema).unwrap().contains("$ref"));
     }
-    use crate::downstream::{DownstreamServer, Transport};
+    use crate::downstream::{CancelRegistry, DownstreamServer, Transport};
 
     /// A fake downstream server: advertises `echo` + `add`, echoes calls back.
     struct MockTransport {
@@ -1169,6 +1202,70 @@ mod tests {
         let result = router.read_resource("postgres://readme").unwrap();
         assert_eq!(result["contents"][0]["text"], "postgres-body");
         assert!(router.read_resource("nope://x").is_err());
+    }
+
+    #[test]
+    fn route_call_passes_cancel_context_to_transport() {
+        struct CancelAware {
+            saw_cancel: Arc<AtomicBool>,
+        }
+
+        impl Transport for CancelAware {
+            fn request(&mut self, method: &str, _params: Value) -> Result<Value, TransportError> {
+                match method {
+                    "initialize" => Ok(json!({ "protocolVersion": "2025-06-18" })),
+                    "tools/list" => Ok(json!({ "tools": [{ "name": "echo", "description": "" }] })),
+                    other => Err(TransportError::Fatal(format!("unexpected method {other}"))),
+                }
+            }
+
+            fn request_with_cancel(
+                &mut self,
+                method: &str,
+                params: Value,
+                cancel: Option<CancelContext>,
+            ) -> Result<Value, TransportError> {
+                match method {
+                    "tools/call" => {
+                        self.saw_cancel.store(cancel.is_some(), Ordering::SeqCst);
+                        Ok(json!({
+                            "content": [{ "type": "text", "text": "ok" }],
+                            "isError": false
+                        }))
+                    }
+                    _ => self.request(method, params),
+                }
+            }
+
+            fn notify(&mut self, _method: &str, _params: Value) -> Result<(), TransportError> {
+                Ok(())
+            }
+        }
+
+        let saw_cancel = Arc::new(AtomicBool::new(false));
+        let ds = DownstreamServer::connect(
+            "s".into(),
+            Box::new(CancelAware {
+                saw_cancel: Arc::clone(&saw_cancel),
+            }),
+        )
+        .unwrap();
+        let mut router = Router::new();
+        router.add(ds);
+        let registry = CancelRegistry::new();
+        assert!(registry.begin_client_request("99".to_string()));
+
+        let result = router
+            .route_call_with_cancel(
+                "s__echo",
+                json!({}),
+                Some(registry.context("99".to_string())),
+            )
+            .unwrap();
+
+        assert_eq!(result["content"][0]["text"], "ok");
+        assert!(saw_cancel.load(Ordering::SeqCst));
+        registry.finish_client_request("99");
     }
 
     #[test]
