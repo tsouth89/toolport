@@ -6,6 +6,48 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-07-06
+
+A focused safety and gateway-control patch release. The headline fix is the
+human-in-the-loop approval path: approval failures are now diagnosable, audited,
+and resilient to stale broker descriptors instead of collapsing into a vague
+timeout.
+
+### Added
+
+- **Grouped discovery mode.** `CONDUIT_DISCOVERY=grouped` now advertises the lazy
+  meta-tools plus one `help_<server>` browse tool per connected server, giving
+  weaker/local models an enumerable middle ground between the tiny lazy surface and
+  the full catalog.
+- **Per-registry discovery mode.** Discovery mode can now be stored in the registry
+  (`lazy`, `grouped`, or `full`) instead of only being controlled by a process env
+  var.
+- **MCP request cancellation forwarding.** The gateway now proxies cancellation
+  signals down to the active downstream request path, so canceled client work can
+  stop instead of continuing pointlessly in the background.
+- **HIL decision audit records.** Approval decisions now record the gate reason,
+  decision kind, held duration, and a canonical `argsHash` without storing raw
+  arguments.
+
+### Changed
+
+- **HIL approval failures are legible.** A dead or stale approval broker is reported
+  as `unreachable`, distinct from a human timeout, and the gateway re-reads the broker
+  descriptor once to self-heal the common app-restart/rebound-port race.
+- **Lazy search recall improved.** Added dispute/chargeback and token/tokenize
+  synonym coverage, improving the local recall fixture from 87% to 96% at 10.
+
+### Fixed
+
+- **Packaged Windows gateways escape MSIX filesystem virtualization.** The app and
+  gateway now agree on the same real data directory, avoiding stale registry and
+  approval files from Windows app-container redirection.
+- **Several high-severity audit findings were closed.** The pass tightened external
+  URL opening, catalog/import handling, and content-defense scanning, including a
+  result-side evasion found during the app audit.
+- **Release hygiene.** Version metadata now targets `1.5.1`, and local `.claude/`
+  session artifacts are ignored so they cannot drift into release commits.
+
 ## [1.5.0] - 2026-07-05
 
 A robustness release (the gateway, app, and Teams client now recover cleanly from
