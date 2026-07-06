@@ -604,6 +604,8 @@ fn synonym_group(token: &str) -> &'static [&'static str] {
         &["project", "repo", "repository"],
         &["user", "account", "member", "customer"],
         &["team", "org", "organization", "workspace"],
+        &["dispute", "chargeback"],
+        &["token", "tokenize"],
     ];
     GROUPS
         .iter()
@@ -4930,6 +4932,8 @@ mod tests {
             json!({ "name": "resend__send_email", "description": "Send an email", "inputSchema": {} }),
             json!({ "name": "stripe__list_charges", "description": "List charges", "inputSchema": {} }),
             json!({ "name": "gh__listPullRequests", "description": "List PRs", "inputSchema": {} }),
+            json!({ "name": "stripe__list_disputes", "description": "List disputes", "inputSchema": {} }),
+            json!({ "name": "stripe__create_token", "description": "Create a token", "inputSchema": {} }),
         ];
         // Synonym: "mail" finds the email tool even though it never says "mail".
         let (hits, _) = search_catalog(&cat, "mail", None, 10);
@@ -4942,6 +4946,13 @@ mod tests {
         // camelCase: "pull requests" tokenizes listPullRequests into pull/request.
         let (hits, _) = search_catalog(&cat, "pull requests", None, 10);
         assert_eq!(hits[0]["name"], "gh__listPullRequests");
+
+        // Domain synonyms surfaced by the recall benchmark: "chargeback" == dispute,
+        // and "tokenize" bridges to a "token" tool.
+        let (hits, _) = search_catalog(&cat, "chargeback", None, 10);
+        assert_eq!(hits[0]["name"], "stripe__list_disputes");
+        let (hits, _) = search_catalog(&cat, "tokenize", None, 10);
+        assert_eq!(hits[0]["name"], "stripe__create_token");
     }
 
     #[test]
