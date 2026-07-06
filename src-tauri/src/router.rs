@@ -1253,7 +1253,7 @@ mod tests {
         let mut router = Router::new();
         router.add(ds);
         let registry = CancelRegistry::new();
-        registry.begin_client_request("99".to_string());
+        assert!(registry.begin_client_request("99".to_string()));
 
         let result = router
             .route_call_with_cancel(

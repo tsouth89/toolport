@@ -80,8 +80,14 @@ pub struct CancelRegistry {
 #[derive(Default)]
 struct CancelState {
     active: HashSet<String>,
-    cancelled: HashSet<String>,
+    cancelled: HashMap<String, CancelledRequest>,
     in_flight: HashMap<String, CancelEntry>,
+}
+
+#[derive(Clone, Default)]
+struct CancelledRequest {
+    reason: Option<String>,
+    forwarded: bool,
 }
 
 #[derive(Clone)]
@@ -107,9 +113,13 @@ impl CancelRegistry {
         Self::default()
     }
 
-    pub fn begin_client_request(&self, client_request_id: String) {
+    pub fn begin_client_request(&self, client_request_id: String) -> bool {
         let mut state = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active.contains(&client_request_id) {
+            return false;
+        }
         state.active.insert(client_request_id);
+        true
     }
 
     pub fn finish_client_request(&self, client_request_id: &str) {
@@ -127,18 +137,23 @@ impl CancelRegistry {
     /// stdio downstream, forward `notifications/cancelled` with that downstream id.
     /// Returns true when the referenced client request is still active.
     pub fn cancel(&self, client_request_id: &str, reason: Option<&str>) -> bool {
-        let entry = {
+        let forward = {
             let mut state = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if !state.active.contains(client_request_id) {
                 return false;
             }
-            state.cancelled.insert(client_request_id.to_string());
-            state.in_flight.get(client_request_id).cloned()
-        };
-        if let Some(entry) = entry {
-            if let Err(err) = entry.send_cancel(reason) {
-                eprintln!("toolport: failed to forward cancellation downstream: {err}");
+            let reason = normalize_cancel_reason(reason);
+            let cancelled = state
+                .cancelled
+                .entry(client_request_id.to_string())
+                .or_default();
+            if reason.is_some() {
+                cancelled.reason = reason;
             }
+            prepare_cancel_forward(&mut state, client_request_id)
+        };
+        if let Some((entry, reason)) = forward {
+            entry.send_cancel_async(reason);
         }
         true
     }
@@ -148,20 +163,39 @@ impl CancelRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .cancelled
-            .contains(client_request_id)
+            .contains_key(client_request_id)
+    }
+
+    fn forward_cancel_if_ready(&self, client_request_id: &str) {
+        let forward = {
+            let mut state = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            prepare_cancel_forward(&mut state, client_request_id)
+        };
+        if let Some((entry, reason)) = forward {
+            entry.send_cancel_async(reason);
+        }
     }
 
     fn register(&self, client_request_id: String, entry: CancelEntry) -> CancelGuard {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .in_flight
-            .insert(client_request_id.clone(), entry);
+        let mut state = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.in_flight.insert(client_request_id.clone(), entry);
+        if let Some(cancelled) = state.cancelled.get_mut(&client_request_id) {
+            cancelled.forwarded = false;
+        }
         CancelGuard { client_request_id, registry: self.clone() }
     }
 }
 
 impl CancelEntry {
+    fn send_cancel_async(&self, reason: Option<String>) {
+        let entry = self.clone();
+        std::thread::spawn(move || {
+            if let Err(err) = entry.send_cancel(reason.as_deref()) {
+                eprintln!("toolport: failed to forward cancellation downstream: {err}");
+            }
+        });
+    }
+
     fn send_cancel(&self, reason: Option<&str>) -> Result<(), String> {
         let mut params = serde_json::Map::new();
         params.insert("requestId".to_string(), self.downstream_id.clone());
@@ -177,6 +211,25 @@ impl CancelEntry {
         writeln!(stdin, "{msg}").map_err(|e| e.to_string())?;
         stdin.flush().map_err(|e| e.to_string())
     }
+}
+
+fn normalize_cancel_reason(reason: Option<&str>) -> Option<String> {
+    reason
+        .filter(|s| !s.trim().is_empty())
+        .map(std::string::ToString::to_string)
+}
+
+fn prepare_cancel_forward(
+    state: &mut CancelState,
+    client_request_id: &str,
+) -> Option<(CancelEntry, Option<String>)> {
+    let cancelled = state.cancelled.get_mut(client_request_id)?;
+    if cancelled.forwarded {
+        return None;
+    }
+    let entry = state.in_flight.get(client_request_id)?.clone();
+    cancelled.forwarded = true;
+    Some((entry, cancelled.reason.clone()))
 }
 
 impl Drop for CancelGuard {
@@ -349,8 +402,13 @@ pub trait Transport: Send {
         &mut self,
         method: &str,
         params: Value,
-        _cancel: Option<CancelContext>,
+        cancel: Option<CancelContext>,
     ) -> Result<Value, TransportError> {
+        if cancel.is_some() {
+            downstream_trace(&format!(
+                "cancellation not supported for downstream transport method {method}"
+            ));
+        }
         self.request(method, params)
     }
     fn notify(&mut self, method: &str, params: Value) -> Result<(), TransportError>;
@@ -363,6 +421,26 @@ pub trait Transport: Send {
     /// tools during startup doesn't trigger a needless rebuild. Default no-op:
     /// transports without a live notification stream ignore it.
     fn arm_tools_watch(&mut self) {}
+}
+
+fn downstream_trace(msg: &str) {
+    if std::env::var_os("CONDUIT_DEBUG").is_none() {
+        return;
+    }
+    let Some(path) = crate::registry::gateway_log_path() else {
+        eprintln!("toolport: {msg}");
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{msg}");
+    }
 }
 
 /// Bitmask of which downstream list a `notifications/.../list_changed` announces.
@@ -950,7 +1028,7 @@ impl Transport for StdioTransport {
         }
         if let Some((registry, client_request_id)) = cancel_after_write {
             if registry.is_cancelled(&client_request_id) {
-                registry.cancel(&client_request_id, None);
+                registry.forward_cancel_if_ready(&client_request_id);
             }
         }
         let _cancel_guard = cancel_guard;
@@ -1502,13 +1580,38 @@ mod tests {
         let registry = CancelRegistry::new();
         assert!(!registry.cancel("7", Some("too slow")));
 
-        registry.begin_client_request("7".to_string());
+        assert!(registry.begin_client_request("7".to_string()));
         assert!(registry.cancel("7", Some("too slow")));
         assert!(registry.is_cancelled("7"));
 
         registry.finish_client_request("7");
         assert!(!registry.is_cancelled("7"));
         assert!(!registry.cancel("7", None));
+    }
+
+    #[test]
+    fn cancel_registry_rejects_duplicate_active_ids() {
+        let registry = CancelRegistry::new();
+        assert!(registry.begin_client_request("7".to_string()));
+        assert!(!registry.begin_client_request("7".to_string()));
+
+        registry.finish_client_request("7");
+        assert!(registry.begin_client_request("7".to_string()));
+    }
+
+    #[test]
+    fn cancel_registry_persists_reason_for_deferred_forward() {
+        let registry = CancelRegistry::new();
+        assert!(registry.begin_client_request("7".to_string()));
+        assert!(registry.cancel("7", Some("too slow")));
+
+        let state = registry
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cancelled = state.cancelled.get("7").expect("cancelled state");
+        assert_eq!(cancelled.reason.as_deref(), Some("too slow"));
+        assert!(!cancelled.forwarded);
     }
 
     fn argv(parts: &[&str]) -> Vec<String> {
