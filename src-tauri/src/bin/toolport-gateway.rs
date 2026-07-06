@@ -1519,38 +1519,106 @@ fn read_endpoint_descriptor() -> Option<approval::EndpointDescriptor> {
     serde_json::from_str(&raw).ok()
 }
 
-/// Ask the app broker for a human decision on `req`. FAIL-CLOSED: a missing endpoint, a
-/// failed connect, any I/O error, or a read timeout all return `Timeout` (a deny). The
-/// arguments travel over the socket and never touch disk. Transport is loopback TCP +
-/// token for now; hardening to an OS-permissioned named-pipe / uds is a follow-up.
+/// The outcome of a single dial to the approval broker. Separating "we never reached a
+/// live broker" from "a broker answered" lets the caller retry a *stale* endpoint (the app
+/// just restarted and rebound to a new port) without ever re-prompting a human who was
+/// already asked.
+enum BrokerAttempt {
+    /// A broker received the request and answered (Approved / Denied / Timeout).
+    Decided(approval::ApprovalDecision),
+    /// We never handed the request to a live broker: no descriptor, connect refused, or the
+    /// transport failed before the request went across. No human was asked, so a retry
+    /// against a freshly-read descriptor is safe.
+    Unreachable,
+}
+
+/// One dial to the broker described by `desc`. FAIL-CLOSED throughout: the arguments travel
+/// over the socket and never touch disk. Transport is loopback TCP + token for now;
+/// hardening to an OS-permissioned named-pipe / uds is a follow-up.
+///
+/// The key invariant: `Unreachable` is returned ONLY when the request never reached a
+/// broker (so no human saw it). Once the request is written, any later failure - including
+/// the read timeout that means "the human didn't answer" - is a `Decided(Timeout)`, so we
+/// never retry in a way that could double-prompt.
+fn try_decide_once(
+    desc: Option<approval::EndpointDescriptor>,
+    req: &mut approval::ApprovalRequest,
+) -> BrokerAttempt {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    let Some(desc) = desc else { return BrokerAttempt::Unreachable };
+    req.token = desc.token.clone();
+    let Ok(mut stream) = TcpStream::connect(&desc.endpoint) else {
+        return BrokerAttempt::Unreachable;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(approval::DEFAULT_TIMEOUT_SECS)));
+    let Ok(line) = serde_json::to_string(req) else {
+        // We connected but can't serialize our own request: not a reachability problem, so
+        // don't spin on retry. Fail closed.
+        return BrokerAttempt::Decided(approval::ApprovalDecision::Timeout);
+    };
+    if stream.write_all(line.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
+        // The request never made it across, so no human was asked: safe to re-dial.
+        return BrokerAttempt::Unreachable;
+    }
+    let _ = stream.flush();
+    let mut resp = String::new();
+    match BufReader::new(stream).read_line(&mut resp) {
+        // Connected and the peer closed with no answer: not a healthy broker. No human was
+        // shown a prompt (the broker's pre-prompt reject paths close silently), so re-dial.
+        Ok(0) => BrokerAttempt::Unreachable,
+        Ok(_) => {
+            let t = resp.trim();
+            if t.is_empty() {
+                BrokerAttempt::Unreachable
+            } else {
+                // A parseable decision is authoritative; an unparseable line is fail-closed
+                // as a Timeout (a real broker answered, so this is not a retry case).
+                BrokerAttempt::Decided(
+                    serde_json::from_str::<approval::ApprovalDecision>(t)
+                        .unwrap_or(approval::ApprovalDecision::Timeout),
+                )
+            }
+        }
+        // A read error AFTER we sent the request is the "human didn't answer in time" path
+        // (read timeout) or a mid-wait drop. Either way the broker had our request, so this
+        // is a genuine no-decision Timeout - never retry (that would re-prompt).
+        Err(_) => BrokerAttempt::Decided(approval::ApprovalDecision::Timeout),
+    }
+}
+
+/// Ask the app broker for a human decision on `req`, reading the endpoint descriptor once.
+/// Collapses an unreachable broker to the `Unreachable` decision (still fail-closed). Kept
+/// as a thin, dependency-free entry point for unit tests; `request_human_decision` is the
+/// production path with the self-healing retry.
 fn decide_via_broker(
     desc: Option<approval::EndpointDescriptor>,
     req: &mut approval::ApprovalRequest,
 ) -> approval::ApprovalDecision {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpStream;
-    let deny = approval::ApprovalDecision::Timeout;
-    let Some(desc) = desc else { return deny };
-    req.token = desc.token.clone();
-    let Ok(mut stream) = TcpStream::connect(&desc.endpoint) else { return deny };
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(approval::DEFAULT_TIMEOUT_SECS)));
-    let Ok(line) = serde_json::to_string(req) else { return deny };
-    if stream.write_all(line.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
-        return deny;
+    match try_decide_once(desc, req) {
+        BrokerAttempt::Decided(d) => d,
+        BrokerAttempt::Unreachable => approval::ApprovalDecision::Unreachable,
     }
-    let _ = stream.flush();
-    let mut resp = String::new();
-    if BufReader::new(stream).read_line(&mut resp).is_err() || resp.trim().is_empty() {
-        return deny;
-    }
-    serde_json::from_str::<approval::ApprovalDecision>(resp.trim()).unwrap_or(deny)
 }
 
 /// Hold a gated tool call until a human decides via the Toolport app (or it fails closed).
+///
+/// If the first dial can't reach a live broker, re-read the descriptor and retry once: the
+/// app may have just restarted and rebound to a new port, leaving the descriptor we first
+/// read stale. This self-heals that race without ever failing open - two unreachable dials
+/// return `Unreachable`, which is still a deny.
 fn request_human_decision(mut req: approval::ApprovalRequest) -> approval::ApprovalDecision {
-    let desc = read_endpoint_descriptor();
-    decide_via_broker(desc, &mut req)
+    match try_decide_once(read_endpoint_descriptor(), &mut req) {
+        BrokerAttempt::Decided(d) => d,
+        BrokerAttempt::Unreachable => match try_decide_once(read_endpoint_descriptor(), &mut req) {
+            BrokerAttempt::Decided(d) => d,
+            BrokerAttempt::Unreachable => {
+                gtrace("approval broker unreachable after retry; failing closed (Unreachable)");
+                approval::ApprovalDecision::Unreachable
+            }
+        },
+    }
 }
 
 #[cfg(test)]
@@ -2137,6 +2205,7 @@ fn handle_request_with_cancel(
                     .map(|s| matches!(s.source.as_deref(), Some("shared") | Some("registry")))
                     .unwrap_or(false);
                 if let Some(reason) = approval::gate_reason(true, is_dest, untrusted) {
+                    let t0 = std::time::Instant::now();
                     let decision = request_human_decision(approval::ApprovalRequest {
                         token: String::new(),
                         id: new_correlation_id(),
@@ -2146,13 +2215,35 @@ fn handle_request_with_cancel(
                         reason,
                         arguments: arguments.clone(),
                     });
+                    let held_ms = t0.elapsed().as_millis() as u64;
                     if !decision.is_approved() {
-                        let why = if decision == approval::ApprovalDecision::Denied {
-                            "was denied by a human reviewer"
-                        } else {
-                            "was not approved in time (the Toolport app may be closed)"
+                        let why = match decision {
+                            approval::ApprovalDecision::Denied => "was denied by a human reviewer",
+                            approval::ApprovalDecision::Unreachable => {
+                                "could not be approved because the Toolport approval service was \
+                                 unreachable (is the Toolport app running?)"
+                            }
+                            _ => "was not approved in time (the Toolport app may be closed)",
                         };
-                        audit::record_held(srv, tool, client);
+                        // Governance audit: the gate reason and which non-approval outcome
+                        // (denied / no-response / unreachable), plus a content hash of the
+                        // exact call - never the raw args. Replaces the flat record_held so
+                        // the three failure modes are no longer indistinguishable in the log.
+                        let reason_str = match reason {
+                            approval::ApprovalReason::Destructive => "destructive",
+                            approval::ApprovalReason::UntrustedSource => "untrusted_source",
+                            approval::ApprovalReason::DestructiveAndUntrusted => {
+                                "destructive_and_untrusted"
+                            }
+                        };
+                        let decision_str = match decision {
+                            approval::ApprovalDecision::Denied => "denied",
+                            approval::ApprovalDecision::Unreachable => "unreachable",
+                            _ => "no_response",
+                        };
+                        audit::record_decision(
+                            srv, tool, client, reason_str, decision_str, &arguments, Some(held_ms),
+                        );
                         return Some(success(
                             id,
                             json!({
@@ -4002,16 +4093,22 @@ mod tests {
             reason: approval::ApprovalReason::Destructive,
             arguments: serde_json::json!({}),
         };
-        // No endpoint descriptor (Toolport app not running) -> deny.
+        // No endpoint descriptor (Toolport app not running) -> Unreachable (fail-closed),
+        // distinct from a human Timeout so the caller can explain *why* it was blocked.
         let mut r = mk();
-        assert!(!decide_via_broker(None, &mut r).is_approved());
-        // A published endpoint that refuses the connection -> deny.
+        let d = decide_via_broker(None, &mut r);
+        assert!(!d.is_approved());
+        assert_eq!(d, approval::ApprovalDecision::Unreachable);
+        // A published endpoint that refuses the connection -> also Unreachable (we never
+        // handed the request to a broker), so request_human_decision may retry a re-read.
         let mut r = mk();
         let bad = Some(approval::EndpointDescriptor {
             endpoint: "127.0.0.1:1".into(),
             token: "t".into(),
         });
-        assert!(!decide_via_broker(bad, &mut r).is_approved());
+        let d = decide_via_broker(bad, &mut r);
+        assert!(!d.is_approved());
+        assert_eq!(d, approval::ApprovalDecision::Unreachable);
     }
 
     fn router() -> Router {

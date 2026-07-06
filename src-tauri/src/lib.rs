@@ -2288,6 +2288,12 @@ pub fn run() {
                     }
                 }
             }
+            // On FINAL exit only (not a cancelable ExitRequested), remove the approval
+            // endpoint descriptor so a gateway dialing after we're gone reads no broker
+            // (a clean Unreachable) rather than connecting to the dead port we left behind.
+            if matches!(event, tauri::RunEvent::Exit) {
+                approval_broker::clear_endpoint();
+            }
         });
 }
 

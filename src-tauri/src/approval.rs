@@ -77,13 +77,21 @@ pub enum ApprovalDecision {
     Approved,
     /// A human denied; the call is refused.
     Denied,
-    /// No human decided in time (fail-closed); the caller treats this as a deny.
+    /// A human was asked but did not decide within the fail-closed window; treated as a deny.
     Timeout,
+    /// The gateway could not reach a live approval broker: no endpoint descriptor, a dead
+    /// endpoint, or the transport failed before the request was ever handed off. Distinct
+    /// from [`Timeout`] (a human *was* asked and didn't answer) so the agent-facing message
+    /// and any audit can tell "the approval service is down" apart from "you didn't approve
+    /// in time". Still fail-closed - it never lets the call proceed. The broker never sends
+    /// this; it is only ever produced gateway-side.
+    Unreachable,
 }
 
 impl ApprovalDecision {
     /// The security-critical predicate: ONLY an explicit human approval lets the call
-    /// proceed. Denied, Timeout, and (at the call site) any transport error all block.
+    /// proceed. Denied, Timeout, Unreachable, and (at the call site) any transport error
+    /// all block.
     pub fn is_approved(self) -> bool {
         matches!(self, ApprovalDecision::Approved)
     }
@@ -147,6 +155,19 @@ mod tests {
         assert!(ApprovalDecision::Approved.is_approved());
         assert!(!ApprovalDecision::Denied.is_approved());
         assert!(!ApprovalDecision::Timeout.is_approved());
+        // Unreachable is fail-closed exactly like the other non-approvals.
+        assert!(!ApprovalDecision::Unreachable.is_approved());
+    }
+
+    #[test]
+    fn unreachable_is_a_distinct_serde_variant() {
+        // The variant must round-trip (it flows through the same decision type), and be
+        // distinct from Timeout so callers can tell the two failure modes apart.
+        let s = serde_json::to_string(&ApprovalDecision::Unreachable).unwrap();
+        assert_eq!(s, "\"unreachable\"");
+        let back: ApprovalDecision = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, ApprovalDecision::Unreachable);
+        assert_ne!(ApprovalDecision::Unreachable, ApprovalDecision::Timeout);
     }
 
     #[test]

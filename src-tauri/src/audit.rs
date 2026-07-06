@@ -87,6 +87,106 @@ pub fn record_held(server: &str, tool: &str, client: Option<&str>) {
     write_line(&entry);
 }
 
+/// Build the audit entry for a gated HITL decision. Pure (no I/O) so it's unit-testable.
+/// Kept `ok:true` + `held:true` so it stays out of the error rate and the existing
+/// held-row UI renders it unchanged; the added fields (`kind`, `reason`, `decision`,
+/// `argsHash`) let a governance / Approvals view tell *why* a call was gated and *which*
+/// way it resolved (denied vs no-response vs unreachable) apart - which the old flat
+/// `record_held` collapsed into one indistinguishable record. `reason` is the snake_case
+/// [`crate::approval::ApprovalReason`]; `decision` is `approved` | `denied` | `no_response`
+/// | `unreachable`. The RAW arguments are never stored - only `argsHash` - so the log
+/// proves which exact call was decided without persisting secrets/PII from arguments.
+fn decision_entry(
+    server: &str,
+    tool: &str,
+    client: Option<&str>,
+    reason: &str,
+    decision: &str,
+    args_hash: &str,
+    duration_ms: Option<u64>,
+) -> Value {
+    let mut entry = json!({
+        "ts": epoch_millis() as u64,
+        "server": server,
+        "tool": tool,
+        "ok": true,
+        "held": true,
+        "kind": "approval",
+        "reason": reason,
+        "decision": decision,
+        "argsHash": args_hash,
+    });
+    if let Some(ms) = duration_ms {
+        entry["durationMs"] = json!(ms);
+    }
+    if let Some(c) = client.filter(|c| !c.is_empty()) {
+        entry["client"] = json!(c);
+    }
+    entry
+}
+
+/// Record a gated HITL decision (the human approved/denied it, it timed out, or the
+/// broker was unreachable). Replaces the flat `record_held` on the approval path so the
+/// audit can distinguish the outcomes. Hashes the arguments; never stores them raw.
+pub fn record_decision(
+    server: &str,
+    tool: &str,
+    client: Option<&str>,
+    reason: &str,
+    decision: &str,
+    args: &Value,
+    duration_ms: Option<u64>,
+) {
+    write_line(&decision_entry(
+        server,
+        tool,
+        client,
+        reason,
+        decision,
+        &args_hash(args),
+        duration_ms,
+    ));
+}
+
+/// A stable SHA-256 (hex) of a call's arguments over a canonical JSON serialization
+/// (object keys sorted recursively), so the same logical call always hashes the same
+/// regardless of key order. This is the content-binding foundation: it proves "the exact
+/// call that was approved is the one that ran" without persisting the arguments themselves.
+pub fn args_hash(value: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(canonical_json(value).as_bytes());
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Serialize `value` to canonical JSON: object keys sorted recursively so the string (and
+/// therefore its hash) is independent of key insertion order. Scalars defer to serde's
+/// stringification; only object key ordering is normalized.
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let inner: Vec<String> = keys
+                .into_iter()
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_default(),
+                        canonical_json(&map[k])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", inner.join(","))
+        }
+        Value::Array(arr) => {
+            let inner: Vec<String> = arr.iter().map(canonical_json).collect();
+            format!("[{}]", inner.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Build the audit entry for an agent-control server toggle. Pure (no I/O) so the
 /// scope-proof invariant is unit-testable: on a denied out-of-scope attempt the lookup
 /// never resolves the target, so `resolvedServerId` is null and the record can't reveal
@@ -355,6 +455,10 @@ const CSV_COLUMNS: &[&str] = &[
     "client",
     "ok",
     "held",
+    "kind",
+    "reason",
+    "decision",
+    "argsHash",
     "durationMs",
     "action",
     "error",
@@ -407,7 +511,7 @@ mod tests {
         })];
         let csv = to_csv(&entries);
         assert!(csv.starts_with(
-            "ts,server,tool,client,ok,held,durationMs,action,error\r\n"
+            "ts,server,tool,client,ok,held,kind,reason,decision,argsHash,durationMs,action,error\r\n"
         ));
         assert!(csv.contains("\"gh\""));
         assert!(csv.contains("\"search\""));
@@ -537,5 +641,67 @@ mod tests {
         // Blank lines are dropped.
         assert_eq!(trimmed_tail("a\n\n\nb\n", 5), "a\nb\n");
         assert_eq!(trimmed_tail("", 5), "");
+    }
+
+    #[test]
+    fn decision_entry_records_outcome_and_never_stores_raw_args() {
+        let e = decision_entry(
+            "neon",
+            "delete_branch",
+            Some("claude"),
+            "destructive",
+            "unreachable",
+            "deadbeef",
+            Some(1234),
+        );
+        assert_eq!(e["kind"], "approval");
+        assert_eq!(e["reason"], "destructive");
+        assert_eq!(e["decision"], "unreachable");
+        assert_eq!(e["argsHash"], "deadbeef");
+        assert_eq!(e["durationMs"], 1234);
+        assert_eq!(e["client"], "claude");
+        // Held (didn't run) but ok:true so it stays out of the error rate.
+        assert_eq!(e["held"], true);
+        assert_eq!(e["ok"], true);
+        // The record is a hash + metadata only: raw arguments must never be present.
+        assert!(e.get("arguments").is_none());
+
+        // A distinct decision is distinguishable in the log - the whole point vs record_held.
+        let denied = decision_entry("s", "t", None, "untrusted_source", "denied", "h", None);
+        assert_eq!(denied["decision"], "denied");
+        assert_eq!(denied["reason"], "untrusted_source");
+        // Unattributed call omits the client field entirely.
+        assert!(denied.get("client").is_none());
+        // durationMs is optional.
+        assert!(denied.get("durationMs").is_none());
+    }
+
+    #[test]
+    fn args_hash_is_stable_across_key_order_and_binds_to_content() {
+        // Key order must not change the hash (content-binding needs a canonical form).
+        assert_eq!(
+            args_hash(&json!({ "a": 1, "b": [2, 3], "c": { "x": 1, "y": 2 } })),
+            args_hash(&json!({ "c": { "y": 2, "x": 1 }, "b": [2, 3], "a": 1 })),
+        );
+        // Different content -> different hash.
+        assert_ne!(
+            args_hash(&json!({ "table": "users" })),
+            args_hash(&json!({ "table": "orders" })),
+        );
+        // Array order IS significant (it's part of the content).
+        assert_ne!(args_hash(&json!([1, 2])), args_hash(&json!([2, 1])));
+        // It's a SHA-256: 64 lowercase hex chars, and it never echoes the raw value.
+        let h = args_hash(&json!({ "secret": "hunter2" }));
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!h.contains("hunter2"));
+    }
+
+    #[test]
+    fn canonical_json_sorts_object_keys_recursively() {
+        assert_eq!(
+            canonical_json(&json!({ "b": 1, "a": { "d": 4, "c": 3 } })),
+            r#"{"a":{"c":3,"d":4},"b":1}"#,
+        );
     }
 }

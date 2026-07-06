@@ -188,14 +188,31 @@ pub fn start(app: AppHandle) -> ApprovalBroker {
                         endpoint: format!("127.0.0.1:{port}"),
                         token,
                     };
+                    let path = dir.join(ENDPOINT_FILE);
                     // A stale descriptor (app crashed) points at a dead port, so a gateway
-                    // connect fails and denies - fail-closed either way.
+                    // connect fails and denies - fail-closed either way. The gateway also
+                    // re-reads the descriptor and retries once, which self-heals the case
+                    // where the app restarted and rebound to a new port.
                     // Written via atomic_write so the HITL endpoint + auth token land
                     // owner-only (0600) on Unix rather than world-readable: a same-user
                     // process reading the token could otherwise spoof approval decisions.
                     let _ = crate::registry::atomic_write(
-                        &dir.join(ENDPOINT_FILE),
+                        &path,
                         &serde_json::to_string(&desc).unwrap_or_default(),
+                    );
+                    // Record WHERE we published, into the same always-on log the gateway
+                    // writes its `dir_resolution=` line to. If a client-spawned gateway
+                    // resolves the data dir differently from the app (MSIX virtualization,
+                    // a differently-spelled HOME), that mismatch is now a one-line read
+                    // instead of a multi-hour hunt - it was the root cause of a live
+                    // "HITL blocks every call but no prompt appears" incident.
+                    log_broker_event(&format!(
+                        "bound 127.0.0.1:{port}; endpoint published at {}",
+                        path.display()
+                    ));
+                } else {
+                    log_broker_event(
+                        "conduit_dir() unavailable; endpoint NOT published (HITL fails closed)",
                     );
                 }
                 let accept_broker = broker.clone();
@@ -211,6 +228,30 @@ pub fn start(app: AppHandle) -> ApprovalBroker {
         Err(_) => { /* inert broker; HITL never fires, gateways fail-closed */ }
     }
     broker
+}
+
+/// Append a line to the shared, always-on gateway log, so the broker's bind/publish
+/// location sits right next to the gateway's `dir_resolution=` line. Best-effort: a logging
+/// failure never touches an approval decision.
+fn log_broker_event(msg: &str) {
+    if let Some(path) = crate::registry::gateway_log_path() {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "[broker] {msg}");
+        }
+    }
+}
+
+/// Best-effort removal of the endpoint descriptor on app shutdown, so a gateway that dials
+/// after the app is gone reads no descriptor (a clean `Unreachable`) instead of connecting
+/// to a dead port left behind. Safe to call when none exists. Call ONLY on final exit, not
+/// on a cancelable exit-request: while the broker is still bound the descriptor must stand.
+pub fn clear_endpoint() {
+    if let Some(dir) = crate::registry::conduit_dir() {
+        if std::fs::remove_file(dir.join(ENDPOINT_FILE)).is_ok() {
+            log_broker_event("endpoint descriptor cleared on shutdown");
+        }
+    }
 }
 
 /// Serve one gateway connection: read the request, authenticate it, park it for a human
