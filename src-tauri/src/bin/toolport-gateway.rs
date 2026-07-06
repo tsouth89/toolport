@@ -1446,6 +1446,7 @@ fn request_human_decision(mut req: approval::ApprovalRequest) -> approval::Appro
     decide_via_broker(desc, &mut req)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn handle_request(
     req: &Value,
@@ -1457,6 +1458,28 @@ fn handle_request(
     guard: &SearchGuard,
     confirm: &ConfirmGuard,
     allowed: Option<&std::collections::HashSet<String>>,
+    // The client this request is attributed to (a registered HTTP client's audit
+    // label), threaded in rather than stored on the shared router so concurrent
+    // requests can't cross-contaminate and dispatch needn't hold the router lock.
+    client: Option<&str>,
+) -> Option<Value> {
+    handle_request_with_cancel(
+        req, reg, router, cached, lazy, profile, guard, confirm, allowed, None, client,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_request_with_cancel(
+    req: &Value,
+    reg: &Registry,
+    router: &Router,
+    cached: &[Value],
+    lazy: bool,
+    profile: Option<&str>,
+    guard: &SearchGuard,
+    confirm: &ConfirmGuard,
+    allowed: Option<&std::collections::HashSet<String>>,
+    cancel: Option<downstream::CancelContext>,
     // The client this request is attributed to (a registered HTTP client's audit
     // label), threaded in rather than stored on the shared router so concurrent
     // requests can't cross-contaminate and dispatch needn't hold the router lock.
@@ -2039,7 +2062,7 @@ fn handle_request(
             };
 
             let started = Instant::now();
-            match router.route_call(name, arguments) {
+            match router.route_call_with_cancel(name, arguments, cancel.clone()) {
                 Ok(mut result) => {
                     let ok = !result
                         .get("isError")
@@ -2145,7 +2168,7 @@ fn handle_request(
                     return Some(error(id, -32602, &format!("Toolport: no server owns resource '{uri}'")));
                 }
             }
-            match router.read_resource(uri) {
+            match router.read_resource_with_cancel(uri, cancel.clone()) {
                 Ok(mut result) => {
                     // Content defense: a resource is as attacker-controllable as a tool
                     // result, so scan it for injection and label any flagged text as data.
@@ -2193,7 +2216,7 @@ fn handle_request(
                     return Some(error(id, -32602, &format!("Toolport: no route for prompt '{name}'")));
                 }
             }
-            match router.get_prompt(name, arguments) {
+            match router.get_prompt_with_cancel(name, arguments, cancel.clone()) {
                 Ok(mut result) => {
                     // Content defense: a prompt's messages are attacker-controllable too;
                     // scan for injection and label any flagged text as data.
@@ -2672,6 +2695,33 @@ struct GatewayState {
     http: bool,
 }
 
+fn rpc_id_key(v: &Value) -> Option<String> {
+    match v {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn request_id_key(req: &Value) -> Option<String> {
+    req.get("id").filter(|id| !id.is_null()).and_then(rpc_id_key)
+}
+
+fn cancellation_request_id(req: &Value) -> Option<String> {
+    if req.get("method").and_then(|m| m.as_str()) != Some("notifications/cancelled") {
+        return None;
+    }
+    req.get("params")
+        .and_then(|p| p.get("requestId"))
+        .and_then(rpc_id_key)
+}
+
+fn cancellation_reason(req: &Value) -> Option<&str> {
+    req.get("params")
+        .and_then(|p| p.get("reason"))
+        .and_then(|r| r.as_str())
+}
+
 /// One request in, one response out: wait for a cold cache / live router when
 /// the method needs it, self-heal an empty router on a call, then dispatch.
 /// Shared by the stdio loop and the HTTP server so they can't diverge.
@@ -2681,6 +2731,7 @@ fn process_request(
     guard: &SearchGuard,
     confirm: &ConfirmGuard,
     allowed: Option<&std::collections::HashSet<String>>,
+    cancel: Option<downstream::CancelContext>,
     client: Option<&str>,
 ) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -2771,7 +2822,7 @@ fn process_request(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    handle_request(
+    handle_request_with_cancel(
         req,
         &reg,
         &router,
@@ -2781,6 +2832,7 @@ fn process_request(
         guard,
         confirm,
         allowed,
+        cancel,
         client,
     )
 }
@@ -3056,7 +3108,7 @@ fn handle_http(
                 "method": "tools/call",
                 "params": { "name": name, "arguments": args }
             });
-            match process_request(state, &req, guard, confirm, allowed, client) {
+            match process_request(state, &req, guard, confirm, allowed, None, client) {
                 Some(resp) => {
                     if let Some(err) = resp.get("error") {
                         let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("error");
@@ -3596,8 +3648,9 @@ fn main() {
     let stdin = std::io::stdin();
     // stdio serves one client on one thread, so no sharing is needed, but the guards
     // are now interior-mutable (&self methods) to match the shared HTTP path.
-    let search_guard = SearchGuard::default();
-    let confirm_guard = ConfirmGuard::new();
+    let search_guard = Arc::new(SearchGuard::default());
+    let confirm_guard = Arc::new(ConfirmGuard::new());
+    let cancel_registry = downstream::CancelRegistry::new();
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
@@ -3615,28 +3668,65 @@ fn main() {
             "request: {}",
             req.get("method").and_then(|m| m.as_str()).unwrap_or("")
         ));
-        // A panic in a handler must not unwind out of this loop and kill the gateway:
-        // stdio has no supervisor (unlike the HTTP listener, which catches per request),
-        // so one panic would drop the whole MCP connection and take every tool with it.
-        // Catch it, log it, and return a JSON-RPC internal error for this request.
-        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            process_request(&state, &req, &search_guard, &confirm_guard, None, None)
-        }))
-        .unwrap_or_else(|_| {
-            let id = req.get("id").cloned().unwrap_or(Value::Null);
-            glog("panic while handling a request; returned an internal error, gateway still up");
-            Some(error(id, -32603, "internal error"))
-        });
-        if let Some(resp) = response {
-            let mut out = state
-                .stdout
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if writeln!(out, "{resp}").is_err() {
-                break;
+        if let Some(cancel_id) = cancellation_request_id(&req) {
+            if cancel_registry.cancel(&cancel_id, cancellation_reason(&req)) {
+                glog(&format!("client cancelled in-flight request {cancel_id}"));
+            } else {
+                gtrace(&format!("ignored cancellation for unknown request {cancel_id}"));
             }
-            let _ = out.flush();
+            continue;
         }
+
+        let Some(request_key) = request_id_key(&req) else {
+            let _ = process_request(&state, &req, &search_guard, &confirm_guard, None, None, None);
+            continue;
+        };
+        cancel_registry.begin_client_request(request_key.clone());
+
+        let state = state.clone();
+        let search_guard = Arc::clone(&search_guard);
+        let confirm_guard = Arc::clone(&confirm_guard);
+        let cancel_registry = cancel_registry.clone();
+        std::thread::spawn(move || {
+            let cancel_context = cancel_registry.context(request_key.clone());
+            // A panic in a handler must not kill the gateway: catch it, log it, and
+            // return a JSON-RPC internal error for this request unless the client
+            // cancelled it while it was in flight.
+            let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                process_request(
+                    &state,
+                    &req,
+                    &search_guard,
+                    &confirm_guard,
+                    None,
+                    Some(cancel_context),
+                    None,
+                )
+            }))
+            .unwrap_or_else(|_| {
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                glog(
+                    "panic while handling a request; returned an internal error, gateway still up",
+                );
+                Some(error(id, -32603, "internal error"))
+            });
+
+            if cancel_registry.is_cancelled(&request_key) {
+                glog(&format!("suppressing response for cancelled request {request_key}"));
+                cancel_registry.finish_client_request(&request_key);
+                return;
+            }
+            cancel_registry.finish_client_request(&request_key);
+
+            if let Some(resp) = response {
+                let mut out = state
+                    .stdout
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = writeln!(out, "{resp}");
+                let _ = out.flush();
+            }
+        });
     }
 }
 
