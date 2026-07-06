@@ -14,16 +14,12 @@ every AI client, with far fewer tokens.
 
 ![Toolport: every tool from all your servers, collapsed to the handful your agent loads](docs/lazy-discovery.svg)
 
-![Toolport demo: add a server once, connect every AI client, lazy tool discovery, and a destructive call blocked by human approval](docs/demo.gif)
-
 Toolport is a local MCP (Model Context Protocol) gateway. You set up and
 authenticate each server once, and every AI client (Claude, Cursor, Codex, and
 the rest) points at Toolport and shares them, so you stop configuring the same
 servers separately in each app.
 
-<p align="center">
-  <img src="docs/app.png" alt="The Toolport desktop app: your MCP servers managed in one place with per-server tool counts, and every AI client wired in with one click" width="900" />
-</p>
+![Toolport demo: add a server once, connect every AI client, lazy tool discovery, and a destructive call blocked by human approval](docs/demo.gif)
 
 It also fixes what those servers cost your agent. Every MCP server you connect
 dumps all of its tools into context on every single request, and it adds up fast:
@@ -42,6 +38,17 @@ eat your context window).
 | :-----------------------------------------------------------------------------------------: | :--------------------------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
 |        ![Lazy discovery surfaces only the tools a task needs](docs/feature-lazy.png)        |          ![One gateway, every AI client](docs/feature-clients.png)           | ![Flags rug-pulls and poisoned tools before a client can call them](docs/feature-security.png) |
 | **Fewer tokens** - lazy discovery keeps context flat no matter how many servers you connect | **One config, every client** - set up a server once, every AI tool shares it |         **Supply-chain security** - rug-pull and tool-poisoning detection on the path          |
+
+## Get started in two minutes
+
+1. **[Download the installer](https://github.com/tsouth89/toolport/releases/latest)** for Windows, macOS, or Linux (details in [Install](#install)).
+2. **Add a server** from the built-in catalog, or paste a config snippet from any
+   server's docs, and authenticate once.
+3. Open **Clients** and click **Connect to Toolport** on each AI client you use.
+
+That's the whole setup. Every client now shares the same servers, and new servers
+you add propagate to all of them. There's a
+[60-second demo on the website](https://toolport.app) if you want to watch it first.
 
 ## Why
 
@@ -115,6 +122,10 @@ fixes both.
   summary, and the recent gateway log, ready to paste into a bug report.
 
 ## How it works
+
+<p align="center">
+  <img src="docs/app.png" alt="The Toolport desktop app: your MCP servers managed in one place with per-server tool counts, and every AI client wired in with one click" width="900" />
+</p>
 
 Toolport has two pieces:
 
@@ -230,17 +241,16 @@ namespaced per server, so the two never collide even in the same profile.
 
 Prebuilt installers are published on the
 [Releases](https://github.com/tsouth89/toolport/releases) page. Toolport runs on
-**Windows, macOS, and Linux** (Windows and macOS builds are code-signed; macOS is
-also notarized). On Linux, prefer the **`.deb`** (it links your system's WebKitGTK and is
-the most reliable package); the **AppImage** is a portable, no-root fallback but
-can clash with very new or virtualized graphics stacks (see Troubleshooting). To
-run from source, see Development below.
+**Windows, macOS, and Linux**. On Linux, prefer the **`.deb`** (it links your
+system's WebKitGTK and is the most reliable package); the **AppImage** is a
+portable, no-root fallback but can clash with very new or virtualized graphics
+stacks (see Troubleshooting). To run from source, see Development below.
 
-Both the **Windows** and **macOS** installers are code-signed (macOS is also
-notarized). macOS installs cleanly through Gatekeeper. On Windows the installer is
-signed with your validated publisher name (no "unknown publisher"), but because it
-uses a standard certificate rather than EV, SmartScreen reputation still builds with
-downloads, so an early install may still show "Windows protected your PC", click
+Both the **Windows** and **macOS** installers are code-signed, and macOS is also
+notarized, so it installs cleanly through Gatekeeper. On Windows the installer
+carries a validated publisher name (no "unknown publisher"), but because it uses
+a standard certificate rather than EV, SmartScreen reputation still builds with
+downloads, so an early install may show "Windows protected your PC", click
 **More info -> Run anyway** to continue. The **Linux** packages are unsigned, as is
 typical. See [docs/SIGNING.md](docs/SIGNING.md) for details.
 
@@ -249,7 +259,7 @@ terminal. The package name is `toolport`.
 
 ```bash
 # Update to a newer version: just install the new .deb, it upgrades in place.
-sudo apt install ./Toolport_1.0.0_amd64.deb
+sudo apt install ./Toolport_1.5.0_amd64.deb
 
 # Uninstall (keeps your config + saved secrets).
 sudo apt remove toolport
@@ -378,3 +388,6 @@ Pricing, the self-host quickstart, and checkout are all at
 open-core model: the desktop app and `toolport-gateway` are free and open source, and
 Toolport Teams (above) funds the free app. Anything you contribute here is MIT and
 benefits everyone, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+If Toolport saves you tokens (ask `toolport_status` how many), a star helps other
+people find it.
