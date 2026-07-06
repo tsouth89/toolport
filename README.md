@@ -14,9 +14,7 @@ every AI client, with far fewer tokens.
 
 ![Toolport: every tool from all your servers, collapsed to the handful your agent loads](docs/lazy-discovery.svg)
 
-<!-- TODO(toolport): re-capture the product demo GIF from the rebranded (Toolport) build before publicizing. Old docs/demo.gif shows the pre-rename UI.
-![Toolport demo: add a server, connect it to every AI tool, and the agent uses it](docs/demo.gif)
--->
+![Toolport demo: add a server once, connect every AI client, lazy tool discovery, and a destructive call blocked by human approval](docs/demo.gif)
 
 Toolport is a local MCP (Model Context Protocol) gateway. You set up and
 authenticate each server once, and every AI client (Claude, Cursor, Codex, and
@@ -44,8 +42,6 @@ eat your context window).
 | :-----------------------------------------------------------------------------------------: | :--------------------------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
 |        ![Lazy discovery surfaces only the tools a task needs](docs/feature-lazy.png)        |          ![One gateway, every AI client](docs/feature-clients.png)           | ![Flags rug-pulls and poisoned tools before a client can call them](docs/feature-security.png) |
 | **Fewer tokens** - lazy discovery keeps context flat no matter how many servers you connect | **One config, every client** - set up a server once, every AI tool shares it |         **Supply-chain security** - rug-pull and tool-poisoning detection on the path          |
-
-<!-- TODO(toolport): add product screenshots + a demo video, re-captured from the rebranded (Toolport) build, after the release is cut. -->
 
 ## Why
 
