@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1200 600" xmlns="http://www.w3.org/2000/svg" role="img" font-family="Poppins, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
-  <title>Toolport lazy discovery: every server's tools collapse to 3 meta-tools</title>
-  <desc>A cloud of many tool names on the left funnels through the Toolport gateway into three meta-tools on the right.</desc>
+  <title>Toolport lazy discovery: every server's tools collapse to a handful of meta-tools</title>
+  <desc>A cloud of many tool names on the left funnels through the Toolport gateway into four meta-tools on the right.</desc>
   <rect x="1" y="1" width="1198" height="598" rx="24" fill="#1E3A66" stroke="rgba(255,255,255,0.10)"/>
 
   <!-- brand mark: four hex anchor "nuts", drawn in the card navy so they notch the white porthole ring (matches toolport-icon) -->
@@ -27,11 +27,12 @@
     <line x1="430" y1="302" x2="524" y2="254"/>
     <line x1="430" y1="350" x2="524" y2="254"/>
   </g>
-  <!-- gateway -> 3 metas -->
+  <!-- gateway -> 4 metas -->
   <g stroke="#F97316" stroke-width="2.2" opacity="0.65">
-    <line x1="588" y1="254" x2="748" y2="182"/>
-    <line x1="588" y1="254" x2="748" y2="254"/>
-    <line x1="588" y1="254" x2="748" y2="326"/>
+    <line x1="588" y1="254" x2="748" y2="166"/>
+    <line x1="588" y1="254" x2="748" y2="228"/>
+    <line x1="588" y1="254" x2="748" y2="290"/>
+    <line x1="588" y1="254" x2="748" y2="352"/>
   </g>
 
   <!-- left cluster: many tools -->
@@ -58,19 +59,20 @@
   </g>
   <circle cx="556" cy="254" r="8" fill="#F97316"/>
 
-  <!-- right: 3 meta-tools -->
+  <!-- right: 4 meta-tools -->
   <g font-family="ui-monospace, Menlo, monospace" font-size="17" fill="#FB923C">
-    <g><rect x="748" y="156" width="388" height="52" rx="10" fill="rgba(249,115,22,0.10)" stroke="rgba(249,115,22,0.5)"/><text x="770" y="189">toolport_search_tools</text></g>
-    <g><rect x="748" y="228" width="388" height="52" rx="10" fill="rgba(249,115,22,0.10)" stroke="rgba(249,115,22,0.5)"/><text x="770" y="261">toolport_call_tool</text></g>
-    <g><rect x="748" y="300" width="388" height="52" rx="10" fill="rgba(249,115,22,0.10)" stroke="rgba(249,115,22,0.5)"/><text x="770" y="333">toolport_status</text></g>
+    <g><rect x="748" y="140" width="388" height="52" rx="10" fill="rgba(249,115,22,0.10)" stroke="rgba(249,115,22,0.5)"/><text x="770" y="173">toolport_search_tools</text></g>
+    <g><rect x="748" y="202" width="388" height="52" rx="10" fill="rgba(249,115,22,0.10)" stroke="rgba(249,115,22,0.5)"/><text x="770" y="235">toolport_call_tool</text></g>
+    <g><rect x="748" y="264" width="388" height="52" rx="10" fill="rgba(249,115,22,0.10)" stroke="rgba(249,115,22,0.5)"/><text x="770" y="297">toolport_fetch_result</text></g>
+    <g><rect x="748" y="326" width="388" height="52" rx="10" fill="rgba(249,115,22,0.10)" stroke="rgba(249,115,22,0.5)"/><text x="770" y="359">toolport_status</text></g>
   </g>
 
   <!-- captions -->
   <text x="264" y="402" text-anchor="middle" font-size="15" fill="#9db0cc" font-family="ui-monospace, Menlo, monospace">every tool, across all your servers</text>
-  <text x="942" y="402" text-anchor="middle" font-size="15" fill="#FB923C" font-family="ui-monospace, Menlo, monospace">the 3 your agent loads</text>
+  <text x="942" y="402" text-anchor="middle" font-size="15" fill="#FB923C" font-family="ui-monospace, Menlo, monospace">the handful your agent loads</text>
 
   <!-- tagline -->
   <line x1="56" y1="444" x2="1144" y2="444" stroke="rgba(255,255,255,0.12)"/>
-  <text x="600" y="498" text-anchor="middle" font-size="28" font-weight="600" fill="#FFFFFF">Three tools in context, not hundreds.</text>
+  <text x="600" y="498" text-anchor="middle" font-size="28" font-weight="600" fill="#FFFFFF">A handful of tools in context, not hundreds.</text>
   <text x="600" y="532" text-anchor="middle" font-size="16" fill="#9db0cc">Measured: 97% less tool overhead per request, ~90% fewer tokens, same results.</text>
 </svg>

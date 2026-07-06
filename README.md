@@ -12,7 +12,7 @@ every AI client, with far fewer tokens.
 
 </div>
 
-![Toolport: every tool from all your servers, collapsed to the 3 your agent loads](docs/lazy-discovery.svg)
+![Toolport: every tool from all your servers, collapsed to the handful your agent loads](docs/lazy-discovery.svg)
 
 <!-- TODO(toolport): re-capture the product demo GIF from the rebranded (Toolport) build before publicizing. Old docs/demo.gif shows the pre-rename UI.
 ![Toolport demo: add a server, connect it to every AI tool, and the agent uses it](docs/demo.gif)
@@ -30,8 +30,8 @@ servers separately in each app.
 It also fixes what those servers cost your agent. Every MCP server you connect
 dumps all of its tools into context on every single request, and it adds up fast:
 just 3 servers (62 tools) cost ~24,000 tokens of definitions before you've asked
-anything. Toolport advertises 3 meta-tools the agent searches on demand instead,
-so it pays ~660 tokens.
+anything. Toolport advertises a handful of compact meta-tools the agent searches
+on demand instead, so it pays a few hundred tokens.
 
 **Measured on a frontier model: up to 91% fewer total tokens at the same task
 success** (graded for correct answers, not just completion), plus 97% less
@@ -56,10 +56,12 @@ fixes both.
 
 ### Fewer tokens
 
-- **~90% fewer tokens.** In lazy-discovery mode the gateway advertises three meta-tools
-  (`toolport_status`, `toolport_search_tools`, `toolport_call_tool`) instead of the full
-  catalog, and the agent searches and calls on demand, so context stays flat no matter
-  how many servers you connect. Benchmarked, graded for correct answers: up to 91% fewer
+- **~90% fewer tokens.** In lazy-discovery mode the gateway advertises four compact
+  meta-tools (`toolport_status`, `toolport_search_tools`, `toolport_call_tool`,
+  `toolport_fetch_result`) instead of the full catalog, and the agent searches and
+  calls on demand, so context stays flat no matter how many servers you connect.
+  (A couple more appear only when you turn the matching feature on: `toolport_confirm`
+  with approvals, enable/disable with agent control.) Benchmarked, graded for correct answers: up to 91% fewer
   total tokens at the same task success, 97% less tool-definition overhead per request,
   99.6% at a real 415-tool catalog ([BENCHMARK.md](BENCHMARK.md)). Ask `toolport_status`
   for what it has saved you so far.
@@ -96,6 +98,10 @@ fixes both.
   Sentry error, a web page, an issue body) with injection-like instructions, Toolport
   flags it and marks it as external data, not instructions, the separation that blunts
   indirect prompt injection. Never blocks, on by default.
+- **Human-in-the-loop approvals.** Turn on approval mode and destructive tool calls
+  pause until you approve or deny them in the app, with an OS notification when a
+  call is waiting. Deny actually blocks the call; the agent just sees a declined
+  tool call. Your agent asks before it drops the table.
 - **Governance and audit.** Toggle any tool on or off, or hide every destructive tool
   from every client with one switch. Every call is recorded with per-server latency and
   error rates.
@@ -140,7 +146,7 @@ and refreshes too.
 
 ## Supported clients
 
-Toolport auto-detects these **20 AI clients**, installs the gateway into each with one
+Toolport auto-detects these **21 AI clients**, installs the gateway into each with one
 click, and can import a client's existing servers. It writes the config file shown
 below for you, so you never have to edit these by hand.
 
@@ -164,6 +170,7 @@ below for you, so you never have to edit these by hand.
 | LM Studio      | `~/.lmstudio/mcp.json`                                                                     | JSON (`mcpServers`)      |
 | Jan            | `<data>/Jan/data/mcp_config.json`                                                          | JSON (`mcpServers`)      |
 | BoltAI         | `~/.boltai/mcp.json`                                                                       | JSON (`mcpServers`)      |
+| Pi             | `~/.pi/agent/mcp.json`                                                                     | JSON (`mcpServers`)      |
 | Goose          | `~/.config/goose/config.yaml`                                                              | YAML (`extensions`)      |
 | Hermes         | `~/.hermes/config.yaml`                                                                    | YAML (`mcp_servers`)     |
 
@@ -326,9 +333,10 @@ The frontend is typechecked with `npx tsc --noEmit`.
 
 Toolport is in active development. Working end to end: the
 gateway, lazy discovery, per-agent scoping, OAuth/key auth with live propagation,
-the catalog, client import/migrate, per-tool and destructive-tool governance, a global
-Settings view, tool-integrity and content-defense detection, an audit log with
-latency/error stats, resources + prompts proxying, and a tool playground. See
+the catalog, client import/migrate, per-tool and destructive-tool governance, the
+human approval queue, a global Settings view, tool-integrity and content-defense
+detection, an audit log with latency/error stats, resources + prompts proxying, and
+a tool playground. See
 [docs/ROADMAP.md](docs/ROADMAP.md) for what is done and planned.
 
 ## Known issues
@@ -355,12 +363,15 @@ Run it whichever way you prefer:
   team, no infrastructure to run.
 - **Self-hosted:** one Docker command (`docker pull ghcr.io/tsouth89/conduit-teams`).
 
-Same pricing either way:
+Same pricing hosted or self-hosted:
 
-- **Free for up to 5 people** (hosted or self-hosted).
-- **$12/seat/month** beyond that; the first 5 seats stay free.
-- Central destructive-tool policy, an exportable audit trail, and per-member opt-in for
-  local-command servers (a team config can never silently run code on a member's machine).
+- **Free for up to 5 people**: one shared server set, the safety policy, and a
+  30-day exportable audit trail.
+- **Team, $39/month for up to 5 people, then $12/person**: adds per-server access
+  control, roles, spend budgets, full audit history, and Slack/Discord/Teams alerts.
+- Either way, each member's keys stay on their own machine, and local-command servers
+  are per-member opt-in (a team config can never silently run code on a member's
+  machine).
 
 Pricing, the self-host quickstart, and checkout are all at
 **[toolport.app/teams](https://toolport.app/teams)**.
