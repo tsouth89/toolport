@@ -3446,11 +3446,24 @@ fn main() {
     let http_mode = http_port_opt.is_some();
     glog("=== gateway start ===");
     glog(&format!(
-        "cwd={:?} CONDUIT_REGISTRY={:?} registry_path={:?} lazy={lazy} profile={profile:?}",
+        "cwd={:?} CONDUIT_REGISTRY={:?} registry_path={:?} dir_resolution={:?} lazy={lazy} profile={profile:?}",
         std::env::current_dir().ok(),
         std::env::var("CONDUIT_REGISTRY").ok(),
-        registry::resolved_path()
+        registry::resolved_path(),
+        registry::conduit_dir_resolution(),
     ));
+    if registry::conduit_dir_resolution() == registry::DirResolution::VirtualizedFallback {
+        // Loud, not fatal: inside an MSIX container with no UNC escape, the data
+        // dir may be the package's stale shadow copy - registry edits made in the
+        // app won't propagate here, and HITL approvals can fail closed against a
+        // dead broker endpoint. Say so instead of desyncing silently.
+        eprintln!(
+            "toolport-gateway: running inside an MSIX app container and the \\\\localhost \
+             UNC view of the data dir is unreachable; registry/approval files may be a \
+             stale virtualized shadow copy (server changes and approvals may not work)."
+        );
+        glog("WARNING: MSIX container detected but devirtualization failed (UNC view unreachable)");
+    }
     let loaded = match registry::load_resolved() {
         Ok(r) => {
             glog(&format!(

@@ -156,12 +156,13 @@ impl Platform {
 /// Support` on macOS, `~/.config` on Linux.
 ///
 /// On Windows it's anchored to the user profile (`~/AppData/Roaming`) rather than
-/// `dirs::config_dir()`. MSIX-packaged apps (Claude Desktop) virtualize the
-/// Roaming known-folder into their package's LocalCache, and if the Toolport
-/// process is ever launched inside such a context, `config_dir()` would resolve
-/// to that sandbox - so reads of Claude Desktop's `claude_desktop_config.json`
-/// would miss the real file and report "not configured". The user-profile path
-/// is not virtualized, matching how the registry path is anchored.
+/// `dirs::config_dir()`, matching how the registry path is anchored. Note the
+/// path *spelling* alone does not escape MSIX virtualization: inside a packaged
+/// app's container the filesystem filter redirects `AppData\Roaming` opens to the
+/// package's LocalCache shadow regardless of how the path was derived (see
+/// `registry::conduit_dir`, which detects the container and de-virtualizes).
+/// This helper runs in the Toolport app, which is never containerized, so the
+/// natural path is correct here.
 fn roaming_config_dir(home: &std::path::Path, platform: Platform) -> PathBuf {
     match platform {
         Platform::Windows => home.join("AppData").join("Roaming"),

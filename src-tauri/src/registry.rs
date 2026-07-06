@@ -756,33 +756,139 @@ impl Registry {
     }
 }
 
+/// How [`conduit_dir`] was resolved, for startup diagnostics. Only Windows has
+/// interesting cases (MSIX app containers); everywhere else it is `Direct`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirResolution {
+    /// Normal process: the natural path IS the real directory.
+    Direct,
+    /// Running inside an MSIX app container: using the loopback-UNC view of the
+    /// real directory, bypassing the package's virtualized shadow copy.
+    Devirtualized,
+    /// Running inside an MSIX app container but the UNC view is unreachable
+    /// (admin share disabled/inaccessible), so we are stuck with the natural
+    /// path, which the container may redirect to a STALE shadow copy. The
+    /// gateway warns loudly when it sees this - see its startup path.
+    VirtualizedFallback,
+}
+
 /// Conduit's data dir, anchored so every process agrees regardless of launch
 /// context.
 ///
-/// On Windows, MSIX-packaged apps (e.g. Claude Desktop) have their Roaming
-/// AppData known-folder redirected into the package's `LocalCache`, while normal
-/// apps (Cursor) see the real `%APPDATA%`. A gateway spawned by each would then
-/// read a *different* `registry.json` and silently desync. The user-profile dir
-/// is NOT redirected by MSIX, so deriving the path from it keeps packaged and
-/// unpackaged processes on the same file. Elsewhere the platform config dir is
-/// correct and not virtualized.
+/// On Windows this is `%USERPROFILE%\AppData\Roaming\Conduit`. Spelling the path
+/// out (instead of the APPDATA known folder) is NOT enough to agree across
+/// processes: a gateway spawned by an MSIX-packaged client (e.g. Claude Desktop)
+/// runs inside that app's container, whose filesystem filter redirects opens
+/// under `AppData\Roaming` - by ANY path spelling, home-derived or not - into
+/// the package's `LocalCache` shadow copy, which can be days stale. (Verified
+/// empirically 2026-07-05: a probe file written to `%APPDATA%` from inside the
+/// Claude container landed in the package `LocalCache`. An earlier version of
+/// this comment claimed home-derived paths escape the redirect; that is false.)
+/// A shadowed gateway reads a frozen `registry.json` (server/profile edits never
+/// arrive) and a stale `approval-endpoint.json` (HITL approvals fail closed
+/// against a dead broker port).
 ///
-/// Public so every Conduit file (registry, tool cache, audit log, debug logs)
-/// derives from the same anchor - otherwise the app and a client-spawned gateway
-/// would write to different dirs under MSIX virtualization.
+/// The fix: when this process has MSIX package identity - meaning it was spawned
+/// inside a packaged app's container, since Conduit's own binaries never ship as
+/// MSIX - address the SAME directory through its loopback-UNC twin
+/// (`\\localhost\C$\Users\...`). SMB serves those opens from the real filesystem,
+/// outside the virtualization filter's reach (verified on the same machine). If
+/// the UNC view is unreachable we fall back to the natural path, no worse than
+/// before; see [`DirResolution`] and [`conduit_dir_resolution`].
+///
+/// Public so every Conduit file (registry, tool cache, audit log, approval
+/// endpoint, debug logs) derives from the same anchor - otherwise the app and a
+/// client-spawned gateway would read/write different dirs.
 pub fn conduit_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        Some(
-            dirs::home_dir()?
-                .join("AppData")
-                .join("Roaming")
-                .join("Conduit"),
-        )
+    resolve_conduit_dir().0
+}
+
+/// How [`conduit_dir`] was resolved. Cached with it; the answer cannot change
+/// mid-process (package identity and the home dir are fixed at spawn).
+pub fn conduit_dir_resolution() -> DirResolution {
+    resolve_conduit_dir().1
+}
+
+/// Resolve the data dir once and cache it: the container check and the UNC
+/// reachability probe should not run on every path lookup, and a stable answer
+/// keeps every consumer (registry, watcher, tool cache, approval endpoint) on
+/// one directory for the process lifetime.
+fn resolve_conduit_dir() -> (Option<PathBuf>, DirResolution) {
+    static RESOLVED: std::sync::OnceLock<(Option<PathBuf>, DirResolution)> =
+        std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| {
+            #[cfg(windows)]
+            {
+                let Some(home) = dirs::home_dir() else {
+                    return (None, DirResolution::Direct);
+                };
+                let conduit = |base: &Path| base.join("AppData").join("Roaming").join("Conduit");
+                if !msix::has_package_identity() {
+                    return (Some(conduit(&home)), DirResolution::Direct);
+                }
+                match msix::unc_twin(&home) {
+                    // The profile dir always exists, so a metadata success proves the
+                    // UNC view actually works before we commit every file to it.
+                    Some(unc_home) if std::fs::metadata(&unc_home).is_ok() => {
+                        (Some(conduit(&unc_home)), DirResolution::Devirtualized)
+                    }
+                    _ => (Some(conduit(&home)), DirResolution::VirtualizedFallback),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                (
+                    dirs::config_dir().map(|d| d.join("Conduit")),
+                    DirResolution::Direct,
+                )
+            }
+        })
+        .clone()
+}
+
+/// MSIX app-container detection and escape hatch (see [`conduit_dir`]).
+#[cfg(windows)]
+mod msix {
+    use std::path::{Path, PathBuf};
+
+    /// True when this process runs with MSIX package identity, i.e. it was
+    /// spawned inside a packaged app's container (child processes inherit the
+    /// container). Conduit's own binaries are never packaged, so identity here
+    /// always means "inside ANOTHER app's container" - exactly the situation
+    /// where `AppData\Roaming` opens get redirected to that package's shadow.
+    pub fn has_package_identity() -> bool {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentPackageFamilyName(length: *mut u32, family_name: *mut u16) -> i32;
+        }
+        // Per appmodel.h: "The process has no package identity."
+        const APPMODEL_ERROR_NO_PACKAGE: i32 = 15700;
+        let mut len: u32 = 0;
+        let rc = unsafe { GetCurrentPackageFamilyName(&mut len, std::ptr::null_mut()) };
+        rc != APPMODEL_ERROR_NO_PACKAGE
     }
-    #[cfg(not(windows))]
-    {
-        Some(dirs::config_dir()?.join("Conduit"))
+
+    /// The loopback-UNC twin of a local drive path: `C:\Users\x` becomes
+    /// `\\localhost\C$\Users\x`. SMB requests are served from the real
+    /// filesystem, outside the MSIX virtualization filter, so from inside a
+    /// container this reaches the REAL directory. `None` for paths without a
+    /// drive root (already UNC, relative); callers then stay on the natural path.
+    pub fn unc_twin(p: &Path) -> Option<PathBuf> {
+        let s = p.to_str()?;
+        let b = s.as_bytes();
+        if b.len() < 3
+            || !b[0].is_ascii_alphabetic()
+            || b[1] != b':'
+            || (b[2] != b'\\' && b[2] != b'/')
+        {
+            return None;
+        }
+        Some(PathBuf::from(format!(
+            r"\\localhost\{}$\{}",
+            b[0].to_ascii_uppercase() as char,
+            &s[3..]
+        )))
     }
 }
 
@@ -1155,6 +1261,37 @@ mod tests {
         let path = std::env::temp_dir().join("conduit-does-not-exist-xyz.json");
         let r = load_from(&path).unwrap();
         assert_eq!(r.profiles.len(), 1);
+    }
+
+    /// The MSIX escape hatch: a drive-rooted path maps to its `\\localhost\<D>$`
+    /// admin-share twin; anything without a drive root is refused so callers
+    /// stay on the natural path.
+    #[cfg(windows)]
+    #[test]
+    fn unc_twin_maps_drive_paths_and_rejects_others() {
+        assert_eq!(
+            super::msix::unc_twin(Path::new(r"C:\Users\alice")).unwrap(),
+            Path::new(r"\\localhost\C$\Users\alice")
+        );
+        // Lowercase drive letters normalize; forward slashes count as a root.
+        assert_eq!(
+            super::msix::unc_twin(Path::new("d:/stuff")).unwrap(),
+            Path::new(r"\\localhost\D$\stuff")
+        );
+        assert!(super::msix::unc_twin(Path::new(r"\\server\share\home")).is_none());
+        assert!(super::msix::unc_twin(Path::new(r"relative\path")).is_none());
+        assert!(super::msix::unc_twin(Path::new("C:")).is_none());
+    }
+
+    /// `cargo test` never runs with package identity, so resolution must be
+    /// Direct and the dir the natural home-derived path (not a UNC one).
+    #[cfg(windows)]
+    #[test]
+    fn conduit_dir_is_direct_outside_a_container() {
+        assert_eq!(conduit_dir_resolution(), DirResolution::Direct);
+        let dir = conduit_dir().expect("home dir resolves");
+        assert!(dir.ends_with(r"AppData\Roaming\Conduit"));
+        assert!(!dir.to_string_lossy().starts_with(r"\\"));
     }
 
     #[test]
