@@ -1493,7 +1493,11 @@ fn tool_fingerprint_for(name: &str, cached: &[Value], router: &Router) -> Option
             .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
             .map(integrity::fingerprint)
     };
-    lookup(cached).or_else(|| lookup(&router.aggregated_tools()))
+    // Prefer the LIVE router definition (what actually dispatches) so a drifted
+    // tool re-prompts instead of matching an approval bound to its stale cached
+    // form. `cached` is only a cold-start fallback before downstream servers
+    // connect and the router has nothing to aggregate yet.
+    lookup(&router.aggregated_tools()).or_else(|| lookup(cached))
 }
 
 /// Keep only tools whose server prefix is in `allowed`. `None` = no scoping

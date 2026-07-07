@@ -893,16 +893,19 @@ fn decide_approval(
 ) -> Result<(), String> {
     let view = broker.decide(&id, approved)?;
     if approved && scope != "once" {
-        let fp = view.tool_fingerprint.as_deref().ok_or_else(|| {
-            "could not allow this tool because its definition fingerprint is unavailable"
-                .to_string()
-        })?;
-        let key = approval::fingerprint_allow_key(&view.server, &view.tool, fp);
-        broker.add_session_allow(key.clone());
-        if scope == "always" {
-            let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            reg.allow_tool(key);
-            registry::save(&reg)?;
+        // Persist only when we can bind the allow to the current definition
+        // fingerprint. If it's unavailable (the tool is no longer resolvable),
+        // the call itself already went through via `decide` above; we simply
+        // can't remember it, so degrade to a one-time approval rather than
+        // returning an error for a decision that already succeeded.
+        if let Some(fp) = view.tool_fingerprint.as_deref() {
+            let key = approval::fingerprint_allow_key(&view.server, &view.tool, fp);
+            broker.add_session_allow(key.clone());
+            if scope == "always" {
+                let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                reg.allow_tool(key);
+                registry::save(&reg)?;
+            }
         }
     }
     Ok(())
@@ -930,24 +933,28 @@ fn list_allowed_tools(
         let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reg.human_approval_allow.clone()
     };
-    let split = |key: &str| {
+    // Only fingerprint-bound `server/tool/<fingerprint>` keys still auto-approve;
+    // the broker ignores legacy broad `server/tool` entries, so they must not be
+    // surfaced here as active allows (that would misreport an inert entry as live).
+    let parse = |key: &str| -> Option<(String, String)> {
         let mut parts = key.splitn(3, '/');
-        match (parts.next(), parts.next()) {
-            (Some(s), Some(t)) => (s.to_string(), t.to_string()),
-            _ => (String::new(), key.to_string()),
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(s), Some(t), Some(_fp)) => Some((s.to_string(), t.to_string())),
+            _ => None,
         }
     };
     let mut out: Vec<AllowedTool> = persistent
         .iter()
-        .map(|k| {
-            let (server, tool) = split(k);
-            AllowedTool { key: k.clone(), server, tool, persistent: true }
+        .filter_map(|k| {
+            let (server, tool) = parse(k)?;
+            Some(AllowedTool { key: k.clone(), server, tool, persistent: true })
         })
         .collect();
     for k in broker.session_allowed() {
         if !persistent.contains(&k) {
-            let (server, tool) = split(&k);
-            out.push(AllowedTool { key: k, server, tool, persistent: false });
+            if let Some((server, tool)) = parse(&k) {
+                out.push(AllowedTool { key: k, server, tool, persistent: false });
+            }
         }
     }
     out

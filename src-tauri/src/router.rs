@@ -144,15 +144,24 @@ fn name_looks_destructive(name: &str) -> bool {
                 | "drop"
                 | "execute"
                 | "insert"
+                | "move"
+                | "patch"
                 | "post"
                 | "publish"
                 | "remove"
+                | "rename"
+                | "replace"
                 | "run"
                 | "send"
                 | "truncate"
                 | "update"
+                | "upload"
                 | "write"
         )
+        // `edit`/`modify` are deliberately omitted: they overlap with the benign
+        // description-churn class that integrity drift tiering keeps quiet (see
+        // `drift_severity_tiers_loud_vs_benign`), and widening them there would
+        // trade the alert-fatigue win for louder, lower-signal drift alerts.
     })
 }
 
@@ -1217,6 +1226,9 @@ mod tests {
         assert!(is_destructive(&json!({ "name": "delete_file" })));
         assert!(is_destructive(&json!({ "name": "sendEmail" })));
         assert!(is_destructive(&json!({ "name": "run_query" })));
+        assert!(is_destructive(&json!({ "name": "rename_branch" })));
+        assert!(is_destructive(&json!({ "name": "uploadObject" })));
+        assert!(is_destructive(&json!({ "name": "patch_record" })));
         assert!(!is_destructive(&json!({ "name": "list_files" })));
         assert!(!is_destructive(&json!({
             "name": "delete_file",
