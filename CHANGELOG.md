@@ -6,12 +6,26 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-07-07
+
 Post-1.5.1 security and robustness batch from a multi-dimension gateway audit
-(#203 HIGH, #204 MEDIUM, #205 LOW/robustness). All batches ship with regression
-tests; full suite green.
+(#203 HIGH, #204 MEDIUM, #205 LOW/robustness), plus a follow-on hardening pass
+(#207). All batches ship with regression tests; full suite green.
 
 ### Security
 
+- **Approvals are now bound to the tool definition.** A "for this session" or "always" allow
+  is keyed to a fingerprint of the exact tool definition it was granted for, resolved from
+  the live server. If a server later changes that tool (a rug-pull), the call re-prompts
+  instead of inheriting the old approval; legacy broad allows are ignored, so existing users
+  re-approve once. (#207)
+- **Broader destructive-tool detection.** When a server omits the MCP `destructiveHint`, the
+  approval gate now also treats obvious write/delete verbs in the tool name (delete, drop,
+  send, publish, truncate, upload, ...) as destructive, failing toward caution. An explicit
+  `destructiveHint: false` still wins. (#207)
+- **Secret redaction in shareable diagnostics.** The diagnostics summary now redacts inline
+  secret arguments and credentials embedded in server URLs, and clears the live-inspection
+  buffer on startup when inspection is off. (#207)
 - **Spawn-guard bypass via attached inline-eval flags.** The dangerous-flag guard only
   matched interpreter flags as standalone argv tokens, so the attached form
   (`python -c<code>`, `ruby -e<code>`) from a booby-trapped server config slipped past and
