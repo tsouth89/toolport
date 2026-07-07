@@ -2206,9 +2206,10 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
     let def = find_def(client_id).ok_or_else(|| format!("Unknown client '{client_id}'"))?;
     let path = (def.path)().ok_or("Could not resolve a config path on this OS")?;
     let backup = backup_file(client_id, &path)?;
+    let lenient = config_is_whole_app_state(client_id);
     match def.format {
-        Format::JsonMcpServers => write_json(&path, "mcpServers", servers, false)?,
-        Format::JsonServers => write_json(&path, "servers", servers, false)?,
+        Format::JsonMcpServers => write_json(&path, "mcpServers", servers, lenient)?,
+        Format::JsonServers => write_json(&path, "servers", servers, lenient)?,
         Format::JsonContextServers => write_json(&path, "context_servers", servers, true)?,
         Format::TomlMcpServers => write_toml(&path, servers)?,
         Format::YamlExtensions => write_yaml_extensions(&path, servers)?,
@@ -2441,6 +2442,19 @@ fn edit_toml_gateway(path: &Path, install: bool, profile: Option<&str>) -> Resul
     atomic_write(path, &out)
 }
 
+/// Clients whose JSON config file holds their ENTIRE application state (project
+/// history, signed-in account, all servers), not just an MCP-servers block. For
+/// these an unparseable file must ERROR rather than be silently replaced with a
+/// fresh object, so a transient parse failure can't wipe the user's whole config
+/// down to just our gateway entry. `~/.claude.json` (Claude Code) and
+/// `~/.gemini/settings.json` (Gemini CLI) share the plain `mcpServers` JSON shape
+/// with single-purpose files (Claude Desktop, VS Code's dedicated mcp.json, LM
+/// Studio, ...), which keep the harmless start-fresh behavior. (Zed's whole-editor
+/// settings.json is already lenient via its JsonContextServers format.)
+fn config_is_whole_app_state(client_id: &str) -> bool {
+    matches!(client_id, "claude-code" | "gemini-cli")
+}
+
 fn install_or_remove(
     client_id: &str,
     install: bool,
@@ -2449,9 +2463,12 @@ fn install_or_remove(
     let def = find_def(client_id).ok_or_else(|| format!("Unknown client '{client_id}'"))?;
     let path = (def.path)().ok_or("Could not resolve a config path on this OS")?;
     let backup = backup_file(client_id, &path)?;
+    let lenient = config_is_whole_app_state(client_id);
     match def.format {
-        Format::JsonMcpServers => edit_json_gateway(&path, "mcpServers", install, profile, false)?,
-        Format::JsonServers => edit_json_gateway(&path, "servers", install, profile, false)?,
+        Format::JsonMcpServers => {
+            edit_json_gateway(&path, "mcpServers", install, profile, lenient)?
+        }
+        Format::JsonServers => edit_json_gateway(&path, "servers", install, profile, lenient)?,
         Format::JsonContextServers => {
             edit_json_gateway(&path, "context_servers", install, profile, true)?
         }
@@ -3014,6 +3031,28 @@ bad = "not-a-table"
         std::fs::write(&path, garbage).unwrap();
         // A lenient edit must ERROR, never replace the file with an empty object.
         assert!(edit_json_gateway(&path, "context_servers", true, None, true).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn whole_app_state_clients_are_lenient() {
+        // claude-code (~/.claude.json) and gemini-cli (~/.gemini/settings.json) hold
+        // the client's entire state, so an unparseable file must never be wiped.
+        assert!(config_is_whole_app_state("claude-code"));
+        assert!(config_is_whole_app_state("gemini-cli"));
+        // Single-purpose mcpServers files keep the start-fresh behavior.
+        assert!(!config_is_whole_app_state("claude-desktop"));
+        assert!(!config_is_whole_app_state("vscode"));
+        assert!(!config_is_whole_app_state("lm-studio"));
+
+        // A whole-app-state client with a genuinely-broken config errors (leaving the
+        // file intact) instead of replacing it with just the gateway entry.
+        let path =
+            std::env::temp_dir().join(format!("conduit-claude-{}.json", std::process::id()));
+        let garbage = "{ \"projects\": {}, \"oauthAccount\": broken not json";
+        std::fs::write(&path, garbage).unwrap();
+        assert!(edit_json_gateway(&path, "mcpServers", true, None, true).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
         std::fs::remove_file(&path).ok();
     }
