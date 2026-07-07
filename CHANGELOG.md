@@ -6,6 +6,52 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+Post-1.5.1 security and robustness batch from a multi-dimension gateway audit
+(#203 HIGH, #204 MEDIUM, #205 LOW/robustness). All batches ship with regression
+tests; full suite green.
+
+### Security
+
+- **Spawn-guard bypass via attached inline-eval flags.** The dangerous-flag guard only
+  matched interpreter flags as standalone argv tokens, so the attached form
+  (`python -c<code>`, `ruby -e<code>`) from a booby-trapped server config slipped past and
+  executed arbitrary code. Generalized the matcher to the attached short form. (#203)
+- **OAuth DNS-rebind SSRF into the private network.** The OAuth metadata resolver refused
+  only link-local / metadata IPs; RFC1918 and loopback were blocked by a separate
+  pre-connect check, a resolve-then-connect TOCTOU a rebinding host could exploit. A
+  stable, provenance-derived `block_private` flag now refuses private answers at connect
+  time too, so a rebind can't flip it. Self-hosted LAN auth servers still work. (#204)
+- **OAuth cleartext-exchange bypass.** `require_https`'s loopback exception used a string
+  prefix that also matched `http://127.0.0.1.evil.com`; it now decides on the parsed host
+  (`is_loopback()` / `localhost`). (#204)
+- **HTTP-bridge token masked in the UI.** The bearer token that grants any local process
+  access to every tool was shown in plaintext on each visit; it is now masked by default
+  with a reveal toggle. (#205)
+
+### Fixed
+
+- **Config-wipe data loss on parse failure.** A genuinely-unparseable `codex/config.toml`,
+  `~/.claude.json`, or Gemini `settings.json` was replaced with a fresh file holding only
+  the gateway entry, destroying the user's model/provider/profile/MCP state. Both paths now
+  fail closed and preserve the file (a timestamped backup was always taken first, so prior
+  damage was recoverable). (#203)
+- **Router lock held across downstream refresh I/O.** A `list_changed` from one slow
+  downstream stalled every concurrent request for up to num_servers x connect-timeout; the
+  refresh now runs on an off-lock router clone swapped in under a brief lock. (#204)
+- **Self-heal thundering herd.** A startup burst of workers could each rebuild the router,
+  spawning the full server set N times; the rebuild is now single-flighted behind a
+  double-checked lock. (#205)
+- **Robustness batch:** cancel-forward threads capped at 64 to stop a wedged downstream
+  leaking threads; config install cap raised 8MB to 64MB for heavy Claude Code users;
+  saturating arithmetic on the savings/audit hot paths; frontend polish (approval-bar
+  countdown scales against the real window, stale share-export guard, capped
+  dismissed-activity set). (#205)
+
+### CI
+
+- Pinned the release workflow's actions to commit SHAs (it holds the signing secrets);
+  removed stray 0-byte local signing-key artifacts. (#205)
+
 ## [1.5.1] - 2026-07-06
 
 A focused safety and gateway-control patch release. The headline fix is the
