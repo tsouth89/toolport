@@ -169,7 +169,7 @@ export function PendingApprovals() {
             // first-sighting + timeout only if deadlineMs is somehow absent, so the
             // timer is never blank.
             const seen = seenAt.current.get(a.id) ?? now;
-            const deadline = a.deadlineMs || seen + TIMEOUT_MS;
+            const deadline = a.deadlineMs ?? seen + TIMEOUT_MS;
             const remaining = Math.max(0, Math.ceil((deadline - now) / 1000));
             // Scale the bar against the ACTUAL window (deadline - first sighting), not
             // the hardcoded TIMEOUT_MS, so it stays accurate even if the gateway's
