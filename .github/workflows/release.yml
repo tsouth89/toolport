@@ -51,13 +51,16 @@ jobs:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
     steps:
-      - uses: actions/checkout@v7
+      # Third-party actions are pinned to full commit SHAs (not mutable tags): this
+      # workflow holds the Apple/Azure/Tauri signing secrets, so a compromised upstream
+      # tag must not be able to inject code into a signed release. Version in the comment.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 20
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       # Windows runs downstream `.cmd`/`.bat` shims (e.g. npx.cmd) through cmd.exe;
       # Rust 1.77.2 fixed batch-file argument escaping (CVE-2024-24576 / BatBadBut).
@@ -176,7 +179,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Draft release with the installers
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
         with:
           draft: true
           generate_release_notes: true
