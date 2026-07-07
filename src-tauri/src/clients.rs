@@ -1524,11 +1524,15 @@ fn epoch_millis() -> u128 {
         .unwrap_or(0)
 }
 
-/// Largest client config we'll read into memory or back up. Real MCP client
-/// configs are a few KB; this cap stops a maliciously large file, or a config
-/// symlinked to a huge or special file (a device, a FIFO), from exhausting
-/// memory or filling the disk via the backup dir.
-const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
+/// Largest client config we'll read into memory or back up. Most MCP client configs
+/// are a few KB, but whole-app-state files legitimately grow large - notably Claude
+/// Code's `~/.claude.json`, which stores project/session history and routinely reaches
+/// tens of MB for active users. An 8 MB cap hard-blocked those users from ever
+/// connecting Claude Code through the gateway (install errored on the read), so the
+/// bound is 64 MB: generous enough for real whole-app-state files while still capping
+/// memory. The device/FIFO/directory case is handled separately by the `is_file`
+/// check, so this only guards against an abnormally huge regular file.
+const MAX_CONFIG_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Read a client config to a string, refusing anything that isn't a regular file
 /// (after following symlinks, so a benign symlinked dotfile still works but a
