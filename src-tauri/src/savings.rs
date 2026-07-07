@@ -110,8 +110,8 @@ fn fold(entries: &[Value]) -> Value {
     let mut peak = 0u64;
     let mut since = 0u64;
     for e in entries {
-        saved += e.get("saved").and_then(Value::as_u64).unwrap_or(0);
-        loads += e.get("loads").and_then(Value::as_u64).unwrap_or(1);
+        saved = saved.saturating_add(e.get("saved").and_then(Value::as_u64).unwrap_or(0));
+        loads = loads.saturating_add(e.get("loads").and_then(Value::as_u64).unwrap_or(1));
         peak = peak.max(e.get("tools").and_then(Value::as_u64).unwrap_or(0));
         let ts = e.get("ts").and_then(Value::as_u64).unwrap_or(0);
         if ts > 0 && (since == 0 || ts < since) {
