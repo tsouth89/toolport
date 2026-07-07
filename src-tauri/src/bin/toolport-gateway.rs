@@ -2931,36 +2931,56 @@ fn watch_registry(
             // notification so the client re-fetches exactly what changed. (make_mut
             // forks the router only if a request still holds the prior Arc, keeping
             // live connections.)
+            // Re-query the affected list(s) WITHOUT holding the top-level router lock
+            // across the blocking downstream `list` call. Each refresh_* iterates the
+            // servers doing synchronous tools/list I/O bounded by the connect timeout;
+            // holding the router lock across it (as the old make_mut path did) wedges
+            // every concurrent request - in HTTP-bridge mode, every client - for up to
+            // num_servers x connect-timeout while one slow downstream answers. Instead
+            // clone the router off-lock (the Vec<Arc<ServerSlot>> shares the same live
+            // connections, so only the cached metadata is copied), refresh the clone,
+            // then swap it in under a brief lock. Mirrors the full-rebuild branch above.
             if downstream_changed & downstream::change::TOOLS != 0 {
-                let tools = {
-                    let mut guard = router
+                let mut next = {
+                    let guard = router
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let r = Arc::make_mut(&mut guard);
-                    r.refresh_tools();
-                    r.aggregated_tools()
+                    (**guard).clone()
                 };
+                next.refresh_tools();
+                let tools = next.aggregated_tools();
+                *router
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(next);
                 let tools = requarantine_if_needed(&registry, &router, tools, profile.as_deref());
                 persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
                 eprintln!("toolport: downstream tools/list_changed, refreshed + sent");
             }
             if downstream_changed & downstream::change::RESOURCES != 0 {
-                {
-                    let mut guard = router
+                let mut next = {
+                    let guard = router
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    Arc::make_mut(&mut guard).refresh_resources();
-                }
+                    (**guard).clone()
+                };
+                next.refresh_resources();
+                *router
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(next);
                 notify_list_changed(&stdout, "notifications/resources/list_changed");
                 eprintln!("toolport: downstream resources/list_changed, refreshed + sent");
             }
             if downstream_changed & downstream::change::PROMPTS != 0 {
-                {
-                    let mut guard = router
+                let mut next = {
+                    let guard = router
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    Arc::make_mut(&mut guard).refresh_prompts();
-                }
+                    (**guard).clone()
+                };
+                next.refresh_prompts();
+                *router
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(next);
                 notify_list_changed(&stdout, "notifications/prompts/list_changed");
                 eprintln!("toolport: downstream prompts/list_changed, refreshed + sent");
             }
