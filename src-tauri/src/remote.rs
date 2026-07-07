@@ -56,11 +56,18 @@ pub fn refresh_token(server_id: &str) -> Result<String, String> {
         .refresh_token
         .as_deref()
         .ok_or("no refresh token available")?;
+    // Block a rebind to the internal network unless the token endpoint is itself a
+    // local/LAN host (a self-hosted auth server). Fail closed (block) if the stored
+    // endpoint host can't be parsed.
+    let block_private = oauth::host_of_url(&state.token_endpoint)
+        .map(|h| !oauth::host_is_private(&h))
+        .unwrap_or(true);
     let tokens = oauth::refresh(
         &state.token_endpoint,
         &state.client_id,
         rt,
         state.resource.as_deref(),
+        block_private,
     )?;
     secrets::set_secret(server_id, secrets::HTTP_AUTH_KEY, &tokens.access_token)?;
     // Persist a rotated refresh token if the server issued one.

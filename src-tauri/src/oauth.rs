@@ -106,15 +106,24 @@ struct AsMeta {
 /// black-holed host must not hang the worker indefinitely behind a spinner that
 /// never resolves. Bare `ureq::get/post` have no timeout; this does.
 /// Refuse link-local / cloud-metadata addresses (169.254.169.254, the AWS ULA
-/// `fd00:ec2::254`, IPv4-mapped forms). Fail-closed if ANY resolved address is one, so a
-/// DNS answer mixing a public and a metadata IP can't sneak the metadata one through.
-/// Private/loopback are allowed - a self-hosted MCP auth server on the LAN is legitimate.
-fn screen_addrs(addrs: &[std::net::SocketAddr]) -> std::io::Result<()> {
+/// `fd00:ec2::254`, IPv4-mapped forms) for EVERY flow. When `block_private`, also refuse
+/// loopback / RFC1918 / ULA - set for a public-provenance server, whose metadata must not
+/// point our token POST at the user's internal network. Fail-closed if ANY resolved address
+/// is refused, so a DNS answer mixing a public and an internal IP can't sneak the bad one
+/// through. `block_private` is left false for a server the user configured at a local/LAN
+/// address, so a self-hosted MCP auth server keeps working.
+fn screen_addrs(addrs: &[std::net::SocketAddr], block_private: bool) -> std::io::Result<()> {
     for sa in addrs {
         if ip_is_link_local(&sa.ip()) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!("OAuth SSRF guard: refusing link-local / cloud-metadata address {}", sa.ip()),
+            ));
+        }
+        if block_private && ip_is_private(&sa.ip()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("OAuth SSRF guard: refusing private/loopback address {} for a public server", sa.ip()),
             ));
         }
     }
@@ -124,19 +133,22 @@ fn screen_addrs(addrs: &[std::net::SocketAddr]) -> std::io::Result<()> {
 /// A DNS resolver that screens every resolved address (see [`screen_addrs`]). Installed on
 /// the OAuth agents so the check runs INSIDE ureq's resolver - covering the initial connect
 /// AND any redirect target, and closing the resolve-then-connect (DNS-rebind) window that a
-/// separate pre-check has. The OAuth endpoints come from an attacker-influenceable metadata
-/// document, so this is the load-bearing SSRF guard.
-fn screened_resolve(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+/// separate pre-check has. `block_private` is a STABLE, provenance-derived flag (whether the
+/// user's configured server is public), not a per-connect re-resolution, so a hostile host
+/// that rebinds public->private between the pre-check and the connect is still refused here.
+/// The OAuth endpoints come from an attacker-influenceable metadata document, so this is the
+/// load-bearing SSRF guard.
+fn screened_resolve(netloc: &str, block_private: bool) -> std::io::Result<Vec<std::net::SocketAddr>> {
     use std::net::ToSocketAddrs;
     let addrs: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
-    screen_addrs(&addrs)?;
+    screen_addrs(&addrs, block_private)?;
     Ok(addrs)
 }
 
-fn agent() -> ureq::Agent {
+fn agent(block_private: bool) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(30))
-        .resolver(screened_resolve)
+        .resolver(move |netloc: &str| screened_resolve(netloc, block_private))
         .build()
 }
 
@@ -146,16 +158,16 @@ fn agent() -> ureq::Agent {
 /// auth code or refresh token. Metadata discovery (a read-only GET) keeps following
 /// redirects so providers that redirect their `.well-known` still resolve; both agents
 /// screen resolved addresses so a redirect or rebind to cloud metadata is refused.
-fn agent_no_redirect() -> ureq::Agent {
+fn agent_no_redirect(block_private: bool) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(30))
         .redirects(0)
-        .resolver(screened_resolve)
+        .resolver(move |netloc: &str| screened_resolve(netloc, block_private))
         .build()
 }
 
-fn get_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, String> {
-    agent()
+fn get_json<T: serde::de::DeserializeOwned>(url: &str, block_private: bool) -> Result<T, String> {
+    agent(block_private)
         .get(url)
         .call()
         .map_err(|e| e.to_string())?
@@ -199,17 +211,30 @@ fn metadata_candidates(issuer: &str) -> Vec<String> {
 }
 
 /// Require an endpoint to use https, allowing only loopback http for local dev.
+/// The loopback exception is decided on the PARSED host, not a string prefix: a
+/// prefix check (`starts_with("http://127.0.0.1")`) also accepts a cleartext
+/// endpoint at an attacker-controlled host like `http://127.0.0.1.evil.com/token`
+/// or `http://localhost@evil.com/`, defeating the TLS-required invariant. Only a
+/// host that IS loopback (127.0.0.0/8, ::1, or `localhost`) may skip https.
 fn require_https(url: &str, what: &str) -> Result<(), String> {
     let lower = url.trim().to_ascii_lowercase();
-    let ok = lower.starts_with("https://")
-        || lower.starts_with("http://127.0.0.1")
-        || lower.starts_with("http://localhost")
-        || lower.starts_with("http://[::1]");
-    if ok {
-        Ok(())
-    } else {
-        Err(format!("{what} must use https (got {url})"))
+    if lower.starts_with("https://") {
+        return Ok(());
     }
+    if lower.starts_with("http://") {
+        if let Some(host) = host_of_url(&lower) {
+            let is_loopback = host == "localhost"
+                || host.ends_with(".localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false);
+            if is_loopback {
+                return Ok(());
+            }
+        }
+    }
+    Err(format!("{what} must use https (got {url})"))
 }
 
 /// The host (no scheme, userinfo, port, or brackets) of a URL.
@@ -327,9 +352,16 @@ fn guard_endpoint(url: &str, server_local: bool, what: &str) -> Result<(), Strin
 /// Discover the authorization + token endpoints for an MCP server URL.
 pub fn discover(mcp_url: &str) -> Result<Endpoints, String> {
     let origin = origin_of(mcp_url);
-    let issuer = match get_json::<ProtectedResource>(&format!(
-        "{origin}/.well-known/oauth-protected-resource"
-    )) {
+    // Is the configured MCP server itself local? If so, local OAuth endpoints are
+    // expected and allowed; if it's public, its metadata must not redirect us at a
+    // private/loopback host (SSRF). This is a stable property of the URL the user
+    // configured, so it also drives the resolver's rebind-safe `block_private`.
+    let server_local = host_of_url(mcp_url).map(|h| host_is_private(&h)).unwrap_or(false);
+    let block_private = !server_local;
+    let issuer = match get_json::<ProtectedResource>(
+        &format!("{origin}/.well-known/oauth-protected-resource"),
+        block_private,
+    ) {
         Ok(pr) => pr
             .authorization_servers
             .and_then(|v| v.into_iter().next())
@@ -337,16 +369,12 @@ pub fn discover(mcp_url: &str) -> Result<Endpoints, String> {
         Err(_) => origin.clone(),
     };
 
-    // Is the configured MCP server itself local? If so, local OAuth endpoints are
-    // expected and allowed; if it's public, its metadata must not redirect us at a
-    // private/loopback host (SSRF).
-    let server_local = host_of_url(mcp_url).map(|h| host_is_private(&h)).unwrap_or(false);
     // The issuer can come from the protected-resource document, so guard the
     // metadata fetch too, not just the final endpoints.
     guard_endpoint(&issuer, server_local, "authorization server")?;
 
     for url in metadata_candidates(&issuer) {
-        if let Ok(meta) = get_json::<AsMeta>(&url) {
+        if let Ok(meta) = get_json::<AsMeta>(&url, block_private) {
             // OAuth 2.1 requires TLS for these endpoints. Without this check a
             // hostile/MITM'd metadata document could point the token endpoint at
             // an attacker (or an internal address), and we'd POST the auth code +
@@ -382,7 +410,11 @@ struct DcrResponse {
     client_id: String,
 }
 
-fn register_client(registration_endpoint: &str, redirect_uri: &str) -> Result<String, String> {
+fn register_client(
+    registration_endpoint: &str,
+    redirect_uri: &str,
+    block_private: bool,
+) -> Result<String, String> {
     let body = serde_json::json!({
         "client_name": "Toolport",
         "redirect_uris": [redirect_uri],
@@ -390,7 +422,7 @@ fn register_client(registration_endpoint: &str, redirect_uri: &str) -> Result<St
         "response_types": ["code"],
         "token_endpoint_auth_method": "none"
     });
-    let resp: DcrResponse = agent_no_redirect()
+    let resp: DcrResponse = agent_no_redirect(block_private)
         .post(registration_endpoint)
         .send_json(body)
         .map_err(|e| e.to_string())?
@@ -453,8 +485,9 @@ fn exchange_code(
     code: &str,
     verifier: &str,
     resource: &str,
+    block_private: bool,
 ) -> Result<Tokens, String> {
-    let resp: TokenResponse = agent_no_redirect()
+    let resp: TokenResponse = agent_no_redirect(block_private)
         .post(token_endpoint)
         .send_form(&[
             ("grant_type", "authorization_code"),
@@ -486,6 +519,7 @@ pub fn refresh(
     client_id: &str,
     refresh_token: &str,
     resource: Option<&str>,
+    block_private: bool,
 ) -> Result<Tokens, String> {
     let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", "refresh_token"),
@@ -495,7 +529,7 @@ pub fn refresh(
     if let Some(r) = resource {
         form.push(("resource", r));
     }
-    let resp: TokenResponse = agent_no_redirect()
+    let resp: TokenResponse = agent_no_redirect(block_private)
         .post(token_endpoint)
         .send_form(&form)
         .map_err(|e| e.to_string())?
@@ -653,6 +687,9 @@ fn write_callback_page(stream: &mut std::net::TcpStream, message: &str) {
 /// Run the full interactive flow and return tokens plus what's needed to refresh.
 pub fn authenticate(mcp_url: &str) -> Result<AuthResult, String> {
     debug_log(&format!("=== oauth start: {mcp_url} ==="));
+    // Same provenance rule as discover(): a public configured server must not have
+    // its DCR / token POST reach a private/loopback host, even via a DNS rebind.
+    let block_private = !host_of_url(mcp_url).map(|h| host_is_private(&h)).unwrap_or(false);
     let endpoints = discover(mcp_url)?;
     debug_log(&format!(
         "endpoints: authz={} token={} reg={:?} scope={:?}",
@@ -676,7 +713,7 @@ pub fn authenticate(mcp_url: &str) -> Result<AuthResult, String> {
     debug_log(&format!("callback listening on {redirect_uri}"));
 
     let client_id = match &endpoints.registration_endpoint {
-        Some(reg) => register_client(reg, &redirect_uri)?,
+        Some(reg) => register_client(reg, &redirect_uri, block_private)?,
         None => {
             return Err(
                 "this server has no dynamic-registration endpoint; OAuth needs a pre-registered client"
@@ -719,6 +756,7 @@ pub fn authenticate(mcp_url: &str) -> Result<AuthResult, String> {
         &code,
         &verifier,
         mcp_url,
+        block_private,
     ) {
         Ok(t) => {
             debug_log("token exchange: OK");
@@ -746,14 +784,48 @@ mod tests {
         use std::net::SocketAddr;
         let p = |s: &str| s.parse::<SocketAddr>().unwrap();
         // AWS/GCP/Azure IPv4 metadata, AWS IPv6 ULA metadata, and the IPv4-mapped form.
+        // Link-local / metadata is refused regardless of block_private.
         for bad in ["169.254.169.254:80", "[fd00:ec2::254]:80", "[::ffff:169.254.169.254]:80"] {
-            assert!(screen_addrs(&[p(bad)]).is_err(), "must refuse {bad}");
+            assert!(screen_addrs(&[p(bad)], false).is_err(), "must refuse {bad}");
         }
-        // A public address is allowed; a private/loopback one is allowed (self-hosted AS).
-        assert!(screen_addrs(&[p("140.82.112.3:443")]).is_ok());
-        assert!(screen_addrs(&[p("127.0.0.1:8080")]).is_ok());
+        // A public address is always allowed.
+        assert!(screen_addrs(&[p("140.82.112.3:443")], true).is_ok());
+        // A private/loopback one is allowed only for a local-provenance server.
+        assert!(screen_addrs(&[p("127.0.0.1:8080")], false).is_ok());
+        assert!(screen_addrs(&[p("10.0.0.5:443")], false).is_ok());
         // Fail-closed: a mixed public+metadata answer is refused whole.
-        assert!(screen_addrs(&[p("8.8.8.8:443"), p("169.254.169.254:80")]).is_err());
+        assert!(screen_addrs(&[p("8.8.8.8:443"), p("169.254.169.254:80")], false).is_err());
+    }
+
+    #[test]
+    fn screen_addrs_blocks_private_for_public_server() {
+        use std::net::SocketAddr;
+        let p = |s: &str| s.parse::<SocketAddr>().unwrap();
+        // With block_private set (public-provenance server), a rebind to loopback /
+        // RFC1918 / CGNAT / IPv6-ULA is refused - closing the DNS-rebind SSRF window.
+        for bad in ["127.0.0.1:8080", "10.0.0.5:443", "192.168.1.1:80", "100.64.0.1:80", "[fc00::1]:80"] {
+            assert!(screen_addrs(&[p(bad)], true).is_err(), "must refuse {bad} for a public server");
+        }
+        // A public IP still resolves for the public server.
+        assert!(screen_addrs(&[p("8.8.8.8:443")], true).is_ok());
+        // Fail-closed: public + private mix is refused whole for a public server.
+        assert!(screen_addrs(&[p("8.8.8.8:443"), p("10.0.0.5:80")], true).is_err());
+    }
+
+    #[test]
+    fn require_https_rejects_prefix_lookalike_hosts() {
+        // https is always fine.
+        assert!(require_https("https://auth.example.com/token", "token").is_ok());
+        // Genuine loopback http is allowed for local dev.
+        assert!(require_https("http://127.0.0.1:9000/token", "token").is_ok());
+        assert!(require_https("http://localhost:9000/token", "token").is_ok());
+        assert!(require_https("http://[::1]:9000/token", "token").is_ok());
+        // Prefix look-alikes at an attacker host must NOT satisfy the loopback exception.
+        assert!(require_https("http://127.0.0.1.evil.com/token", "token").is_err());
+        assert!(require_https("http://localhost.evil.com/token", "token").is_err());
+        assert!(require_https("http://localhost@evil.com/token", "token").is_err());
+        // A plain public cleartext endpoint is refused.
+        assert!(require_https("http://auth.example.com/token", "token").is_err());
     }
 
     #[test]
