@@ -238,7 +238,6 @@ export function ShareDialog({ trigger, onImported }: Props) {
       cancelled = true;
       unlisten?.();
     };
-     
   }, []);
 
   const newCount = preview?.filter((i) => i.isNew).length ?? 0;
