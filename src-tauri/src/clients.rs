@@ -1222,6 +1222,20 @@ fn read_existing_json(content: &str, lenient: bool) -> Result<serde_json::Value,
     }
 }
 
+/// Read an existing TOML config we're about to modify. Codex's `config.toml` holds
+/// the user's ENTIRE Codex configuration (model, provider, approval policy, profiles),
+/// so an unparseable file is an ERROR, never silently replaced with an empty table —
+/// otherwise writing our one `[mcp_servers.Toolport]` entry back would wipe every
+/// other setting. An empty/whitespace file starts fresh, matching read_existing_json.
+fn read_existing_toml(content: &str) -> Result<toml::Value, String> {
+    if content.trim().is_empty() {
+        return Ok(toml::Value::Table(toml::map::Map::new()));
+    }
+    toml::from_str::<toml::Value>(content).map_err(|e| {
+        format!("Could not parse the existing config ({e}); leaving it untouched.")
+    })
+}
+
 fn parse_json(content: &str, key: &str) -> Result<Vec<McpServer>, String> {
     let value = parse_json_value(content)?;
     let obj = match value.get(key) {
@@ -1669,8 +1683,7 @@ fn write_json(
 fn write_toml(path: &Path, servers: &[ServerEntry]) -> Result<(), String> {
     let mut root = if path.exists() {
         let content = read_config_file(path)?;
-        toml::from_str::<toml::Value>(&content)
-            .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
+        read_existing_toml(&content)?
     } else {
         toml::Value::Table(toml::map::Map::new())
     };
@@ -2392,8 +2405,7 @@ fn edit_json_gateway(
 fn edit_toml_gateway(path: &Path, install: bool, profile: Option<&str>) -> Result<(), String> {
     let mut root = if path.exists() {
         let content = read_config_file(path)?;
-        toml::from_str::<toml::Value>(&content)
-            .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
+        read_existing_toml(&content)?
     } else {
         toml::Value::Table(toml::map::Map::new())
     };
@@ -3003,6 +3015,45 @@ bad = "not-a-table"
         // A lenient edit must ERROR, never replace the file with an empty object.
         assert!(edit_json_gateway(&path, "context_servers", true, None, true).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn toml_edit_never_wipes_unparseable_config() {
+        // Codex's config.toml holds the user's whole config; a parse failure must
+        // ERROR and leave the file byte-for-byte intact, never rewrite it down to
+        // just our [mcp_servers.Toolport] entry.
+        let path =
+            std::env::temp_dir().join(format!("conduit-bad-{}.toml", std::process::id()));
+        let garbage = "model = \"o3\"\n[[[ this is not valid toml";
+        std::fs::write(&path, garbage).unwrap();
+        assert!(edit_toml_gateway(&path, true, None).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn toml_edit_preserves_other_settings() {
+        // A parseable config.toml keeps every unrelated key when we add our entry.
+        let path =
+            std::env::temp_dir().join(format!("conduit-ok-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "model = \"o3\"\napproval_policy = \"on-request\"\n\n[profiles.work]\nmodel = \"gpt-5\"\n",
+        )
+        .unwrap();
+        edit_toml_gateway(&path, true, None).unwrap();
+        let v: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v.get("model").and_then(|x| x.as_str()), Some("o3"));
+        assert_eq!(
+            v.get("approval_policy").and_then(|x| x.as_str()),
+            Some("on-request")
+        );
+        assert!(v.get("profiles").is_some());
+        assert!(v
+            .get("mcp_servers")
+            .and_then(|m| m.get(GATEWAY_ENTRY_NAME))
+            .is_some());
         std::fs::remove_file(&path).ok();
     }
 
