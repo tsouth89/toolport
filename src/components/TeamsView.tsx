@@ -100,7 +100,7 @@ export function TeamsView({
         throw new Error(urlError);
       }
       if (!inviteCode.trim()) {
-        throw new Error("Invite code is required.");
+        throw new Error("An invite or connect code is required.");
       }
       const r = await teamConnect(
         serverUrl.trim(),
@@ -279,12 +279,16 @@ export function TeamsView({
               </span>
             </label>
             <label className="grid gap-1 text-sm">
-              <span className="text-muted-foreground">Invite code</span>
+              <span className="text-muted-foreground">Invite or connect code</span>
               <Input
-                placeholder="Paste your invite code"
+                placeholder="Paste your invite or connect code"
                 value={inviteCode}
                 onChange={(e) => setInviteCode(e.target.value)}
               />
+              <span className="text-xs text-muted-foreground">
+                An invite code joins you to a team. A connect code links this device to a
+                seat you already have.
+              </span>
             </label>
             <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Your name (optional)</span>
