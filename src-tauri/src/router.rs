@@ -111,15 +111,67 @@ fn inline_node(node: &mut Value, root: &Value, active: &mut HashSet<String>) {
     }
 }
 
-/// True if a tool advertises `destructiveHint: true` (MCP tool annotations).
-/// Accepts the spec's nested `annotations.destructiveHint` and a top-level
-/// fallback some servers emit.
+/// True if a tool advertises `destructiveHint: true` (MCP tool annotations), or
+/// has an obvious write/delete verb when no explicit hint is present. Accepts the
+/// spec's nested `annotations.destructiveHint` and a top-level fallback some
+/// servers emit. An explicit `false` hint wins over the name fallback.
 pub fn is_destructive(tool: &Value) -> bool {
-    tool.get("annotations")
+    if let Some(hint) = tool
+        .get("annotations")
         .and_then(|a| a.get("destructiveHint"))
         .and_then(|v| v.as_bool())
         .or_else(|| tool.get("destructiveHint").and_then(|v| v.as_bool()))
+    {
+        return hint;
+    }
+
+    tool.get("name")
+        .and_then(Value::as_str)
+        .map(name_looks_destructive)
         .unwrap_or(false)
+}
+
+fn name_looks_destructive(name: &str) -> bool {
+    let mut tokens = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .flat_map(split_camel_lower);
+    tokens.any(|t| {
+        matches!(
+            t.as_str(),
+            "create"
+                | "delete"
+                | "destroy"
+                | "drop"
+                | "execute"
+                | "insert"
+                | "post"
+                | "publish"
+                | "remove"
+                | "run"
+                | "send"
+                | "truncate"
+                | "update"
+                | "write"
+        )
+    })
+}
+
+fn split_camel_lower(word: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let chars: Vec<(usize, char)> = word.char_indices().collect();
+    for window in chars.windows(2) {
+        let (idx, ch) = window[0];
+        let (_, next) = window[1];
+        if idx > start && ch.is_ascii_lowercase() && next.is_ascii_uppercase() {
+            out.push(word[start..idx + ch.len_utf8()].to_ascii_lowercase());
+            start = idx + ch.len_utf8();
+        }
+    }
+    if start < word.len() {
+        out.push(word[start..].to_ascii_lowercase());
+    }
+    out
 }
 
 /// Which downstream tools the gateway is allowed to expose. Default-allow: an
@@ -1158,6 +1210,18 @@ mod tests {
         assert!(is_destructive(&json!({ "destructiveHint": true }))); // top-level fallback
         assert!(!is_destructive(&json!({ "annotations": { "destructiveHint": false } })));
         assert!(!is_destructive(&json!({ "name": "x" })));
+    }
+
+    #[test]
+    fn is_destructive_falls_back_to_obvious_write_verbs() {
+        assert!(is_destructive(&json!({ "name": "delete_file" })));
+        assert!(is_destructive(&json!({ "name": "sendEmail" })));
+        assert!(is_destructive(&json!({ "name": "run_query" })));
+        assert!(!is_destructive(&json!({ "name": "list_files" })));
+        assert!(!is_destructive(&json!({
+            "name": "delete_file",
+            "annotations": { "destructiveHint": false }
+        })));
     }
 
     #[test]

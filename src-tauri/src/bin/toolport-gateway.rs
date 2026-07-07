@@ -1486,6 +1486,16 @@ fn tool_is_destructive_fail_closed(name: &str, cached: &[Value], router: &Router
     true
 }
 
+fn tool_fingerprint_for(name: &str, cached: &[Value], router: &Router) -> Option<String> {
+    let lookup = |tools: &[Value]| {
+        tools
+            .iter()
+            .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
+            .map(integrity::fingerprint)
+    };
+    lookup(cached).or_else(|| lookup(&router.aggregated_tools()))
+}
+
 /// Keep only tools whose server prefix is in `allowed`. `None` = no scoping
 /// (every tool passes). A meta-tool (no `server__` namespace, e.g.
 /// `toolport_search_tools`) is always kept, since it isn't owned by any
@@ -2273,6 +2283,7 @@ fn handle_request_with_cancel(
                         tool: tool.to_string(),
                         reason,
                         arguments: arguments.clone(),
+                        tool_fingerprint: tool_fingerprint_for(name, cached, router),
                     });
                     let held_ms = t0.elapsed().as_millis() as u64;
                     if !decision.is_approved() {
@@ -3991,6 +4002,7 @@ fn main() {
             registry::Registry::default()
         }
     };
+    inspect::clear();
     let registry = Arc::new(Mutex::new(loaded));
     // Empty router + cached catalog: the handshake and tools/list answer instantly
     // (from cache), while downstream servers connect in the background for the
@@ -4192,6 +4204,7 @@ mod tests {
             tool: "drop".into(),
             reason: approval::ApprovalReason::Destructive,
             arguments: serde_json::json!({}),
+            tool_fingerprint: Some("v2:abc".into()),
         };
         // No endpoint descriptor (Toolport app not running) -> Unreachable (fail-closed),
         // distinct from a human Timeout so the caller can explain *why* it was blocked.

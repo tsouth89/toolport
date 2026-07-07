@@ -352,6 +352,7 @@ export interface PendingApproval {
   client: string | null;
   server: string;
   tool: string;
+  toolFingerprint?: string | null;
   reason: "destructive" | "untrusted_source" | "destructive_and_untrusted";
   arguments: unknown;
   /** Wall-clock epoch-ms when this call auto-denies; the overlay counts down to it. */
