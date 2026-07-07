@@ -589,8 +589,8 @@ fn registry_summary(reg: &Registry) -> String {
     for s in &reg.servers {
         let on = if reg.is_enabled(&active, &s.id) { "on" } else { "off" };
         let target = match (&s.command, &s.url) {
-            (Some(cmd), _) => format!("{cmd} {}", s.args.join(" ")).trim().to_string(),
-            (None, Some(url)) => url.clone(),
+            (Some(cmd), _) => safe_command_target(cmd, &s.args),
+            (None, Some(url)) => redact_url_userinfo(url),
             _ => String::new(),
         };
         let _ = writeln!(out, "  [{on}] {} ({}) {}", s.id, s.transport, target);
@@ -609,6 +609,21 @@ fn registry_summary(reg: &Registry) -> String {
         let _ = writeln!(out, "  {}: [{}]", p.name, p.enabled_server_ids.join(", "));
     }
     out
+}
+
+fn safe_command_target(cmd: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(redact_arg_for_sharing(cmd));
+    parts.extend(args.iter().map(|arg| redact_arg_for_sharing(arg)));
+    parts.join(" ").trim().to_string()
+}
+
+fn redact_arg_for_sharing(arg: &str) -> String {
+    if arg_looks_secret(arg) {
+        "<redacted>".to_string()
+    } else {
+        redact_url_userinfo(arg)
+    }
 }
 
 /// The last `n` lines of the always-on gateway log, or a friendly note when it
@@ -878,12 +893,19 @@ fn decide_approval(
 ) -> Result<(), String> {
     let view = broker.decide(&id, approved)?;
     if approved && scope != "once" {
-        let key = approval::allow_key(&view.server, &view.tool);
-        broker.add_session_allow(key.clone());
-        if scope == "always" {
-            let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            reg.allow_tool(key);
-            registry::save(&reg)?;
+        // Persist only when we can bind the allow to the current definition
+        // fingerprint. If it's unavailable (the tool is no longer resolvable),
+        // the call itself already went through via `decide` above; we simply
+        // can't remember it, so degrade to a one-time approval rather than
+        // returning an error for a decision that already succeeded.
+        if let Some(fp) = view.tool_fingerprint.as_deref() {
+            let key = approval::fingerprint_allow_key(&view.server, &view.tool, fp);
+            broker.add_session_allow(key.clone());
+            if scope == "always" {
+                let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                reg.allow_tool(key);
+                registry::save(&reg)?;
+            }
         }
     }
     Ok(())
@@ -911,21 +933,28 @@ fn list_allowed_tools(
         let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reg.human_approval_allow.clone()
     };
-    let split = |key: &str| match key.split_once('/') {
-        Some((s, t)) => (s.to_string(), t.to_string()),
-        None => (String::new(), key.to_string()),
+    // Only fingerprint-bound `server/tool/<fingerprint>` keys still auto-approve;
+    // the broker ignores legacy broad `server/tool` entries, so they must not be
+    // surfaced here as active allows (that would misreport an inert entry as live).
+    let parse = |key: &str| -> Option<(String, String)> {
+        let mut parts = key.splitn(3, '/');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(s), Some(t), Some(_fp)) => Some((s.to_string(), t.to_string())),
+            _ => None,
+        }
     };
     let mut out: Vec<AllowedTool> = persistent
         .iter()
-        .map(|k| {
-            let (server, tool) = split(k);
-            AllowedTool { key: k.clone(), server, tool, persistent: true }
+        .filter_map(|k| {
+            let (server, tool) = parse(k)?;
+            Some(AllowedTool { key: k.clone(), server, tool, persistent: true })
         })
         .collect();
     for k in broker.session_allowed() {
         if !persistent.contains(&k) {
-            let (server, tool) = split(&k);
-            out.push(AllowedTool { key: k, server, tool, persistent: false });
+            if let Some((server, tool)) = parse(&k) {
+                out.push(AllowedTool { key: k, server, tool, persistent: false });
+            }
         }
     }
     out
@@ -2065,6 +2094,10 @@ pub fn run() {
         });
     }
 
+    if !registry.live_inspect {
+        inspect::clear();
+    }
+
     tauri::Builder::default()
         // Single-instance must be registered first. With its `deep-link` feature
         // a second launch carrying a conduit:// URL is forwarded to the deep-link
@@ -2610,5 +2643,43 @@ mod tests {
         assert!(!s.contains("sk-live-xyz"), "secret value leaked: {s}");
         // The launch command is present for debugging.
         assert!(s.contains("(stdio) npx"), "missing launch line: {s}");
+    }
+
+    #[test]
+    fn diagnostics_redacts_inline_arg_and_url_secrets() {
+        let mut reg = Registry::default();
+        reg.add_server(ServerEntry {
+            id: "pg".into(),
+            name: "Postgres".into(),
+            transport: "stdio".into(),
+            command: Some("npx".into()),
+            args: vec![
+                "@modelcontextprotocol/server-postgres".into(),
+                "postgresql://admin:hunter2@db.example.com/app".into(),
+                "--token=sk-live-xyz".into(),
+                "https://api.example.com/path".into(),
+            ],
+            env: vec![],
+            url: None,
+            source: None,
+            disabled_tools: vec![],
+        });
+        reg.add_server(ServerEntry {
+            id: "remote".into(),
+            name: "Remote".into(),
+            transport: "http".into(),
+            command: None,
+            args: vec![],
+            env: vec![],
+            url: Some("https://user:hunter2@mcp.example.com/mcp".into()),
+            source: None,
+            disabled_tools: vec![],
+        });
+
+        let s = registry_summary(&reg);
+        assert!(!s.contains("hunter2"), "secret value leaked: {s}");
+        assert!(!s.contains("sk-live-xyz"), "secret token leaked: {s}");
+        assert!(s.contains("<redacted>"), "missing redaction marker: {s}");
+        assert!(s.contains("https://api.example.com/path"), "safe URL was over-redacted: {s}");
     }
 }

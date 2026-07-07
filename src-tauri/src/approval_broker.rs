@@ -36,6 +36,7 @@ pub struct PendingView {
     pub client: Option<String>,
     pub server: String,
     pub tool: String,
+    pub tool_fingerprint: Option<String>,
     pub reason: ApprovalReason,
     pub arguments: serde_json::Value,
     /// Wall-clock epoch-millis when this call auto-denies (park time + the fail-closed
@@ -55,10 +56,10 @@ struct Inner {
     token: String,
     /// id -> parked connection. Bounded by `MAX_PENDING`.
     pending: Mutex<HashMap<String, Waiter>>,
-    /// Ephemeral per-session "always allow" set of `server/tool` keys. A matching call
-    /// auto-approves without prompting; cleared on app restart (the persistent list lives
-    /// in the registry). "Approve for this session" adds here; "Always allow" adds here
-    /// AND to the registry.
+    /// Ephemeral per-session "always allow" set of fingerprint-bound `server/tool/fingerprint`
+    /// keys. A matching call auto-approves without prompting; cleared on app restart (the
+    /// persistent list lives in the registry). "Approve for this session" adds here; "Always
+    /// allow" adds here AND to the registry.
     session_allow: Mutex<HashSet<String>>,
 }
 
@@ -288,18 +289,20 @@ fn handle_conn(stream: TcpStream, broker: ApprovalBroker, app: AppHandle) {
         return;
     }
 
-    // Auto-approve if the user already allowed this tool - per session (broker) or
-    // persistently (registry). Skips the prompt entirely so "approve for this session"
-    // and "always allow this tool" actually stick for later matching calls.
-    let key = crate::approval::allow_key(&req.server, &req.tool);
-    if broker.session_contains(&key) || registry_allows(&app, &key) {
-        let _ = out.set_write_timeout(Some(Duration::from_secs(10)));
-        let _ = writeln!(
-            out,
-            "{}",
-            serde_json::to_string(&ApprovalDecision::Approved).unwrap_or_default()
-        );
-        return;
+    // Auto-approve only if the current tool definition matches a fingerprint-bound allow.
+    // Legacy broad `server/tool` entries are intentionally ignored: a tool definition that
+    // changed since approval should re-prompt instead of inheriting a stale bypass.
+    if let Some(fp) = req.tool_fingerprint.as_deref() {
+        let key = crate::approval::fingerprint_allow_key(&req.server, &req.tool, fp);
+        if broker.session_contains(&key) || registry_allows(&app, &key) {
+            let _ = out.set_write_timeout(Some(Duration::from_secs(10)));
+            let _ = writeln!(
+                out,
+                "{}",
+                serde_json::to_string(&ApprovalDecision::Approved).unwrap_or_default()
+            );
+            return;
+        }
     }
 
     let view = PendingView {
@@ -307,6 +310,7 @@ fn handle_conn(stream: TcpStream, broker: ApprovalBroker, app: AppHandle) {
         client: req.client.clone(),
         server: req.server.clone(),
         tool: req.tool.clone(),
+        tool_fingerprint: req.tool_fingerprint.clone(),
         reason: req.reason,
         arguments: req.arguments.clone(),
         // Stamp the deadline now, right before we park on `recv_timeout` below.
@@ -411,6 +415,7 @@ mod tests {
             client: None,
             server: "s".into(),
             tool: "drop".into(),
+            tool_fingerprint: Some("v2:abc".into()),
             reason: ApprovalReason::Destructive,
             arguments: serde_json::json!({}),
             deadline_ms: deadline_ms_from_now(),
@@ -470,7 +475,7 @@ mod tests {
     #[test]
     fn session_allow_round_trips_and_decide_returns_view() {
         let b = broker();
-        let key = crate::approval::allow_key("db", "db__read");
+        let key = crate::approval::fingerprint_allow_key("db", "db__read", "v2:abc");
         assert!(!b.session_contains(&key));
         b.add_session_allow(key.clone());
         assert!(b.session_contains(&key));

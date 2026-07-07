@@ -67,6 +67,10 @@ pub struct ApprovalRequest {
     pub reason: ApprovalReason,
     /// The exact arguments the human is approving.
     pub arguments: serde_json::Value,
+    /// Fingerprint of the current tool definition, when the gateway can resolve it.
+    /// Allowlist entries include this so a tool definition change re-requires approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_fingerprint: Option<String>,
 }
 
 /// The broker's answer to an [`ApprovalRequest`].
@@ -128,6 +132,12 @@ pub fn allow_key(server: &str, tool: &str) -> String {
     format!("{server}/{tool}")
 }
 
+/// Fingerprint-bound allow key. This is intentionally distinct from the legacy
+/// `server/tool` key so old broad allows don't silently keep bypassing approval.
+pub fn fingerprint_allow_key(server: &str, tool: &str, fingerprint: &str) -> String {
+    format!("{}/{}/{}", server, tool, fingerprint)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,17 +190,31 @@ mod tests {
             tool: "drop_table".into(),
             reason: ApprovalReason::Destructive,
             arguments: serde_json::json!({ "table": "users" }),
+            tool_fingerprint: Some("v2:abc".into()),
         };
         let round: ApprovalRequest =
             serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
         assert_eq!(round.tool, "drop_table");
         assert_eq!(round.reason, ApprovalReason::Destructive);
         assert_eq!(round.arguments["table"], "users");
+        assert_eq!(round.tool_fingerprint.as_deref(), Some("v2:abc"));
 
         let dec: ApprovalDecision =
             serde_json::from_str(&serde_json::to_string(&ApprovalDecision::Approved).unwrap())
                 .unwrap();
         assert!(dec.is_approved());
+    }
+
+    #[test]
+    fn fingerprint_allow_key_binds_definition() {
+        assert_eq!(
+            fingerprint_allow_key("db", "drop_table", "v2:abc"),
+            "db/drop_table/v2:abc"
+        );
+        assert_ne!(
+            fingerprint_allow_key("db", "drop_table", "v2:abc"),
+            allow_key("db", "drop_table")
+        );
     }
 
     #[test]
