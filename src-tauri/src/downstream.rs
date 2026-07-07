@@ -186,13 +186,32 @@ impl CancelRegistry {
     }
 }
 
+/// Cap on concurrently-forwarding cancellation threads. The forward is a best-effort
+/// `writeln!` to the child's stdin, which blocks if the child isn't draining its pipe.
+/// Without a cap, repeated cancellation of a wedged downstream would leak one blocked
+/// thread per cancel; past the cap we drop the notification instead.
+static CANCEL_THREADS_INFLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+const MAX_CANCEL_THREADS: usize = 64;
+
 impl CancelEntry {
     fn send_cancel_async(&self, reason: Option<String>) {
+        // Reserve a slot; if too many forwards are already blocked (a downstream that
+        // stopped draining its stdin), drop this one rather than leak another thread.
+        if CANCEL_THREADS_INFLIGHT.fetch_add(1, Ordering::SeqCst) >= MAX_CANCEL_THREADS {
+            CANCEL_THREADS_INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+            eprintln!(
+                "toolport: dropping cancellation forward (>{MAX_CANCEL_THREADS} already blocked; \
+                 downstream not draining stdin)"
+            );
+            return;
+        }
         let entry = self.clone();
         std::thread::spawn(move || {
             if let Err(err) = entry.send_cancel(reason.as_deref()) {
                 eprintln!("toolport: failed to forward cancellation downstream: {err}");
             }
+            CANCEL_THREADS_INFLIGHT.fetch_sub(1, Ordering::SeqCst);
         });
     }
 

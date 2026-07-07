@@ -94,9 +94,21 @@ export function ShareDialog({ trigger, onImported }: Props) {
   useEffect(() => {
     if (!open) return;
     setShareLink(""); // the export changed, so any prior link is stale
+    // Guard against out-of-order responses: this effect re-fires on every keystroke
+    // of name/description, and two in-flight exportConfig calls can resolve in either
+    // order. Without this, a slower earlier response could overwrite the preview with
+    // stale content. Only the latest effect run is allowed to commit its result.
+    let cancelled = false;
     exportConfig(name, description, shareFilter)
-      .then(setExported)
-      .catch(() => setExported(""));
+      .then((v) => {
+        if (!cancelled) setExported(v);
+      })
+      .catch(() => {
+        if (!cancelled) setExported("");
+      });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, name, description, selected, servers]);
 
@@ -226,7 +238,6 @@ export function ShareDialog({ trigger, onImported }: Props) {
       cancelled = true;
       unlisten?.();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const newCount = preview?.filter((i) => i.isNew).length ?? 0;

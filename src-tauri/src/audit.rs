@@ -319,7 +319,7 @@ fn latency(durs: &mut [u64]) -> (Option<u64>, Option<u64>) {
     if durs.is_empty() {
         return (None, None);
     }
-    let sum: u64 = durs.iter().sum();
+    let sum: u64 = durs.iter().copied().fold(0u64, u64::saturating_add);
     let avg = sum / durs.len() as u64;
     durs.sort_unstable();
     // Nearest-rank p95.

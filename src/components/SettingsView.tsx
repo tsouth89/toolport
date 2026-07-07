@@ -4,6 +4,8 @@ import {
   Bot,
   Check,
   Copy,
+  Eye,
+  EyeOff,
   Globe,
   Layers,
   Pin,
@@ -217,6 +219,9 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const [allowedError, setAllowedError] = useState(false);
   const [bridge, setBridge] = useState<HttpBridgeStatus | null>(null);
   const [bridgeError, setBridgeError] = useState(false);
+  // Mask the bridge bearer token by default (grants any local process access to all
+  // the user's tools); reveal on demand.
+  const [showToken, setShowToken] = useState(false);
   const [bridgeBusy, setBridgeBusy] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [newLabel, setNewLabel] = useState("");
@@ -670,7 +675,22 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
                   <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
                     Token
                   </span>
-                  <code className="min-w-0 flex-1 truncate text-xs">{bridge.token}</code>
+                  <code className="min-w-0 flex-1 truncate text-xs">
+                    {showToken ? bridge.token : "•".repeat(24)}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => setShowToken((s) => !s)}
+                    title={showToken ? "Hide token" : "Reveal token"}
+                    aria-label={showToken ? "Hide token" : "Reveal token"}
+                    className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    {showToken ? (
+                      <EyeOff className="size-3.5" />
+                    ) : (
+                      <Eye className="size-3.5" />
+                    )}
+                  </button>
                   <button
                     type="button"
                     onClick={() => copy(bridge.token!, "token")}

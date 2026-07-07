@@ -3011,6 +3011,11 @@ struct GatewayState {
     stdout: Arc<Mutex<std::io::Stdout>>,
     ready: Arc<AtomicBool>,
     downstream_dirty: Arc<AtomicU8>,
+    /// Serializes the self-heal rebuild so a startup burst of concurrent tools/call
+    /// workers that all observe an empty router don't each spawn the full server set
+    /// (single-flight). The winner rebuilds; the others block here, then re-check
+    /// server_count under the router lock and skip.
+    rebuild_lock: Arc<Mutex<()>>,
     lazy: bool,
     profile: Option<String>,
     /// True when this process is the HTTP/OpenAPI bridge (vs a stdio client's
@@ -3086,40 +3091,57 @@ fn process_request(
             .server_count()
             == 0
     {
-        let reg = state
-            .registry
+        // Single-flight: serialize the rebuild so a startup burst of concurrent
+        // tools/call workers doesn't have each one spawn the full server set (and
+        // then drop all but one, killing their just-spawned children). The winner
+        // holds this lock while it rebuilds; the others block, then the double-check
+        // below sees a non-empty router and skips.
+        let _rebuild = state
+            .rebuild_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let still_empty = state
+            .router
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let built = build_router(
-            &reg,
-            state.profile.as_deref(),
-            state.http,
-            &state.downstream_dirty,
-        );
-        if built.server_count() > 0 {
-            let tools = built.aggregated_tools();
-            *state
-                .router
+            .server_count()
+            == 0;
+        if still_empty {
+            let reg = state
+                .registry
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(built);
-            if !tools.is_empty() {
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let built = build_router(
+                &reg,
+                state.profile.as_deref(),
+                state.http,
+                &state.downstream_dirty,
+            );
+            if built.server_count() > 0 {
+                let tools = built.aggregated_tools();
                 *state
-                    .cached_tools
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = tools.clone();
-                save_tool_cache(&tools, state.profile.as_deref());
-            }
-            glog(&format!(
-                "self-heal: rebuilt router ({} servers, {} tools)",
-                state
                     .router
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .server_count(),
-                tools.len()
-            ));
-            notify_tools_changed(&state.stdout);
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(built);
+                if !tools.is_empty() {
+                    *state
+                        .cached_tools
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = tools.clone();
+                    save_tool_cache(&tools, state.profile.as_deref());
+                }
+                glog(&format!(
+                    "self-heal: rebuilt router ({} servers, {} tools)",
+                    state
+                        .router
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .server_count(),
+                    tools.len()
+                ));
+                notify_tools_changed(&state.stdout);
+            }
         }
     }
 
@@ -4060,6 +4082,7 @@ fn main() {
         stdout: Arc::clone(&stdout),
         ready: Arc::clone(&ready),
         downstream_dirty: Arc::clone(&downstream_dirty),
+        rebuild_lock: Arc::new(Mutex::new(())),
         lazy,
         profile: profile.clone(),
         http: http_mode,
@@ -4243,6 +4266,7 @@ mod tests {
             stdout: Arc::new(Mutex::new(std::io::stdout())),
             ready: Arc::new(AtomicBool::new(true)),
             downstream_dirty: Arc::new(AtomicU8::new(0)),
+            rebuild_lock: Arc::new(Mutex::new(())),
             lazy,
             profile: None,
             http: true,

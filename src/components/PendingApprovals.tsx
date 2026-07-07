@@ -168,13 +168,14 @@ export function PendingApprovals() {
             // Count down to the broker's authoritative deadline; fall back to
             // first-sighting + timeout only if deadlineMs is somehow absent, so the
             // timer is never blank.
-            const deadline =
-              a.deadlineMs || (seenAt.current.get(a.id) ?? now) + TIMEOUT_MS;
+            const seen = seenAt.current.get(a.id) ?? now;
+            const deadline = a.deadlineMs ?? seen + TIMEOUT_MS;
             const remaining = Math.max(0, Math.ceil((deadline - now) / 1000));
-            const pct = Math.max(
-              0,
-              Math.min(100, (remaining / (TIMEOUT_MS / 1000)) * 100),
-            );
+            // Scale the bar against the ACTUAL window (deadline - first sighting), not
+            // the hardcoded TIMEOUT_MS, so it stays accurate even if the gateway's
+            // timeout ever drifts from this constant.
+            const totalMs = Math.max(1000, deadline - seen);
+            const pct = Math.max(0, Math.min(100, ((deadline - now) / totalMs) * 100));
             const urgent = remaining <= 20;
             const isBusy = resolving.has(a.id);
             return (

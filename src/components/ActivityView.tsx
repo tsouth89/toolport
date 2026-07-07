@@ -215,6 +215,27 @@ function loadDismissed(): Set<string> {
   }
 }
 
+/** Upper bound on remembered dismissals, so the persisted set can't grow without
+ * limit across sessions. Well above any realistic count of distinct findings. */
+const MAX_DISMISSED = 500;
+
+/** Add keys to the dismissed set, cap it to the most-recent MAX_DISMISSED (Set
+ * preserves insertion order, so slicing the tail keeps the newest), and persist.
+ * Returns the new set for use as React state. */
+function addDismissed(prev: Set<string>, keys: string[]): Set<string> {
+  const merged = new Set(prev);
+  for (const k of keys) merged.add(k);
+  const arr = [...merged];
+  const next =
+    arr.length > MAX_DISMISSED ? new Set(arr.slice(arr.length - MAX_DISMISSED)) : merged;
+  try {
+    localStorage.setItem(SECURITY_DISMISSED_KEY, JSON.stringify([...next]));
+  } catch {
+    // ignore storage failures; the dismissal just won't persist
+  }
+  return next;
+}
+
 /** Calm, always-on "you're protected" state, shown whenever there are no live
  * security notices. A protection the user never sees builds no trust, so we make
  * the integrity + content-defense watch visible even when nothing is wrong. */
@@ -1399,30 +1420,12 @@ export function ActivityView({
     (e) => eventSeverity(e) !== "high" || isNewTool(e),
   );
   const dismissSecurity = (e: SecurityEvent) => {
-    setDismissed((prev) => {
-      const next = new Set(prev);
-      next.add(securityKey(e));
-      try {
-        localStorage.setItem(SECURITY_DISMISSED_KEY, JSON.stringify([...next]));
-      } catch {
-        // ignore storage failures; the dismissal just won't persist
-      }
-      return next;
-    });
+    setDismissed((prev) => addDismissed(prev, [securityKey(e)]));
   };
   // Clear a whole batch at once (the quiet lane can hold dozens of first-sightings after
   // a re-baseline; making the user dismiss each would just recreate the noise problem).
   const dismissAllSecurity = (events: SecurityEvent[]) => {
-    setDismissed((prev) => {
-      const next = new Set(prev);
-      for (const e of events) next.add(securityKey(e));
-      try {
-        localStorage.setItem(SECURITY_DISMISSED_KEY, JSON.stringify([...next]));
-      } catch {
-        // ignore storage failures; the dismissal just won't persist
-      }
-      return next;
-    });
+    setDismissed((prev) => addDismissed(prev, events.map(securityKey)));
   };
 
   const banner = (
