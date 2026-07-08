@@ -776,11 +776,37 @@ pub fn get_secret(server_id: &str, key: &str) -> Option<String> {
 /// from an actual keychain failure (`Err`, e.g. the keychain is locked or denied
 /// access to this app). Callers that need to explain *why* a secret is missing
 /// use this so a read failure isn't silently treated as "never saved".
+///
+/// Resolution order for headless / container deploys:
+/// 1. Process env `CONDUIT_SECRET_<KEY>` (preferred; avoids colliding with
+///    unrelated host env vars that share a common name like `TOKEN`)
+/// 2. Process env `<KEY>` (plain env-file convenience)
+/// 3. Encrypted `secrets.enc` when `CONDUIT_SECRET_KEY` is set
+/// 4. OS keychain / platform backend
 pub fn get_secret_result(server_id: &str, key: &str) -> Result<Option<String>, String> {
+    if let Some(v) = env_secret_override(key) {
+        return Ok(Some(v));
+    }
     if file::active() {
         return file::get_secret_result(server_id, key);
     }
     platform::get_secret_result(server_id, key)
+}
+
+/// Look up a secret from the process environment for container / env-file deploys.
+/// Prefers `CONDUIT_SECRET_<KEY>`; falls back to the bare key name. Empty values
+/// are treated as unset so a blank `.env` line doesn't shadow the vault.
+fn env_secret_override(key: &str) -> Option<String> {
+    let prefixed = format!("CONDUIT_SECRET_{key}");
+    for name in [prefixed.as_str(), key] {
+        if let Ok(v) = std::env::var(name) {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
 }
 
 pub fn delete_secret(server_id: &str, key: &str) -> Result<(), String> {
@@ -1028,6 +1054,41 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("CONDUIT_SECRET_KEY", v),
             None => std::env::remove_var("CONDUIT_SECRET_KEY"),
+        }
+    }
+
+    /// Process-env secrets win over the vault so a container can inject keys via
+    /// an env file without writing `secrets.enc`. Prefixed form beats bare key.
+    #[test]
+    fn env_secret_override_prefers_prefixed_then_bare() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let key = "TOOLPORT_ENV_SECRET_TEST";
+        let prefixed = format!("CONDUIT_SECRET_{key}");
+        let prev_bare = std::env::var(key).ok();
+        let prev_pref = std::env::var(&prefixed).ok();
+        std::env::remove_var(key);
+        std::env::remove_var(&prefixed);
+
+        assert_eq!(env_secret_override(key), None);
+
+        std::env::set_var(key, "from-bare");
+        assert_eq!(env_secret_override(key).as_deref(), Some("from-bare"));
+
+        std::env::set_var(&prefixed, "from-prefixed");
+        assert_eq!(env_secret_override(key).as_deref(), Some("from-prefixed"));
+
+        // Blank values don't count.
+        std::env::set_var(&prefixed, "   ");
+        std::env::set_var(key, "");
+        assert_eq!(env_secret_override(key), None);
+
+        match prev_bare {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        match prev_pref {
+            Some(v) => std::env::set_var(&prefixed, v),
+            None => std::env::remove_var(&prefixed),
         }
     }
 

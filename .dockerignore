@@ -1,0 +1,30 @@
+# Frontend / Node (not used by the gateway image build context)
+node_modules/
+dist/
+
+# Rust build artifacts
+src-tauri/target/
+
+# Generated Tauri assets
+src-tauri/gen/
+
+# Git and editor noise
+.git/
+.github/
+.cursor/
+.claude/
+
+# Local data and secrets — never bake into an image
+data/
+.env
+.env.*
+
+# Docs and benchmarks (not needed to compile toolport-gateway)
+docs/
+benchmark/
+*.md
+!src-tauri/**/*.md
+
+# OS / IDE
+.DS_Store
+Thumbs.db

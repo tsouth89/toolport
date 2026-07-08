@@ -1,0 +1,31 @@
+# Example headless Toolport gateway. Copy to docker-compose.yml and fill .env.
+# Local/dev only — do not push secrets or this file with real tokens.
+
+services:
+  toolport-gateway:
+    build: .
+    image: toolport-gateway:local
+    ports:
+      - "8765:8765"
+    volumes:
+      # Seed once: cp data/registry.json.example data/registry.json
+      - ./data:/data
+    env_file:
+      - .env
+    environment:
+      CONDUIT_HTTP_HOST: "0.0.0.0"
+      CONDUIT_HTTP: "8765"
+      CONDUIT_REGISTRY: /data/registry.json
+      # Required when binding 0.0.0.0 — set in .env:
+      # CONDUIT_HTTP_TOKEN=...
+      # Optional encrypted vault passphrase (if using secrets.enc):
+      # CONDUIT_SECRET_KEY=...
+      # Or inject per-server secrets directly:
+      # CONDUIT_SECRET_STRIPE_SECRET_KEY=sk_...
+      # STRIPE_SECRET_KEY=sk_...
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

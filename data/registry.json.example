@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "servers": [
+    {
+      "id": "example-remote",
+      "name": "Example Remote MCP",
+      "transport": "http",
+      "url": "https://mcp.example.com/mcp",
+      "args": [],
+      "env": [],
+      "source": "manual"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "default",
+      "name": "Default",
+      "enabledServerIds": ["example-remote"]
+    }
+  ],
+  "activeProfileId": "default"
+}

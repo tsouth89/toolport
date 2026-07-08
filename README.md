@@ -204,6 +204,13 @@ Integrations -> Open WebUI / HTTP endpoint** in the app (or run
 tool server. See [docs/openwebui.md](docs/openwebui.md). The same endpoint serves
 any HTTP/OpenAPI MCP consumer (n8n, LibreChat, custom agents).
 
+### Headless / container / MCP over the network
+
+The same `--http` process also serves **MCP streamable-HTTP** at `POST /mcp`, so
+sandboxed coding agents and remote clients can use a URL instead of stdio. For
+Docker, env-file secrets, and a compose example, see
+[docs/headless.md](docs/headless.md).
+
 ## Configuration
 
 Lazy discovery, the destructive-tool block, and agent control are global settings,

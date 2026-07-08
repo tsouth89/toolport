@@ -18,6 +18,7 @@
 //!   model searches and calls on demand, keeping context flat.
 //! - Records every tool call to a local audit log.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -2640,11 +2641,15 @@ fn connect_one(server: &ServerEntry, dirty: &Arc<AtomicU8>) -> Option<Downstream
                 match secrets::get_secret_result(&server.id, &e.key) {
                     Ok(Some(v)) => env.push((e.key.clone(), v)),
                     Ok(None) => eprintln!(
-                        "toolport: '{}' needs secret '{}' but none is vaulted",
-                        server.id, e.key
+                        "toolport: '{}' needs secret '{}' but none is vaulted \
+                         (set env {}, {}, secrets.enc, or the OS keychain)",
+                        server.id,
+                        e.key,
+                        format_args!("CONDUIT_SECRET_{}", e.key),
+                        e.key
                     ),
                     Err(err) => eprintln!(
-                        "toolport: '{}' could not read secret '{}' from the keychain: {err}",
+                        "toolport: '{}' could not read secret '{}': {err}",
                         server.id, e.key
                     ),
                 }
@@ -3036,6 +3041,25 @@ struct GatewayState {
     /// True when this process is the HTTP/OpenAPI bridge (vs a stdio client's
     /// gateway). The bridge connects the union of all registered clients' servers.
     http: bool,
+    /// Streamable-HTTP MCP sessions (`Mcp-Session-Id` → last-seen). Only used when
+    /// `http` is true; empty for stdio gateways.
+    mcp_sessions: Arc<Mutex<HashMap<String, Instant>>>,
+}
+
+/// How long an idle MCP streamable-HTTP session stays valid before a request
+/// with that id gets 404 (client must re-initialize).
+const MCP_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Cryptographically random session id (visible ASCII, per MCP streamable-HTTP).
+fn new_mcp_session_id() -> String {
+    let mut buf = [0u8; 16];
+    getrandom::getrandom(&mut buf).expect("CSPRNG unavailable");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// True when `id` is a non-empty visible-ASCII session id (0x21..=0x7E).
+fn valid_mcp_session_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| (0x21..=0x7E).contains(&b)) && id.len() <= 128
 }
 
 fn rpc_id_key(v: &Value) -> Option<String> {
@@ -3488,7 +3512,246 @@ fn result_text(resp: &Value) -> String {
     serde_json::to_string(result).unwrap_or_default()
 }
 
-/// Map one HTTP request to (status, content-type, body).
+/// HTTP handler result: status, content-type, body, plus optional extra headers
+/// (e.g. `Mcp-Session-Id` for streamable-HTTP MCP).
+struct HttpOut {
+    status: u16,
+    ctype: &'static str,
+    body: String,
+    extra: Vec<(String, String)>,
+}
+
+impl HttpOut {
+    fn new(status: u16, ctype: &'static str, body: String) -> Self {
+        Self {
+            status,
+            ctype,
+            body,
+            extra: Vec::new(),
+        }
+    }
+
+    fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.extra.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    fn json_err(status: u16, msg: &str) -> Self {
+        Self::new(
+            status,
+            "application/json",
+            json!({ "error": msg }).to_string(),
+        )
+    }
+}
+
+/// Touch / validate an existing MCP session. Returns Ok(session_id) or an HttpOut error.
+fn mcp_require_session(state: &GatewayState, session_hdr: Option<&str>) -> Result<String, HttpOut> {
+    let Some(sid) = session_hdr.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(HttpOut::json_err(
+            400,
+            "missing Mcp-Session-Id (send initialize first)",
+        ));
+    };
+    if !valid_mcp_session_id(sid) {
+        return Err(HttpOut::json_err(400, "invalid Mcp-Session-Id"));
+    }
+    let mut sessions = state
+        .mcp_sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Drop expired sessions opportunistically.
+    sessions.retain(|_, last| last.elapsed() < MCP_SESSION_TTL);
+    match sessions.get_mut(sid) {
+        Some(last) => {
+            *last = Instant::now();
+            Ok(sid.to_string())
+        }
+        None => Err(HttpOut::json_err(
+            404,
+            "unknown or expired Mcp-Session-Id; re-initialize",
+        )),
+    }
+}
+
+/// True when the client wants an SSE response body for a JSON-RPC request.
+/// Spec clients send both `application/json` and `text/event-stream`; we keep
+/// JSON as the default in that case. SSE wins only when event-stream is accepted
+/// and JSON is not (or event-stream has a higher explicit `q`).
+fn mcp_prefers_sse(accept: Option<&str>) -> bool {
+    let Some(raw) = accept.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let lower = raw.to_ascii_lowercase();
+    let q_of = |media: &str| -> Option<f32> {
+        for part in lower.split(',') {
+            let part = part.trim();
+            if !part.starts_with(media) {
+                continue;
+            }
+            let rest = part[media.len()..].trim_start();
+            if !rest.is_empty() && !rest.starts_with(';') {
+                continue;
+            }
+            let mut q = 1.0f32;
+            for param in rest.split(';').skip(1) {
+                let param = param.trim();
+                if let Some(v) = param.strip_prefix("q=") {
+                    q = v.parse().unwrap_or(1.0);
+                }
+            }
+            return Some(q);
+        }
+        None
+    };
+    let sse_q = q_of("text/event-stream");
+    let json_q = q_of("application/json");
+    match (sse_q, json_q) {
+        (Some(s), Some(j)) => s > j,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// Wrap a single JSON-RPC message as one SSE `message` event (stream closes after).
+fn mcp_sse_body(json: &str) -> String {
+    format!("event: message\ndata: {json}\n\n")
+}
+
+fn mcp_rpc_response(status: u16, json_body: String, session_id: &str, prefer_sse: bool) -> HttpOut {
+    if prefer_sse {
+        HttpOut::new(status, "text/event-stream", mcp_sse_body(&json_body))
+            .with_header("Mcp-Session-Id", session_id)
+            .with_header("Cache-Control", "no-cache")
+    } else {
+        HttpOut::new(status, "application/json", json_body).with_header("Mcp-Session-Id", session_id)
+    }
+}
+
+/// Handle one Streamable-HTTP MCP request at `/mcp`.
+#[allow(clippy::too_many_arguments)]
+fn handle_mcp_http(
+    state: &GatewayState,
+    guard: &SearchGuard,
+    confirm: &ConfirmGuard,
+    method: &str,
+    body: &str,
+    session_hdr: Option<&str>,
+    accept: Option<&str>,
+    allowed: Option<&std::collections::HashSet<String>>,
+    client: Option<&str>,
+) -> HttpOut {
+    let prefer_sse = mcp_prefers_sse(accept);
+    match method {
+        // GET opens a long-lived SSE stream for server→client messages. We don't
+        // yet push unsolicited messages, so advertise that with 405 (allowed by
+        // the spec) rather than hanging an empty stream.
+        "GET" => HttpOut::new(
+            405,
+            "application/json",
+            json!({ "error": "SSE listen not offered; use POST /mcp for JSON-RPC" }).to_string(),
+        ),
+        "DELETE" => match mcp_require_session(state, session_hdr) {
+            Ok(sid) => {
+                state
+                    .mcp_sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&sid);
+                HttpOut::new(204, "text/plain", String::new())
+            }
+            Err(e) => e,
+        },
+        "POST" => {
+            let req: Value = if body.trim().is_empty() {
+                return HttpOut::json_err(400, "empty JSON-RPC body");
+            } else {
+                match serde_json::from_str(body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return HttpOut::json_err(400, &format!("invalid JSON body: {e}"));
+                    }
+                }
+            };
+
+            let method_name = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            let has_id = req
+                .get("id")
+                .map(|id| !id.is_null())
+                .unwrap_or(false);
+            let is_initialize = method_name == "initialize";
+
+            // Session rules: initialize may omit (and gets a new id); everything
+            // else that carries a method must present a live session id.
+            let session_id = if is_initialize {
+                if let Some(existing) = session_hdr.map(str::trim).filter(|s| !s.is_empty()) {
+                    // Client re-sent a session on initialize: accept if still live,
+                    // otherwise mint a fresh one (spec: start over without the old id).
+                    match mcp_require_session(state, Some(existing)) {
+                        Ok(sid) => sid,
+                        Err(_) => {
+                            let sid = new_mcp_session_id();
+                            state
+                                .mcp_sessions
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .insert(sid.clone(), Instant::now());
+                            sid
+                        }
+                    }
+                } else {
+                    let sid = new_mcp_session_id();
+                    state
+                        .mcp_sessions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(sid.clone(), Instant::now());
+                    sid
+                }
+            } else {
+                match mcp_require_session(state, session_hdr) {
+                    Ok(sid) => sid,
+                    Err(e) => return e,
+                }
+            };
+
+            // Notifications / JSON-RPC responses: 202 with empty body.
+            if !has_id {
+                // Still run process_request for side effects when it's a known
+                // notification that handle_request ignores (returns None).
+                let _ = process_request(state, &req, guard, confirm, allowed, None, client);
+                return HttpOut::new(202, "text/plain", String::new())
+                    .with_header("Mcp-Session-Id", &session_id);
+            }
+
+            match process_request(state, &req, guard, confirm, allowed, None, client) {
+                Some(resp) => {
+                    let body = serde_json::to_string(&resp).unwrap_or_else(|_| {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": req.get("id").cloned().unwrap_or(Value::Null),
+                            "error": { "code": -32603, "message": "serialize failed" }
+                        })
+                        .to_string()
+                    });
+                    mcp_rpc_response(200, body, &session_id, prefer_sse)
+                }
+                None => {
+                    let body = json!({
+                        "jsonrpc": "2.0",
+                        "id": req.get("id").cloned().unwrap_or(Value::Null),
+                        "error": { "code": -32603, "message": "no response" }
+                    })
+                    .to_string();
+                    mcp_rpc_response(500, body, &session_id, prefer_sse)
+                }
+            }
+        }
+        _ => HttpOut::json_err(405, "method not allowed on /mcp"),
+    }
+}
+
+/// Map one HTTP request to status / content-type / body / extra headers.
 #[allow(clippy::too_many_arguments)]
 fn handle_http(
     state: &GatewayState,
@@ -3497,29 +3760,47 @@ fn handle_http(
     method: &str,
     path: &str,
     body: &str,
+    session_hdr: Option<&str>,
+    accept: Option<&str>,
     allowed: Option<&std::collections::HashSet<String>>,
     client: Option<&str>,
-) -> (u16, &'static str, String) {
+) -> HttpOut {
+    // Streamable-HTTP MCP endpoint (same port as OpenAPI).
+    if path == "/mcp" || path.starts_with("/mcp?") {
+        return handle_mcp_http(
+            state, guard, confirm, method, body, session_hdr, accept, allowed, client,
+        );
+    }
+
     match (method, path) {
         // CORS preflight: browsers (Open WebUI fetches tool specs client-side)
         // send OPTIONS before a cross-origin POST. Answer it so the real request
         // is allowed through. The CORS headers themselves are added to every
         // response in serve_http_loop.
-        ("OPTIONS", _) => (204, "text/plain", String::new()),
-        ("GET", "/openapi.json") => (200, "application/json", openapi_spec(state, allowed).to_string()),
-        ("GET", "/") | ("GET", "/docs") => (
+        ("OPTIONS", _) => HttpOut::new(204, "text/plain", String::new()),
+        ("GET", "/openapi.json") => HttpOut::new(
+            200,
+            "application/json",
+            openapi_spec(state, allowed).to_string(),
+        ),
+        ("GET", "/") | ("GET", "/docs") => HttpOut::new(
             200,
             "text/plain; charset=utf-8",
-            "Toolport gateway (HTTP/OpenAPI mode). OpenAPI at /openapi.json. POST a tool name with a JSON body, e.g. POST /toolport_search_tools {\"query\":\"...\"}."
+            "Toolport gateway (HTTP mode).\n\
+             OpenAPI: GET /openapi.json, POST /{tool_name} with a JSON body.\n\
+             MCP streamable-HTTP: POST /mcp with JSON-RPC (initialize, tools/list, tools/call).\n\
+             Auth: Authorization: Bearer <CONDUIT_HTTP_TOKEN>."
                 .to_string(),
         ),
         ("POST", p) => {
             let name = p.trim_start_matches('/');
             if name.is_empty() {
-                return (
-                    404,
-                    "application/json",
-                    json!({ "error": "missing tool name" }).to_string(),
+                return HttpOut::json_err(404, "missing tool name");
+            }
+            // Don't let OpenAPI POST swallow /mcp if path matching drifted.
+            if name == "mcp" {
+                return handle_mcp_http(
+                    state, guard, confirm, method, body, session_hdr, accept, allowed, client,
                 );
             }
             let args: Value = if body.trim().is_empty() {
@@ -3528,11 +3809,7 @@ fn handle_http(
                 match serde_json::from_str(body) {
                     Ok(v) => v,
                     Err(e) => {
-                        return (
-                            400,
-                            "application/json",
-                            json!({ "error": format!("invalid JSON body: {e}") }).to_string(),
-                        )
+                        return HttpOut::json_err(400, &format!("invalid JSON body: {e}"));
                     }
                 }
             };
@@ -3546,26 +3823,19 @@ fn handle_http(
                 Some(resp) => {
                     if let Some(err) = resp.get("error") {
                         let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("error");
-                        return (400, "application/json", json!({ "error": msg }).to_string());
+                        return HttpOut::json_err(400, msg);
                     }
-                    (
+                    HttpOut::new(
                         200,
                         "application/json",
-                        serde_json::to_string(&result_text(&resp)).unwrap_or_else(|_| "\"\"".into()),
+                        serde_json::to_string(&result_text(&resp))
+                            .unwrap_or_else(|_| "\"\"".into()),
                     )
                 }
-                None => (
-                    500,
-                    "application/json",
-                    json!({ "error": "no response" }).to_string(),
-                ),
+                None => HttpOut::json_err(500, "no response"),
             }
         }
-        _ => (
-            404,
-            "application/json",
-            json!({ "error": "not found" }).to_string(),
-        ),
+        _ => HttpOut::json_err(404, "not found"),
     }
 }
 
@@ -3677,11 +3947,11 @@ fn serve_http(state: GatewayState, port: u16) {
         }
     };
     glog(&format!(
-        "HTTP/OpenAPI mode on http://{host}:{port} (auth={})",
+        "HTTP mode on http://{host}:{port} (OpenAPI + MCP /mcp, auth={})",
         token.is_some()
     ));
     eprintln!(
-        "toolport-gateway: HTTP/OpenAPI on http://localhost:{port}  (OpenAPI spec at /openapi.json)"
+        "toolport-gateway: HTTP on http://localhost:{port}  (OpenAPI /openapi.json, MCP POST /mcp)"
     );
     serve_http_loop(server, state, token, search, confirm);
 }
@@ -3791,7 +4061,23 @@ fn handle_connection(
             .find(|h| h.field.equiv("Access-Control-Request-Headers"))
             .map(|h| sanitize_header_value(h.value.as_str()))
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "Content-Type, Authorization".to_string());
+            .unwrap_or_else(|| {
+                "Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version".to_string()
+            });
+
+        let session_hdr = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Mcp-Session-Id"))
+            .map(|h| sanitize_header_value(h.value.as_str()))
+            .filter(|s| !s.is_empty());
+
+        let accept_hdr = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Accept"))
+            .map(|h| sanitize_header_value(h.value.as_str()))
+            .filter(|s| !s.is_empty());
 
         // A browser attaches Sec-Fetch-Site to every request; a server-side caller
         // (Open WebUI's backend, curl) does not. Refuse a cross-site browser
@@ -3830,22 +4116,14 @@ fn handle_connection(
             resolve_http_scope(&reg, token.as_deref(), provided_tok)
         };
 
-        let (status, ctype, payload): (u16, &str, String) = if cross_site && method != "OPTIONS" {
-            (
-                403,
-                "application/json",
-                json!({ "error": "cross-site browser requests are not allowed" }).to_string(),
-            )
+        let out: HttpOut = if cross_site && method != "OPTIONS" {
+            HttpOut::json_err(403, "cross-site browser requests are not allowed")
         } else {
             match scope {
-                None => (
-                    401,
-                    "application/json",
-                    json!({ "error": "missing or invalid bearer token" }).to_string(),
-                ),
+                None => HttpOut::json_err(401, "missing or invalid bearer token"),
                 Some(allowed) => {
                     let mut body = String::new();
-                    if method == "POST" {
+                    if method == "POST" || method == "DELETE" {
                         let _ = request
                             .as_reader()
                             .take(MAX_HTTP_BODY)
@@ -3860,33 +4138,39 @@ fn handle_connection(
                             &method,
                             &path,
                             &body,
+                            session_hdr.as_deref(),
+                            accept_hdr.as_deref(),
                             allowed.as_ref(),
                             client_label.as_deref(),
                         )
                     }))
-                    .unwrap_or((
-                        500,
-                        "application/json",
-                        "{\"error\":\"internal error\"}".to_string(),
-                    ))
+                    .unwrap_or_else(|_| HttpOut::json_err(500, "internal error"))
                 }
             }
         };
 
-        let mut response = tiny_http::Response::from_string(payload).with_status_code(status);
-        let cors: [(&[u8], &[u8]); 4] = [
-            (b"Content-Type", ctype.as_bytes()),
+        let mut response = tiny_http::Response::from_string(out.body).with_status_code(out.status);
+        let cors: [(&[u8], &[u8]); 5] = [
+            (b"Content-Type", out.ctype.as_bytes()),
             // Auth is a bearer header, never a cookie, so credentialed CORS is
             // unnecessary. Return a wildcard Origin (never the reflected caller
             // Origin) and omit Allow-Credentials, so a malicious page can't pair a
             // reflected origin with Allow-Credentials to read a response.
             (b"Access-Control-Allow-Origin", b"*"),
-            (b"Access-Control-Allow-Methods", b"GET, POST, OPTIONS"),
+            (b"Access-Control-Allow-Methods", b"GET, POST, DELETE, OPTIONS"),
             (b"Access-Control-Allow-Headers", allow_headers.as_bytes()),
+            // Browser MCP clients need to read the session id off the response.
+            (b"Access-Control-Expose-Headers", b"Mcp-Session-Id"),
         ];
         for (name, value) in cors {
             // Skip a header that won't encode rather than panicking the thread.
             if let Ok(h) = tiny_http::Header::from_bytes(name, value) {
+                response = response.with_header(h);
+            }
+        }
+        for (name, value) in &out.extra {
+            let safe = sanitize_header_value(value);
+            if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), safe.as_bytes()) {
                 response = response.with_header(h);
             }
         }
@@ -4102,6 +4386,7 @@ fn main() {
         lazy,
         profile: profile.clone(),
         http: http_mode,
+        mcp_sessions: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Native HTTP/OpenAPI transport: a first-class path for HTTP tool clients
@@ -4287,6 +4572,7 @@ mod tests {
             lazy,
             profile: None,
             http: true,
+            mcp_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -4777,7 +5063,7 @@ mod tests {
         // Browsers preflight a cross-origin POST; we must answer OPTIONS so the
         // real request goes through (CORS headers themselves are added per-response).
         let state = http_state(true);
-        let (status, _, body) = handle_http(
+        let out = handle_http(
             &state,
             &SearchGuard::default(),
             &ConfirmGuard::new(),
@@ -4786,9 +5072,318 @@ mod tests {
             "",
             None,
             None,
+            None,
+            None,
         );
-        assert_eq!(status, 204);
-        assert!(body.is_empty());
+        assert_eq!(out.status, 204);
+        assert!(out.body.is_empty());
+    }
+
+    fn mcp_session_of(out: &HttpOut) -> String {
+        out.extra
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("Mcp-Session-Id"))
+            .map(|(_, v)| v.clone())
+            .expect("Mcp-Session-Id header")
+    }
+
+    #[test]
+    fn mcp_http_initialize_list_call_round_trip() {
+        // Streamable-HTTP MCP: initialize → session id → tools/list → tools/call.
+        let state = http_state(true);
+        let search = SearchGuard::default();
+        let confirm = ConfirmGuard::new();
+
+        let init = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": { "name": "test", "version": "0" }
+                }
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(init.status, 200, "body={}", init.body);
+        assert_eq!(init.ctype, "application/json");
+        let sid = mcp_session_of(&init);
+        assert!(valid_mcp_session_id(&sid));
+        let init_body: Value = serde_json::from_str(&init.body).unwrap();
+        assert_eq!(init_body["result"]["serverInfo"]["name"], "toolport-gateway");
+
+        // Notification: 202, no JSON-RPC body.
+        let note = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string(),
+            Some(&sid),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(note.status, 202);
+
+        let list = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }).to_string(),
+            Some(&sid),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(list.status, 200, "body={}", list.body);
+        let list_body: Value = serde_json::from_str(&list.body).unwrap();
+        let tools = list_body["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"toolport_status"));
+        assert!(names.contains(&"toolport_search_tools"));
+
+        let call = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": { "name": "toolport_status", "arguments": {} }
+            })
+            .to_string(),
+            Some(&sid),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(call.status, 200, "body={}", call.body);
+        let call_body: Value = serde_json::from_str(&call.body).unwrap();
+        assert!(call_body.get("result").is_some());
+        assert!(call_body.get("error").is_none());
+
+        // Missing session on a non-initialize request → 400.
+        let missing = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/list" }).to_string(),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(missing.status, 400);
+
+        // Unknown session → 404.
+        let dead = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list" }).to_string(),
+            Some("deadbeefdeadbeefdeadbeefdeadbeef"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(dead.status, 404);
+
+        // DELETE tears the session down.
+        let del = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "DELETE",
+            "/mcp",
+            "",
+            Some(&sid),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(del.status, 204);
+        let after = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list" }).to_string(),
+            Some(&sid),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(after.status, 404);
+    }
+
+    #[test]
+    fn mcp_http_get_returns_405() {
+        let state = http_state(true);
+        let out = handle_http(
+            &state,
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
+            "GET",
+            "/mcp",
+            "",
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(out.status, 405);
+    }
+
+    #[test]
+    fn mcp_http_bad_session_format_returns_400() {
+        let state = http_state(true);
+        let out = handle_http(
+            &state,
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
+            "POST",
+            "/mcp",
+            &json!({ "jsonrpc": "2.0", "id": 10, "method": "tools/list" }).to_string(),
+            Some("bad\nvalue"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(out.status, 400);
+    }
+
+    #[test]
+    fn mcp_http_delete_without_session_returns_400() {
+        let state = http_state(true);
+        let out = handle_http(
+            &state,
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
+            "DELETE",
+            "/mcp",
+            "",
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(out.status, 400);
+    }
+
+    #[test]
+    fn mcp_prefers_sse_only_when_event_stream_wins() {
+        // Spec clients list both; keep JSON as the default in that case.
+        assert!(!mcp_prefers_sse(None));
+        assert!(!mcp_prefers_sse(Some(
+            "application/json, text/event-stream"
+        )));
+        assert!(!mcp_prefers_sse(Some("application/json")));
+        assert!(mcp_prefers_sse(Some("text/event-stream")));
+        assert!(mcp_prefers_sse(Some(
+            "text/event-stream;q=1, application/json;q=0.5"
+        )));
+        assert!(!mcp_prefers_sse(Some(
+            "application/json;q=1, text/event-stream;q=0.8"
+        )));
+    }
+
+    #[test]
+    fn mcp_http_sse_when_accept_prefers_event_stream() {
+        let state = http_state(true);
+        let search = SearchGuard::default();
+        let confirm = ConfirmGuard::new();
+        let init = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": { "name": "test", "version": "0" }
+                }
+            })
+            .to_string(),
+            None,
+            Some("text/event-stream"),
+            None,
+            None,
+        );
+        assert_eq!(init.status, 200, "body={}", init.body);
+        assert_eq!(init.ctype, "text/event-stream");
+        assert!(
+            init.body.starts_with("event: message\ndata: "),
+            "{}",
+            init.body
+        );
+        assert!(init.body.contains("\"serverInfo\""));
+        let sid = mcp_session_of(&init);
+        // Dual Accept (spec default) stays JSON.
+        let list = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }).to_string(),
+            Some(&sid),
+            Some("application/json, text/event-stream"),
+            None,
+            None,
+        );
+        assert_eq!(list.ctype, "application/json");
+        assert!(list.body.starts_with('{'));
+    }
+
+    #[test]
+    fn docs_mention_mcp_endpoint() {
+        let state = http_state(true);
+        let out = handle_http(
+            &state,
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
+            "GET",
+            "/",
+            "",
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(out.status, 200);
+        assert!(out.body.contains("POST /mcp"), "body={}", out.body);
+        assert!(out.body.contains("/openapi.json"));
     }
 
     #[test]
