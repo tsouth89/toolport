@@ -9,6 +9,7 @@
 //! its own gateway process: concurrent `O_APPEND` writes of one small line are
 //! safe, whereas a read-modify-write counter would race and lose updates.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -46,14 +47,39 @@ pub fn estimate_tokens(tools: &[Value]) -> u64 {
     chars.div_ceil(4) as u64
 }
 
+/// Per-server share of a catalog's tool-def tokens, resolved through `route` (the
+/// router's exposed-name -> server mapping). Tools `route` can't place are skipped:
+/// mis-attributing tokens to a wrongly split server id would be worse than
+/// under-counting, and route_of only misses tools that just vanished from the routes.
+pub fn per_server_tokens(
+    tools: &[Value],
+    route: impl Fn(&str) -> Option<String>,
+) -> BTreeMap<String, u64> {
+    let mut by_server: BTreeMap<String, u64> = BTreeMap::new();
+    for t in tools {
+        let Some(server) = t.get("name").and_then(Value::as_str).and_then(&route) else {
+            continue;
+        };
+        let tokens = estimate_tokens(std::slice::from_ref(t));
+        *by_server.entry(server).or_insert(0) += tokens;
+    }
+    by_server
+}
+
 /// Record one lazy serve: the full catalog's tool-def tokens minus the meta-tools'.
 /// No-op when there's nothing to save (empty catalog / non-lazy never calls this).
-pub fn record(full_tokens: u64, meta_tokens: u64, catalog_tools: u64) {
+/// `by_server` attributes the catalog's tokens to their servers so team usage
+/// reporting can build per-server rows; empty (old callers, no routes) is fine and
+/// simply leaves this serve out of the per-server rollup.
+pub fn record(full_tokens: u64, meta_tokens: u64, catalog_tools: u64, by_server: BTreeMap<String, u64>) {
     let saved = full_tokens.saturating_sub(meta_tokens);
     if saved == 0 {
         return;
     }
-    let entry = json!({ "ts": epoch_millis() as u64, "saved": saved, "tools": catalog_tools });
+    let mut entry = json!({ "ts": epoch_millis() as u64, "saved": saved, "tools": catalog_tools });
+    if !by_server.is_empty() {
+        entry["byServer"] = json!(by_server);
+    }
     if let Some(path) = savings_path() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -121,17 +147,22 @@ fn fold(entries: &[Value]) -> Value {
     json!({ "ts": since, "saved": saved, "tools": peak, "loads": loads })
 }
 
-/// Cumulative savings for the in-app counter.
-pub fn summary() -> Value {
-    let entries: Vec<Value> = savings_path()
+/// Every savings line on disk, oldest first (bounded by rotation). Shared by the
+/// in-app counter and the team usage rollup.
+pub fn entries() -> Vec<Value> {
+    savings_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|c| {
             c.lines()
                 .filter_map(|l| serde_json::from_str(l).ok())
                 .collect()
         })
-        .unwrap_or_default();
-    aggregate(&entries)
+        .unwrap_or_default()
+}
+
+/// Cumulative savings for the in-app counter.
+pub fn summary() -> Value {
+    aggregate(&entries())
 }
 
 /// Pure aggregation, split out so the math is testable without touching disk.

@@ -24,6 +24,7 @@ pub mod shaping;
 pub mod secrets;
 pub mod stacks;
 pub mod teams;
+pub mod usage_report;
 pub mod vendors;
 
 use downstream::{DownstreamServer, StdioTransport};

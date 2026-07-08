@@ -1803,6 +1803,9 @@ fn handle_request_with_cancel(
                     full_tokens,
                     savings::estimate_tokens(&tools),
                     catalog.len() as u64 + 1,
+                    savings::per_server_tokens(catalog, |name| {
+                        router.route_of(name).map(|(s, _)| s.to_string())
+                    }),
                 );
                 gtrace(&format!(
                     "tools/list -> {} meta-tools (lazy discovery)",
@@ -1832,6 +1835,9 @@ fn handle_request_with_cancel(
                     full_tokens,
                     savings::estimate_tokens(&tools),
                     scoped.len() as u64 + 1,
+                    savings::per_server_tokens(&scoped, |name| {
+                        router.route_of(name).map(|(s, _)| s.to_string())
+                    }),
                 );
                 gtrace(&format!(
                     "tools/list -> {} tools (grouped: {} server browse tools)",
