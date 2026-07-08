@@ -2672,7 +2672,7 @@ fn connect_one(
             Err(e) => Err(e),
         }
     } else if server.url.is_some() {
-        remote::connect_remote(server)
+        remote::connect_remote_with_handler(server, Some(Arc::clone(&server_handler)))
     } else {
         Err("no command or url".to_string())
     };
