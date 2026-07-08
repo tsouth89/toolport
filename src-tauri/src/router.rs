@@ -524,6 +524,15 @@ impl Router {
         self.rebuild_aggregation();
     }
 
+    /// Forward one JSON-RPC notification to every connected downstream server.
+    pub fn notify_all_downstreams(&self, method: &str, params: Value) {
+        for slot in &self.servers {
+            if let Ok(mut ds) = slot.inner.lock() {
+                let _ = ds.notify_downstream(method, params.clone());
+            }
+        }
+    }
+
     /// Replace the quarantine set and re-derive the exposed aggregation so newly
     /// quarantined tools are hidden (or re-approved ones restored) without re-querying
     /// downstream. Cheap: it only re-applies the policy to the cached tool lists.

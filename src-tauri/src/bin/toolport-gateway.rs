@@ -21,7 +21,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -29,7 +29,9 @@ use serde_json::{json, Value};
 
 use conduit_lib::audit;
 use conduit_lib::clients;
-use conduit_lib::downstream::{self, DownstreamServer, StdioTransport, PROTOCOL_VERSION};
+use conduit_lib::downstream::{
+    self, DownstreamServer, ServerRequestHandler, StdioTransport, Transport, PROTOCOL_VERSION,
+};
 use conduit_lib::inspect;
 use conduit_lib::integrity;
 use conduit_lib::registry::{self, Registry, ServerEntry};
@@ -2560,6 +2562,7 @@ fn build_router(
     profile: Option<&str>,
     http_mode: bool,
     dirty: &Arc<AtomicU8>,
+    server_handler: ServerRequestHandler,
 ) -> Router {
     // In HTTP mode one process serves every registered client, so connect the
     // union of all their profiles (per-request filtering scopes each one down).
@@ -2606,8 +2609,9 @@ fn build_router(
         .into_iter()
         .map(|server| {
             let dirty = Arc::clone(dirty);
+            let handler = Arc::clone(&server_handler);
             std::thread::spawn(move || {
-                let ds = connect_one(&server, &dirty);
+                let ds = connect_one(&server, &dirty, handler);
                 (server, dirty, ds)
             })
         })
@@ -2622,7 +2626,8 @@ fn build_router(
             // The same `connect_one` used for the initial spawn is the reconnect
             // factory, so a re-spawn re-injects keychain secrets and re-handshakes
             // exactly like a fresh connect.
-            let reconnect: Reconnect = Box::new(move || connect_one(&server, &dirty));
+            let handler = Arc::clone(&server_handler);
+            let reconnect: Reconnect = Box::new(move || connect_one(&server, &dirty, Arc::clone(&handler)));
             router.add_with_reconnect(ds, Some(reconnect));
         }
     }
@@ -2631,7 +2636,11 @@ fn build_router(
 
 /// Connect a single enabled server (stdio with keychain secret injection, or
 /// remote with refresh-aware auth). Returns None on failure.
-fn connect_one(server: &ServerEntry, dirty: &Arc<AtomicU8>) -> Option<DownstreamServer> {
+fn connect_one(
+    server: &ServerEntry,
+    dirty: &Arc<AtomicU8>,
+    server_handler: ServerRequestHandler,
+) -> Option<DownstreamServer> {
     let result = if let Some(command) = &server.command {
         let mut env: Vec<(String, String)> = Vec::new();
         for e in &server.env {
@@ -2656,7 +2665,10 @@ fn connect_one(server: &ServerEntry, dirty: &Arc<AtomicU8>) -> Option<Downstream
             }
         }
         match StdioTransport::spawn_watched(command, &server.args, &env, Arc::clone(dirty)) {
-            Ok(t) => DownstreamServer::connect(server.id.clone(), Box::new(t)),
+            Ok(mut t) => {
+                t.set_server_request_handler(server_handler);
+                DownstreamServer::connect(server.id.clone(), Box::new(t))
+            }
             Err(e) => Err(e),
         }
     } else if server.url.is_some() {
@@ -2900,6 +2912,7 @@ fn watch_registry(
     profile: Option<String>,
     http_mode: bool,
     downstream_dirty: Arc<AtomicU8>,
+    server_handler: ServerRequestHandler,
 ) {
     eprintln!("toolport: watching registry at {}", path.display());
     let mut last = mtime(&path);
@@ -2931,8 +2944,13 @@ fn watch_registry(
             };
             last = current;
             // Build the new router (spawns processes) before taking locks.
-            let new_router =
-                build_router(&new_reg, profile.as_deref(), http_mode, &downstream_dirty);
+            let new_router = build_router(
+                &new_reg,
+                profile.as_deref(),
+                http_mode,
+                &downstream_dirty,
+                Arc::clone(&server_handler),
+            );
             let tools = new_router.aggregated_tools();
             *registry
                 .lock()
@@ -3044,6 +3062,85 @@ struct GatewayState {
     /// Streamable-HTTP MCP sessions (`Mcp-Session-Id` → state). Only used when
     /// `http` is true; empty for stdio gateways.
     mcp_sessions: Arc<Mutex<HashMap<String, Arc<McpSession>>>>,
+    /// Client-declared filesystem roots (stdio gateway). Per-session copy lives on
+    /// [`McpSession`] for HTTP MCP clients.
+    client_roots: Arc<Mutex<ClientRootsState>>,
+    /// Forward server-initiated JSON-RPC to the stdio upstream client.
+    stdio_upstream: Arc<StdioUpstream>,
+    /// Answers downstream `roots/list` (and future server-initiated RPC).
+    server_handler: ServerRequestHandler,
+}
+
+/// Roots the upstream MCP client exposed at `initialize`.
+#[derive(Clone, Default)]
+struct ClientRootsState {
+    supported: bool,
+    list_changed: bool,
+    roots: Vec<Value>,
+}
+
+/// Pending upstream JSON-RPC over stdio (gateway → client request, client → response).
+struct StdioUpstream {
+    stdout: Arc<Mutex<std::io::Stdout>>,
+    pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<Value>>>>,
+    next_id: AtomicI64,
+}
+
+impl StdioUpstream {
+    fn new(stdout: Arc<Mutex<std::io::Stdout>>) -> Self {
+        Self {
+            stdout,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: AtomicI64::new(1),
+        }
+    }
+
+    fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id_key = id.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id_key, tx);
+        let req = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let mut out = self
+            .stdout
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        writeln!(out, "{req}").map_err(|e| e.to_string())?;
+        out.flush().map_err(|e| e.to_string())?;
+        drop(out);
+        let resp = rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| "upstream client did not answer".to_string())?;
+        if let Some(err) = resp.get("error") {
+            return Err(err.to_string());
+        }
+        Ok(resp.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    /// If `msg` answers a pending upstream call, deliver it and return true.
+    fn try_deliver(&self, msg: &Value) -> bool {
+        let Some(id) = msg.get("id").filter(|id| !id.is_null()).and_then(rpc_id_key) else {
+            return false;
+        };
+        let tx = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
+        if let Some(tx) = tx {
+            let _ = tx.send(msg.clone());
+            true
+        } else {
+            false
+        }
+    }
+}
+
+thread_local! {
+    static ACTIVE_MCP_SESSION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Per-session state for streamable-HTTP MCP (POST responses + GET listen stream).
@@ -3053,6 +3150,9 @@ struct McpSession {
     closed: AtomicBool,
     listener_active: AtomicBool,
     wait: (Mutex<()>, Condvar),
+    client_roots: Mutex<ClientRootsState>,
+    upstream_pending: Mutex<HashMap<String, std::sync::mpsc::Sender<Value>>>,
+    next_upstream_id: AtomicI64,
 }
 
 impl McpSession {
@@ -3063,6 +3163,46 @@ impl McpSession {
             closed: AtomicBool::new(false),
             listener_active: AtomicBool::new(false),
             wait: (Mutex::new(()), Condvar::new()),
+            client_roots: Mutex::new(ClientRootsState::default()),
+            upstream_pending: Mutex::new(HashMap::new()),
+            next_upstream_id: AtomicI64::new(1),
+        }
+    }
+
+    fn upstream_call(&self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_upstream_id.fetch_add(1, Ordering::Relaxed);
+        let id_key = id.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.upstream_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id_key, tx);
+        let req = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let json_str = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+        self.push_message(json_str);
+        let resp = rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| "upstream MCP client did not answer".to_string())?;
+        if let Some(err) = resp.get("error") {
+            return Err(err.to_string());
+        }
+        Ok(resp.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    fn try_deliver_upstream(&self, msg: &Value) -> bool {
+        let Some(id) = msg.get("id").filter(|id| !id.is_null()).and_then(rpc_id_key) else {
+            return false;
+        };
+        let tx = self
+            .upstream_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
+        if let Some(tx) = tx {
+            let _ = tx.send(msg.clone());
+            true
+        } else {
+            false
         }
     }
 
@@ -3258,6 +3398,74 @@ fn cancellation_reason(req: &Value) -> Option<&str> {
         .and_then(|r| r.as_str())
 }
 
+fn capture_client_roots_from_init(state: &mut ClientRootsState, params: Option<&Value>) {
+    let Some(params) = params else {
+        return;
+    };
+    let roots_cap = params
+        .get("capabilities")
+        .and_then(|c| c.get("roots"));
+    state.supported = roots_cap.is_some();
+    state.list_changed = roots_cap
+        .and_then(|r| r.get("listChanged"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if let Some(roots) = params
+        .get("roots")
+        .and_then(|r| r.get("roots"))
+        .and_then(|a| a.as_array())
+    {
+        state.roots = roots.clone();
+    }
+}
+
+fn make_server_request_handler(
+    client_roots: Arc<Mutex<ClientRootsState>>,
+    stdio_upstream: Arc<StdioUpstream>,
+    mcp_sessions: Arc<Mutex<HashMap<String, Arc<McpSession>>>>,
+    http: bool,
+) -> ServerRequestHandler {
+    Arc::new(move |req| {
+        let method = req.get("method").and_then(|m| m.as_str())?;
+        let id = req.get("id")?.clone();
+        match method {
+            "roots/list" => {
+                let result = if http {
+                    let sid = ACTIVE_MCP_SESSION.with(|cell| cell.borrow().clone())?;
+                    let sessions = mcp_sessions.lock().ok()?;
+                    let session = sessions.get(&sid)?;
+                    session.upstream_call("roots/list", json!({})).ok()
+                } else if client_roots
+                    .lock()
+                    .map(|cr| cr.supported)
+                    .unwrap_or(false)
+                {
+                    stdio_upstream.call("roots/list", json!({})).ok()
+                } else {
+                    None
+                }?;
+                Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+            }
+            _ => None,
+        }
+    })
+}
+
+fn handle_client_notification(state: &GatewayState, req: &Value) -> bool {
+    match req.get("method").and_then(|m| m.as_str()) {
+        Some("notifications/roots/list_changed") => {
+            let router = state
+                .router
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            router.notify_all_downstreams("notifications/roots/list_changed", json!({}));
+            true
+        }
+        _ => false,
+    }
+}
+
 /// One request in, one response out: wait for a cold cache / live router when
 /// the method needs it, self-heal an empty router on a call, then dispatch.
 /// Shared by the stdio loop and the HTTP server so they can't diverge.
@@ -3271,6 +3479,18 @@ fn process_request(
     client: Option<&str>,
 ) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let is_notification = !req.get("id").is_some_and(|id| !id.is_null());
+    if is_notification {
+        if handle_client_notification(state, req) {
+            return None;
+        }
+    }
+
+    if method == "initialize" && !state.http {
+        if let Ok(mut cr) = state.client_roots.lock() {
+            capture_client_roots_from_init(&mut cr, req.get("params"));
+        }
+    }
 
     let wait = match method {
         "tools/list" => state
@@ -3325,6 +3545,7 @@ fn process_request(
                 state.profile.as_deref(),
                 state.http,
                 &state.downstream_dirty,
+                Arc::clone(&state.server_handler),
             );
             if built.server_count() > 0 {
                 let tools = built.aggregated_tools();
@@ -3909,16 +4130,46 @@ fn handle_mcp_http(
                 }
             };
 
+            if is_initialize {
+                if let Ok(sessions) = state.mcp_sessions.lock() {
+                    if let Some(sess) = sessions.get(&session_id) {
+                        if let Ok(mut cr) = sess.client_roots.lock() {
+                            capture_client_roots_from_init(&mut cr, req.get("params"));
+                        }
+                    }
+                }
+            }
+
+            if req.get("method").is_none()
+                && req.get("id").is_some_and(|id| !id.is_null())
+                && (req.get("result").is_some() || req.get("error").is_some())
+            {
+                if let Ok(sessions) = state.mcp_sessions.lock() {
+                    if let Some(sess) = sessions.get(&session_id) {
+                        if sess.try_deliver_upstream(&req) {
+                            return HttpOut::new(202, "text/plain", String::new())
+                                .with_header("Mcp-Session-Id", &session_id);
+                        }
+                    }
+                }
+            }
+
             // Notifications / JSON-RPC responses: 202 with empty body.
             if !has_id {
-                // Still run process_request for side effects when it's a known
-                // notification that handle_request ignores (returns None).
+                ACTIVE_MCP_SESSION.with(|cell| *cell.borrow_mut() = Some(session_id.clone()));
                 let _ = process_request(state, &req, guard, confirm, allowed, None, client);
+                ACTIVE_MCP_SESSION.with(|cell| *cell.borrow_mut() = None);
                 return HttpOut::new(202, "text/plain", String::new())
                     .with_header("Mcp-Session-Id", &session_id);
             }
 
-            match process_request(state, &req, guard, confirm, allowed, None, client) {
+            let resp = ACTIVE_MCP_SESSION.with(|cell| {
+                *cell.borrow_mut() = Some(session_id.clone());
+                let out = process_request(state, &req, guard, confirm, allowed, None, client);
+                *cell.borrow_mut() = None;
+                out
+            });
+            match resp {
                 Some(resp) => {
                     let body = serde_json::to_string(&resp).unwrap_or_else(|_| {
                         json!({
@@ -4553,6 +4804,15 @@ fn main() {
     // The registry watcher polls it and rebuilds, so a server that changes its own
     // tool set mid-session propagates to the client instead of being dropped.
     let downstream_dirty = Arc::new(AtomicU8::new(0));
+    let mcp_sessions = Arc::new(Mutex::new(HashMap::new()));
+    let client_roots = Arc::new(Mutex::new(ClientRootsState::default()));
+    let stdio_upstream = Arc::new(StdioUpstream::new(Arc::clone(&stdout)));
+    let server_handler = make_server_request_handler(
+        Arc::clone(&client_roots),
+        Arc::clone(&stdio_upstream),
+        Arc::clone(&mcp_sessions),
+        http_mode,
+    );
     glog(&format!(
         "loaded tool cache: {} tools",
         cached_tools
@@ -4568,13 +4828,20 @@ fn main() {
         let ready = Arc::clone(&ready);
         let cached_tools = Arc::clone(&cached_tools);
         let downstream_dirty = Arc::clone(&downstream_dirty);
+        let server_handler = Arc::clone(&server_handler);
         let profile = profile.clone();
         std::thread::spawn(move || {
             let reg = registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            let built = build_router(&reg, profile.as_deref(), http_mode, &downstream_dirty);
+            let built = build_router(
+                &reg,
+                profile.as_deref(),
+                http_mode,
+                &downstream_dirty,
+                server_handler,
+            );
             let tools = built.aggregated_tools();
             glog(&format!(
                 "background build: {} tools from {} servers",
@@ -4606,6 +4873,7 @@ fn main() {
         let stdout = Arc::clone(&stdout);
         let cached_tools = Arc::clone(&cached_tools);
         let downstream_dirty = Arc::clone(&downstream_dirty);
+        let server_handler = Arc::clone(&server_handler);
         let profile = profile.clone();
         std::thread::spawn(move || {
             watch_registry(
@@ -4617,6 +4885,7 @@ fn main() {
                 profile,
                 http_mode,
                 downstream_dirty,
+                server_handler,
             )
         });
     }
@@ -4632,7 +4901,10 @@ fn main() {
         lazy,
         profile: profile.clone(),
         http: http_mode,
-        mcp_sessions: Arc::new(Mutex::new(HashMap::new())),
+        mcp_sessions,
+        client_roots,
+        stdio_upstream,
+        server_handler,
     };
 
     // Native HTTP/OpenAPI transport: a first-class path for HTTP tool clients
@@ -4670,6 +4942,9 @@ fn main() {
             Ok(v) => v,
             Err(_) => continue,
         };
+        if state.stdio_upstream.try_deliver(&req) {
+            continue;
+        }
         gtrace(&format!(
             "request: {}",
             req.get("method").and_then(|m| m.as_str()).unwrap_or("")
@@ -4725,6 +5000,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_client_roots_records_capabilities_and_initial_roots() {
+        let mut state = ClientRootsState::default();
+        let params = json!({
+            "capabilities": { "roots": { "listChanged": true } },
+            "roots": { "roots": [{ "uri": "file:///tmp", "name": "tmp" }] }
+        });
+        capture_client_roots_from_init(&mut state, Some(&params));
+        assert!(state.supported);
+        assert!(state.list_changed);
+        assert_eq!(state.roots.len(), 1);
+        assert_eq!(state.roots[0]["uri"], "file:///tmp");
+    }
 
     /// The security-critical guarantee: the human-approval broker denies (never
     /// approves) when it cannot reach a live approver - no endpoint published (app
@@ -4807,18 +5096,31 @@ mod tests {
     }
 
     fn http_state(lazy: bool) -> GatewayState {
+        let stdout = Arc::new(Mutex::new(std::io::stdout()));
+        let mcp_sessions = Arc::new(Mutex::new(HashMap::new()));
+        let client_roots = Arc::new(Mutex::new(ClientRootsState::default()));
+        let stdio_upstream = Arc::new(StdioUpstream::new(Arc::clone(&stdout)));
+        let server_handler = make_server_request_handler(
+            Arc::clone(&client_roots),
+            Arc::clone(&stdio_upstream),
+            Arc::clone(&mcp_sessions),
+            true,
+        );
         GatewayState {
             registry: Arc::new(Mutex::new(Registry::default())),
             router: Arc::new(Mutex::new(Arc::new(Router::new()))),
             cached_tools: Arc::new(Mutex::new(Vec::new())),
-            stdout: Arc::new(Mutex::new(std::io::stdout())),
+            stdout,
             ready: Arc::new(AtomicBool::new(true)),
             downstream_dirty: Arc::new(AtomicU8::new(0)),
             rebuild_lock: Arc::new(Mutex::new(())),
             lazy,
             profile: None,
             http: true,
-            mcp_sessions: Arc::new(Mutex::new(HashMap::new())),
+            mcp_sessions,
+            client_roots,
+            stdio_upstream,
+            server_handler,
         }
     }
 
