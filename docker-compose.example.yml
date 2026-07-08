@@ -22,10 +22,13 @@ services:
       # CONDUIT_SECRET_KEY=...
       # Or inject per-server secrets directly:
       # CONDUIT_SECRET_STRIPE_SECRET_KEY=sk_...
-      # STRIPE_SECRET_KEY=sk_...
+      # STRIPE_SECRET_KEY=sk_...  (requires CONDUIT_ALLOW_BARE_SECRET_ENV below)
+      CONDUIT_ALLOW_BARE_SECRET_ENV: "1"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/"]
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -H "Authorization: Bearer $$CONDUIT_HTTP_TOKEN" http://127.0.0.1:8765/'
       interval: 30s
       timeout: 5s
       retries: 3

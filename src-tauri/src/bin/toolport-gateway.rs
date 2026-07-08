@@ -3049,12 +3049,29 @@ struct GatewayState {
 /// How long an idle MCP streamable-HTTP session stays valid before a request
 /// with that id gets 404 (client must re-initialize).
 const MCP_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Upper bound on concurrent MCP sessions to avoid unbounded memory growth.
+const MCP_SESSION_MAX: usize = 4096;
 
 /// Cryptographically random session id (visible ASCII, per MCP streamable-HTTP).
 fn new_mcp_session_id() -> String {
     let mut buf = [0u8; 16];
     getrandom::getrandom(&mut buf).expect("CSPRNG unavailable");
     buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Mint a new MCP session after TTL cleanup. Returns 503 when at capacity.
+fn mint_mcp_session(state: &GatewayState) -> Result<String, HttpOut> {
+    let sid = new_mcp_session_id();
+    let mut sessions = state
+        .mcp_sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    sessions.retain(|_, last| last.elapsed() < MCP_SESSION_TTL);
+    if sessions.len() >= MCP_SESSION_MAX {
+        return Err(HttpOut::json_err(503, "too many MCP sessions; retry later"));
+    }
+    sessions.insert(sid.clone(), Instant::now());
+    Ok(sid)
 }
 
 /// True when `id` is a non-empty visible-ASCII session id (0x21..=0x7E).
@@ -3604,8 +3621,8 @@ fn mcp_prefers_sse(accept: Option<&str>) -> bool {
         }
         None
     };
-    let sse_q = q_of("text/event-stream");
-    let json_q = q_of("application/json");
+    let sse_q = q_of("text/event-stream").filter(|q| *q > 0.0);
+    let json_q = q_of("application/json").filter(|q| *q > 0.0);
     match (sse_q, json_q) {
         (Some(s), Some(j)) => s > j,
         (Some(_), None) => true,
@@ -3674,11 +3691,14 @@ fn handle_mcp_http(
                 }
             };
 
-            let method_name = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-            let has_id = req
-                .get("id")
-                .map(|id| !id.is_null())
-                .unwrap_or(false);
+            let Some(req_obj) = req.as_object() else {
+                return HttpOut::json_err(400, "JSON-RPC body must be an object");
+            };
+            let method_name = req_obj
+                .get("method")
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
+            let has_id = req_obj.contains_key("id");
             let is_initialize = method_name == "initialize";
 
             // Session rules: initialize may omit (and gets a new id); everything
@@ -3689,24 +3709,16 @@ fn handle_mcp_http(
                     // otherwise mint a fresh one (spec: start over without the old id).
                     match mcp_require_session(state, Some(existing)) {
                         Ok(sid) => sid,
-                        Err(_) => {
-                            let sid = new_mcp_session_id();
-                            state
-                                .mcp_sessions
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .insert(sid.clone(), Instant::now());
-                            sid
-                        }
+                        Err(_) => match mint_mcp_session(state) {
+                            Ok(sid) => sid,
+                            Err(e) => return e,
+                        },
                     }
                 } else {
-                    let sid = new_mcp_session_id();
-                    state
-                        .mcp_sessions
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(sid.clone(), Instant::now());
-                    sid
+                    match mint_mcp_session(state) {
+                        Ok(sid) => sid,
+                        Err(e) => return e,
+                    }
                 }
             } else {
                 match mcp_require_session(state, session_hdr) {
@@ -3765,6 +3777,10 @@ fn handle_http(
     allowed: Option<&std::collections::HashSet<String>>,
     client: Option<&str>,
 ) -> HttpOut {
+    if method == "OPTIONS" {
+        return HttpOut::new(204, "text/plain", String::new());
+    }
+
     // Streamable-HTTP MCP endpoint (same port as OpenAPI).
     if path == "/mcp" || path.starts_with("/mcp?") {
         return handle_mcp_http(
@@ -3773,11 +3789,6 @@ fn handle_http(
     }
 
     match (method, path) {
-        // CORS preflight: browsers (Open WebUI fetches tool specs client-side)
-        // send OPTIONS before a cross-origin POST. Answer it so the real request
-        // is allowed through. The CORS headers themselves are added to every
-        // response in serve_http_loop.
-        ("OPTIONS", _) => HttpOut::new(204, "text/plain", String::new()),
         ("GET", "/openapi.json") => HttpOut::new(
             200,
             "application/json",
@@ -5311,6 +5322,25 @@ mod tests {
         assert!(!mcp_prefers_sse(Some(
             "application/json;q=1, text/event-stream;q=0.8"
         )));
+        assert!(!mcp_prefers_sse(Some("text/event-stream;q=0")));
+    }
+
+    #[test]
+    fn mcp_http_options_preflight_returns_204() {
+        let state = http_state(true);
+        let out = handle_http(
+            &state,
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
+            "OPTIONS",
+            "/mcp",
+            "",
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(out.status, 204);
     }
 
     #[test]

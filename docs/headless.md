@@ -80,7 +80,7 @@ Image defaults:
 Resolution order when a server marks `env[].secret: true`:
 
 1. Process env `CONDUIT_SECRET_<KEY>` (preferred in compose)
-2. Process env `<KEY>` (plain `.env` convenience)
+2. Process env `<KEY>` when `CONDUIT_ALLOW_BARE_SECRET_ENV=1` (opt-in; enabled in the compose example)
 3. Encrypted `secrets.enc` when `CONDUIT_SECRET_KEY` is set
 4. OS keychain (desktop)
 
@@ -89,7 +89,8 @@ Example `.env`:
 ```env
 CONDUIT_HTTP_TOKEN=replace-me
 CONDUIT_SECRET_STRIPE_SECRET_KEY=sk_live_...
-# or bare name if you prefer:
+# or bare name with explicit opt-in (set in compose example):
+# CONDUIT_ALLOW_BARE_SECRET_ENV=1
 # STRIPE_SECRET_KEY=sk_live_...
 ```
 

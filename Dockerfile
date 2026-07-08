@@ -35,7 +35,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /data
 COPY --from=build /src/src-tauri/target/release/toolport-gateway /usr/local/bin/toolport-gateway
+RUN useradd --system --uid 10001 --home-dir /data toolport \
+    && chown toolport:toolport /data
 
+USER toolport
 ENV CONDUIT_HTTP=8765
 ENV CONDUIT_HTTP_HOST=0.0.0.0
 ENV CONDUIT_REGISTRY=/data/registry.json
