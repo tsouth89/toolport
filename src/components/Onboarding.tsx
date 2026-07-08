@@ -1,20 +1,31 @@
 import { useEffect, useState } from "react";
 import {
+  ArrowLeft,
   ArrowRight,
   Check,
   Download,
+  KeyRound,
   Link2,
   Loader2,
   Plus,
   ShieldCheck,
   Sparkles,
   Store,
+  Users,
   Waypoints,
   Workflow,
 } from "lucide-react";
 import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
-import { addCatalogServer, importServers, installGateway, listStacks } from "@/lib/api";
+import {
+  addCatalogServer,
+  importServers,
+  installGateway,
+  listStacks,
+  teamConnect,
+} from "@/lib/api";
+import { teamUrlError } from "@/lib/teamUrl";
+import { Input } from "@/components/ui/input";
 import {
   importableServers,
   isGatewayServer,
@@ -58,6 +69,10 @@ export function Onboarding({
   onFinish,
 }: Props) {
   const [step, setStep] = useState(initialStep);
+  // A team member who was handed an invite code shouldn't have to click through
+  // the solo flow to find a place to enter it. This branch drops them straight
+  // into the join step and, on success, the team's servers arrive locally.
+  const [joining, setJoining] = useState(false);
 
   const present = clients.filter((c) => c.appPresent);
   const importable = new Set(
@@ -70,7 +85,12 @@ export function Onboarding({
   const connectedCount = clients.filter((c) => c.gatewayInstalled).length;
 
   const steps = [
-    <Welcome key="welcome" present={present} onNext={() => setStep(1)} />,
+    <Welcome
+      key="welcome"
+      present={present}
+      onNext={() => setStep(1)}
+      onJoinTeam={() => setJoining(true)}
+    />,
     <AddServers
       key="add"
       registry={registry}
@@ -99,37 +119,48 @@ export function Onboarding({
     <Dialog open onOpenChange={(o) => !o && onFinish()}>
       <DialogContent className="gap-0 sm:max-w-md" showCloseButton={false}>
         <div className="flex flex-col gap-5 py-1">
-          {steps[step]}
+          {joining ? (
+            <JoinTeam
+              onBack={() => setJoining(false)}
+              onRegistryChange={onRegistryChange}
+              onClientsRefresh={onClientsRefresh}
+              onFinish={onFinish}
+            />
+          ) : (
+            <>
+              {steps[step]}
 
-          <div className="flex items-center justify-between border-t pt-4">
-            <div
-              className="flex items-center gap-1.5"
-              role="progressbar"
-              aria-valuenow={step + 1}
-              aria-valuemin={1}
-              aria-valuemax={steps.length}
-              aria-label={`Setup step ${step + 1} of ${steps.length}`}
-            >
-              {steps.map((_, i) => (
-                <span
-                  key={i}
-                  aria-hidden="true"
-                  className={`size-1.5 rounded-full transition-colors ${
-                    i === step ? "bg-success" : "bg-muted-foreground/30"
-                  }`}
-                />
-              ))}
-            </div>
-            {step < steps.length - 1 && (
-              <button
-                type="button"
-                onClick={onFinish}
-                className="text-xs text-muted-foreground transition hover:text-foreground"
-              >
-                Skip setup
-              </button>
-            )}
-          </div>
+              <div className="flex items-center justify-between border-t pt-4">
+                <div
+                  className="flex items-center gap-1.5"
+                  role="progressbar"
+                  aria-valuenow={step + 1}
+                  aria-valuemin={1}
+                  aria-valuemax={steps.length}
+                  aria-label={`Setup step ${step + 1} of ${steps.length}`}
+                >
+                  {steps.map((_, i) => (
+                    <span
+                      key={i}
+                      aria-hidden="true"
+                      className={`size-1.5 rounded-full transition-colors ${
+                        i === step ? "bg-success" : "bg-muted-foreground/30"
+                      }`}
+                    />
+                  ))}
+                </div>
+                {step < steps.length - 1 && (
+                  <button
+                    type="button"
+                    onClick={onFinish}
+                    className="text-xs text-muted-foreground transition hover:text-foreground"
+                  >
+                    Skip setup
+                  </button>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </DialogContent>
     </Dialog>
@@ -156,7 +187,15 @@ function StepHeader({
   );
 }
 
-function Welcome({ present, onNext }: { present: DetectedClient[]; onNext: () => void }) {
+function Welcome({
+  present,
+  onNext,
+  onJoinTeam,
+}: {
+  present: DetectedClient[];
+  onNext: () => void;
+  onJoinTeam: () => void;
+}) {
   const names = present.map((c) => c.name);
   const found =
     names.length === 0
@@ -202,6 +241,167 @@ function Welcome({ present, onNext }: { present: DetectedClient[]; onNext: () =>
         Get started
         <ArrowRight className="size-4" />
       </Button>
+      <div className="flex flex-col gap-1.5 border-t pt-4">
+        <button
+          type="button"
+          onClick={onJoinTeam}
+          className="flex items-center gap-2 text-left text-sm font-medium text-foreground transition hover:text-primary"
+        >
+          <Users className="size-4 shrink-0 text-muted-foreground" />
+          Joining a team? Enter your invite code
+          <ArrowRight className="size-3.5 shrink-0 text-muted-foreground" />
+        </button>
+        <button
+          type="button"
+          onClick={() => openExternal("https://toolport.app/teams")}
+          className="self-start text-2xs text-muted-foreground transition hover:text-foreground"
+        >
+          What is Toolport for Teams? →
+        </button>
+      </div>
+    </>
+  );
+}
+
+const HOSTED_TEAMS_URL = "https://teams.toolport.app";
+
+/** The team-member on-ramp. A person handed an invite code lands here from the
+ * Welcome step, pastes it, and the team's shared servers arrive locally. The
+ * hosted server is the default; self-hosting is a tucked-away advanced toggle so
+ * the common case is a single field. */
+function JoinTeam({
+  onBack,
+  onRegistryChange,
+  onClientsRefresh,
+  onFinish,
+}: {
+  onBack: () => void;
+  onRegistryChange: (r: Registry) => void;
+  onClientsRefresh: () => void;
+  onFinish: () => void;
+}) {
+  const [code, setCode] = useState("");
+  const [name, setName] = useState("");
+  const [serverUrl, setServerUrl] = useState(HOSTED_TEAMS_URL);
+  const [advanced, setAdvanced] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [joined, setJoined] = useState(false);
+
+  const join = async () => {
+    setError(null);
+    const urlError = teamUrlError(serverUrl);
+    if (urlError) {
+      setError(urlError);
+      return;
+    }
+    if (!code.trim()) {
+      setError("Enter the invite or connect code your team gave you.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await teamConnect(
+        serverUrl.trim(),
+        code.trim(),
+        name.trim() || undefined,
+      );
+      onRegistryChange(r);
+      onClientsRefresh();
+      setJoined(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (joined) {
+    return (
+      <>
+        <StepHeader icon={<Check className="size-5" />} title="You're on the team">
+          Your team's shared servers were added to your active profile. Local and LAN
+          servers stay off until you review and enable them.
+        </StepHeader>
+        <Button onClick={onFinish} className="self-start">
+          Finish setup
+          <ArrowRight className="size-4" />
+        </Button>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <StepHeader icon={<Users className="size-5" />} title="Join your team">
+        Paste the invite code your team shared. Toolport connects this device and pulls
+        the team's server set.
+      </StepHeader>
+      <div className="grid gap-3">
+        <label className="grid gap-1 text-sm">
+          <span className="text-muted-foreground">Invite or connect code</span>
+          <Input
+            autoFocus
+            placeholder="Paste your invite or connect code"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !busy && join()}
+          />
+        </label>
+        <label className="grid gap-1 text-sm">
+          <span className="text-muted-foreground">Your name (optional)</span>
+          <Input
+            placeholder="e.g. Tyler"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+        </label>
+        {advanced ? (
+          <label className="grid gap-1 text-sm">
+            <span className="text-muted-foreground">Team server URL</span>
+            <Input
+              placeholder="https://toolport.yourcompany.com"
+              value={serverUrl}
+              onChange={(e) => setServerUrl(e.target.value)}
+            />
+            <span className="text-xs text-muted-foreground">
+              Only change this if your team runs its own self-hosted Toolport server.
+            </span>
+          </label>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setAdvanced(true)}
+            className="flex items-center gap-1.5 self-start text-2xs text-muted-foreground transition hover:text-foreground"
+          >
+            <KeyRound className="size-3" />
+            Self-hosted server? Set a custom URL
+          </button>
+        )}
+      </div>
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="flex items-center justify-between border-t pt-4">
+        <button
+          type="button"
+          onClick={onBack}
+          className="flex items-center gap-1.5 text-xs text-muted-foreground transition hover:text-foreground"
+        >
+          <ArrowLeft className="size-3.5" />
+          Back
+        </button>
+        <Button onClick={join} disabled={busy}>
+          {busy ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <Users className="size-4" />
+          )}
+          Join team
+        </Button>
+      </div>
     </>
   );
 }
