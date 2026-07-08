@@ -1256,6 +1256,7 @@ pub struct HttpTransport {
     /// running gateway recover from a short-lived access token expiring mid-session
     /// instead of 401ing until the server is manually reconnected.
     refresh: Option<RefreshFn>,
+    server_handler: Option<ServerRequestHandler>,
 }
 
 impl HttpTransport {
@@ -1297,7 +1298,24 @@ impl HttpTransport {
             next_id: 1,
             auth,
             refresh,
+            server_handler: None,
         }
+    }
+
+    /// Answer a server-initiated JSON-RPC request inline (SSE mid-stream or
+    /// standalone). Returns true when the message was handled.
+    fn handle_inline_server_request(&mut self, v: &Value) -> Result<bool, TransportError> {
+        if !is_server_initiated_request(v) {
+            return Ok(false);
+        }
+        let Some(handler) = &self.server_handler else {
+            return Ok(false);
+        };
+        let Some(resp) = handler(v) else {
+            return Ok(false);
+        };
+        self.post(&resp, false)?;
+        Ok(true)
     }
 
     fn post(&mut self, body: &Value, expect_response: bool) -> Result<Option<Value>, TransportError> {
@@ -1397,6 +1415,9 @@ impl HttpTransport {
                         continue;
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(data) {
+                        if self.handle_inline_server_request(&v)? {
+                            continue;
+                        }
                         if ids_match(v.get("id"), wanted.as_ref()) {
                             return Ok(Some(v));
                         }
@@ -1428,6 +1449,10 @@ impl Transport for HttpTransport {
         let body = json!({ "jsonrpc": "2.0", "method": method, "params": params });
         self.post(&body, false)?;
         Ok(())
+    }
+
+    fn set_server_request_handler(&mut self, handler: ServerRequestHandler) {
+        self.server_handler = Some(handler);
     }
 }
 

@@ -87,8 +87,8 @@ low real exposure since the gateway only writes when `allow_agent_control` is on
 - [~] **Streamable-HTTP upstream transport** — `POST /mcp` and `GET /mcp` listen stream ship
   (session ids, JSON-RPC, selective SSE responses; see `docs/headless.md` +
   `docker-compose.example.yml`). OpenAPI HTTP mode already shipped for Open WebUI.
-  Remaining: HTTP downstream server-initiated RPC (#167). Roots, sampling, and
-  elicitation passthrough to the upstream MCP client ship for stdio + HTTP MCP. (M)
+  Remaining (#167): long-lived `GET /mcp` listen on HTTP downstream for servers
+  that push server-initiated RPC outside SSE POST responses. (S)
 
 **Strategic**
 

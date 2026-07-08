@@ -7,7 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::downstream::{DownstreamServer, HttpTransport, RefreshFn};
+use crate::downstream::{
+    DownstreamServer, HttpTransport, RefreshFn, ServerRequestHandler, Transport,
+};
 use crate::registry::ServerEntry;
 use crate::{oauth, secrets};
 
@@ -205,6 +207,15 @@ fn first_vaulted_secret(server: &ServerEntry) -> Option<String> {
 ///    OAuth. Without this fallback, "Manage secrets" tokens were silently ignored
 ///    for HTTP servers.
 pub fn connect_remote(server: &ServerEntry) -> Result<DownstreamServer, String> {
+    connect_remote_with_handler(server, None)
+}
+
+/// Like [`connect_remote`], but wires server-initiated JSON-RPC (sampling, roots, …)
+/// through `handler` when the downstream server asks mid-call.
+pub fn connect_remote_with_handler(
+    server: &ServerEntry,
+    server_handler: Option<ServerRequestHandler>,
+) -> Result<DownstreamServer, String> {
     guard_connect_target(server)?;
     let url = server.url.as_deref().unwrap_or("");
     let server_id = &server.id;
@@ -213,12 +224,18 @@ pub fn connect_remote(server: &ServerEntry) -> Result<DownstreamServer, String> 
     let block_private = is_untrusted_source(server.source.as_deref());
     let auth = secrets::get_secret(server_id, secrets::HTTP_AUTH_KEY)
         .or_else(|| first_vaulted_secret(server));
-    let transport = authed_transport(url, auth, server_id, block_private)?;
+    let mut transport = authed_transport(url, auth, server_id, block_private)?;
+    if let Some(ref handler) = server_handler {
+        transport.set_server_request_handler(handler.clone());
+    }
     match DownstreamServer::connect(server_id.to_string(), Box::new(transport)) {
         Ok(ds) => Ok(ds),
         Err(e) if is_auth_error(&e) => match refresh_token(server_id) {
             Ok(fresh) => {
-                let transport = authed_transport(url, Some(fresh), server_id, block_private)?;
+                let mut transport = authed_transport(url, Some(fresh), server_id, block_private)?;
+                if let Some(handler) = server_handler.clone() {
+                    transport.set_server_request_handler(handler);
+                }
                 DownstreamServer::connect(server_id.to_string(), Box::new(transport))
             }
             Err(_) => Err(e),
