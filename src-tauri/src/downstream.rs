@@ -1246,6 +1246,8 @@ fn guarded_agent(block_private: bool) -> ureq::Agent {
 pub struct HttpTransport {
     url: String,
     agent: ureq::Agent,
+    /// Separate pool so inline replies can POST while an SSE body is still open.
+    inline_agent: ureq::Agent,
     session_id: Option<String>,
     next_id: i64,
     /// Raw bearer token (without the "Bearer " prefix), if the server needs auth.
@@ -1294,6 +1296,7 @@ impl HttpTransport {
         HttpTransport {
             url: url.to_string(),
             agent: guarded_agent(block_private),
+            inline_agent: guarded_agent(block_private),
             session_id: None,
             next_id: 1,
             auth,
@@ -1314,8 +1317,82 @@ impl HttpTransport {
         let Some(resp) = handler(v) else {
             return Ok(false);
         };
-        self.post(&resp, false)?;
+        self.send_post_no_response(&resp)?;
         Ok(true)
+    }
+
+    /// POST JSON-RPC without waiting for a response body (inline replies mid-SSE).
+    fn send_post_no_response(&mut self, body: &Value) -> Result<(), TransportError> {
+        let payload = body.to_string();
+        let mut req = self
+            .inline_agent
+            .post(&self.url)
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json, text/event-stream")
+            .set("MCP-Protocol-Version", PROTOCOL_VERSION);
+        if let Some(sid) = &self.session_id {
+            req = req.set("Mcp-Session-Id", sid);
+        }
+        if let Some(token) = &self.auth {
+            req = req.set("Authorization", &bearer_header(token));
+        }
+        let resp = req
+            .send_string(&payload)
+            .map_err(|e| TransportError::Fatal(e.to_string()))?;
+        if let Some(sid) = resp.header("Mcp-Session-Id") {
+            self.session_id = Some(sid.to_string());
+        }
+        // Drain so the connection returns to the pool without leaving bytes unread.
+        let _ = read_capped(resp, 64 * 1024);
+        Ok(())
+    }
+
+    /// Read SSE `data:` frames as they arrive so server-initiated requests can be
+    /// answered before the downstream closes the stream (avoids deadlock when the
+    /// server waits for our inline reply before sending the final response).
+    fn read_sse_response(
+        &mut self,
+        resp: ureq::Response,
+        wanted: Option<&Value>,
+    ) -> Result<Option<Value>, TransportError> {
+        use std::io::{BufRead, BufReader};
+        let mut reader = BufReader::new(resp.into_reader());
+        let mut line = String::new();
+        let mut bytes_read: u64 = 0;
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .map_err(|e| TransportError::Fatal(e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            bytes_read += n as u64;
+            if bytes_read > MAX_RESPONSE_BYTES {
+                return Err(TransportError::Fatal(format!(
+                    "SSE response exceeded {MAX_RESPONSE_BYTES} bytes"
+                )));
+            }
+            let trimmed = line.trim_start();
+            if let Some(data) = trimmed.strip_prefix("data:") {
+                let data = data.trim();
+                if data.is_empty() {
+                    continue;
+                }
+                let Ok(v) = serde_json::from_str::<Value>(data) else {
+                    continue;
+                };
+                if self.handle_inline_server_request(&v)? {
+                    continue;
+                }
+                if ids_match(v.get("id"), wanted) {
+                    return Ok(Some(v));
+                }
+            }
+        }
+        Err(TransportError::Fatal(
+            "no matching message in SSE stream".to_string(),
+        ))
     }
 
     fn post(&mut self, body: &Value, expect_response: bool) -> Result<Option<Value>, TransportError> {
@@ -1404,32 +1481,15 @@ impl HttpTransport {
             .map(|c| c.to_lowercase().contains("text/event-stream"))
             .unwrap_or(false);
         let wanted = body.get("id").cloned();
-        let text = read_capped(resp, MAX_RESPONSE_BYTES);
 
         if is_sse {
-            for line in text.lines() {
-                let line = line.trim_start();
-                if let Some(data) = line.strip_prefix("data:") {
-                    let data = data.trim();
-                    if data.is_empty() {
-                        continue;
-                    }
-                    if let Ok(v) = serde_json::from_str::<Value>(data) {
-                        if self.handle_inline_server_request(&v)? {
-                            continue;
-                        }
-                        if ids_match(v.get("id"), wanted.as_ref()) {
-                            return Ok(Some(v));
-                        }
-                    }
-                }
-            }
-            Err(TransportError::Fatal("no matching message in SSE stream".to_string()))
-        } else {
-            serde_json::from_str(&text)
-                .map(Some)
-                .map_err(|e| TransportError::Fatal(format!("bad JSON response: {e}")))
+            return self.read_sse_response(resp, wanted.as_ref());
         }
+
+        let text = read_capped(resp, MAX_RESPONSE_BYTES);
+        serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| TransportError::Fatal(format!("bad JSON response: {e}")))
     }
 }
 
@@ -1650,6 +1710,116 @@ mod tests {
         let note = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
         assert!(!super::is_server_initiated_request(&note));
     }
+
+    #[test]
+    fn http_sse_answers_inline_server_request_before_final_response() {
+        use super::{HttpTransport, ServerRequestHandler, Transport};
+        use serde_json::Value;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(false).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_handle = std::thread::spawn(move || {
+            let mut sse = listener.accept().unwrap().0;
+            let headers = read_http_headers(&mut sse);
+            if headers
+                .windows(25)
+                .any(|w| w.eq_ignore_ascii_case(b"expect: 100-continue"))
+            {
+                sse.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
+            }
+            if let Some(len) = content_length(&headers) {
+                let mut body = vec![0u8; len];
+                sse.read_exact(&mut body).unwrap();
+            }
+
+            let line1 = "data: {\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"roots/list\"}\n";
+            sse.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+            write_chunk(&mut sse, line1.as_bytes());
+
+            let mut inline = listener.accept().unwrap().0;
+            let inline_headers = read_http_headers(&mut inline);
+            let mut body = String::new();
+            if let Some(len) = content_length(&inline_headers) {
+                let mut raw = vec![0u8; len];
+                inline.read_exact(&mut raw).unwrap();
+                body = String::from_utf8_lossy(&raw).into_owned();
+            }
+            assert!(body.contains("\"id\":99"));
+            inline
+                .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .unwrap();
+
+            let line2 = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n";
+            write_chunk(&mut sse, line2.as_bytes());
+            sse.write_all(b"0\r\n\r\n").unwrap();
+        });
+
+
+        fn read_http_headers(r: &mut impl Read) -> Vec<u8> {
+            let mut req_buf = Vec::new();
+            let mut byte = [0u8; 1];
+            while r.read(&mut byte).unwrap() > 0 {
+                req_buf.push(byte[0]);
+                if req_buf.len() >= 4 && &req_buf[req_buf.len() - 4..] == b"\r\n\r\n" {
+                    break;
+                }
+            }
+            req_buf
+        }
+
+        fn content_length(headers: &[u8]) -> Option<usize> {
+            let headers = String::from_utf8_lossy(headers);
+            for line in headers.lines() {
+                if let Some(v) = line.strip_prefix("Content-Length:").or_else(|| line.strip_prefix("content-length:")) {
+                    return v.trim().parse().ok();
+                }
+            }
+            None
+        }
+
+        fn write_chunk(w: &mut impl Write, data: &[u8]) {
+            write!(w, "{:x}\r\n", data.len()).unwrap();
+            w.write_all(data).unwrap();
+            w.write_all(b"\r\n").unwrap();
+            w.flush().unwrap();
+        }
+
+        let handler: ServerRequestHandler = Arc::new(|req| {
+            if req.get("method").and_then(|m| m.as_str()) == Some("roots/list") {
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": req.get("id").cloned().unwrap_or(Value::Null),
+                    "result": { "roots": [] }
+                }))
+            } else {
+                None
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/");
+        let mut t = HttpTransport::new(&url);
+        t.set_server_request_handler(handler);
+        let result = t
+            .post(
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call" }),
+                true,
+            )
+            .expect("inline reply should unblock the SSE stream");
+        server_handle.join().unwrap();
+        assert_eq!(
+            result
+                .and_then(|v| v.get("result").cloned())
+                .unwrap_or(Value::Null),
+            json!({"ok": true})
+        );
+    }
+
 
     #[test]
     fn ssrf_resolver_screens_resolved_addresses() {
