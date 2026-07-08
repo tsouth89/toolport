@@ -87,8 +87,8 @@ low real exposure since the gateway only writes when `allow_agent_control` is on
 - [~] **Streamable-HTTP upstream transport** — `POST /mcp` and `GET /mcp` listen stream ship
   (session ids, JSON-RPC, selective SSE responses; see `docs/headless.md` +
   `docker-compose.example.yml`). OpenAPI HTTP mode already shipped for Open WebUI.
-  Remaining: server→client RPC passthrough — **roots** shipped (stdio downstream);
-  sampling / elicitation still open (#167). (M)
+  Remaining: HTTP downstream server-initiated RPC (#167). Roots, sampling, and
+  elicitation passthrough to the upstream MCP client ship for stdio + HTTP MCP. (M)
 
 **Strategic**
 
@@ -383,7 +383,7 @@ Tier 2 - feature completeness (in progress)
       hides+blocks; global destructiveHint switch)
 - [x] Tool playground: invoke any tool from the app and see the result
 - [x] Proxy resources + prompts (capability-gated discovery, namespaced prompts,
-      uri-routed resources); sampling / elicitation passthrough still TODO
+      uri-routed resources); sampling / elicitation passthrough shipped for stdio downstream
 - [x] Observability: per-server latency (avg/p95), success/error rates, per-tool
       breakdown, and server/errors-only filters (Activity dashboard)
 - [x] Tool-definition integrity / rug-pull detection: fingerprint tools on connect,

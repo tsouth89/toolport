@@ -18,7 +18,7 @@ Current streamable-HTTP scope:
 - `POST /mcp` returns JSON-RPC responses as JSON by default.
 - If `Accept` prefers `text/event-stream`, `POST /mcp` returns a single SSE `message` event and closes.
 - `GET /mcp` opens a long-lived SSE listen stream for server→client JSON-RPC (keepalive comments every 30s when idle).
-- **Roots passthrough** (#167 slice): when the MCP client declares `roots` at `initialize`, downstream `roots/list` is answered from the client; `notifications/roots/list_changed` from the client is forwarded to all downstream servers. Stdio downstream only (HTTP downstream server-initiated RPC is a follow-up).
+- **Server-initiated RPC passthrough** (#167): when the MCP client declares `roots`, `sampling`, or `elicitation` at `initialize`, downstream `roots/list`, `sampling/createMessage`, and `elicitation/create` are forwarded to the client (120s timeout for interactive calls). `notifications/roots/list_changed` from the client is forwarded to all downstream servers. Stdio downstream only (HTTP downstream server-initiated RPC is a follow-up).
 
 Auth is the same bearer token as today (`CONDUIT_HTTP_TOKEN` or a registered
 `httpClients[]` entry). Non-loopback binds **require** a token.

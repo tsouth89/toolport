@@ -3062,13 +3062,21 @@ struct GatewayState {
     /// Streamable-HTTP MCP sessions (`Mcp-Session-Id` → state). Only used when
     /// `http` is true; empty for stdio gateways.
     mcp_sessions: Arc<Mutex<HashMap<String, Arc<McpSession>>>>,
-    /// Client-declared filesystem roots (stdio gateway). Per-session copy lives on
+    /// Client-declared upstream capabilities (stdio gateway). Per-session copy on
     /// [`McpSession`] for HTTP MCP clients.
-    client_roots: Arc<Mutex<ClientRootsState>>,
+    client_upstream: Arc<Mutex<ClientUpstreamCaps>>,
     /// Forward server-initiated JSON-RPC to the stdio upstream client.
     stdio_upstream: Arc<StdioUpstream>,
-    /// Answers downstream `roots/list` (and future server-initiated RPC).
+    /// Answers downstream server-initiated RPC (roots, sampling, elicitation).
     server_handler: ServerRequestHandler,
+}
+
+/// Client capabilities the upstream MCP client declared at `initialize`.
+#[derive(Clone, Default)]
+struct ClientUpstreamCaps {
+    roots: ClientRootsState,
+    sampling: bool,
+    elicitation: bool,
 }
 
 /// Roots the upstream MCP client exposed at `initialize`.
@@ -3096,6 +3104,10 @@ impl StdioUpstream {
     }
 
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.call_timeout(method, params, upstream_rpc_timeout(method))
+    }
+
+    fn call_timeout(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let id_key = id.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3112,7 +3124,7 @@ impl StdioUpstream {
         out.flush().map_err(|e| e.to_string())?;
         drop(out);
         let resp = rx
-            .recv_timeout(Duration::from_secs(30))
+            .recv_timeout(timeout)
             .map_err(|_| "upstream client did not answer".to_string())?;
         if let Some(err) = resp.get("error") {
             return Err(err.to_string());
@@ -3150,7 +3162,7 @@ struct McpSession {
     closed: AtomicBool,
     listener_active: AtomicBool,
     wait: (Mutex<()>, Condvar),
-    client_roots: Mutex<ClientRootsState>,
+    client_upstream: Mutex<ClientUpstreamCaps>,
     upstream_pending: Mutex<HashMap<String, std::sync::mpsc::Sender<Value>>>,
     next_upstream_id: AtomicI64,
 }
@@ -3163,13 +3175,22 @@ impl McpSession {
             closed: AtomicBool::new(false),
             listener_active: AtomicBool::new(false),
             wait: (Mutex::new(()), Condvar::new()),
-            client_roots: Mutex::new(ClientRootsState::default()),
+            client_upstream: Mutex::new(ClientUpstreamCaps::default()),
             upstream_pending: Mutex::new(HashMap::new()),
             next_upstream_id: AtomicI64::new(1),
         }
     }
 
     fn upstream_call(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.upstream_call_timeout(method, params, upstream_rpc_timeout(method))
+    }
+
+    fn upstream_call_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let id = self.next_upstream_id.fetch_add(1, Ordering::Relaxed);
         let id_key = id.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3181,7 +3202,7 @@ impl McpSession {
         let json_str = serde_json::to_string(&req).map_err(|e| e.to_string())?;
         self.push_message(json_str);
         let resp = rx
-            .recv_timeout(Duration::from_secs(30))
+            .recv_timeout(timeout)
             .map_err(|_| "upstream MCP client did not answer".to_string())?;
         if let Some(err) = resp.get("error") {
             return Err(err.to_string());
@@ -3398,15 +3419,14 @@ fn cancellation_reason(req: &Value) -> Option<&str> {
         .and_then(|r| r.as_str())
 }
 
-fn capture_client_roots_from_init(state: &mut ClientRootsState, params: Option<&Value>) {
+fn capture_client_upstream_from_init(state: &mut ClientUpstreamCaps, params: Option<&Value>) {
     let Some(params) = params else {
         return;
     };
-    let roots_cap = params
-        .get("capabilities")
-        .and_then(|c| c.get("roots"));
-    state.supported = roots_cap.is_some();
-    state.list_changed = roots_cap
+    let caps = params.get("capabilities");
+    let roots_cap = caps.and_then(|c| c.get("roots"));
+    state.roots.supported = roots_cap.is_some();
+    state.roots.list_changed = roots_cap
         .and_then(|r| r.get("listChanged"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -3415,39 +3435,89 @@ fn capture_client_roots_from_init(state: &mut ClientRootsState, params: Option<&
         .and_then(|r| r.get("roots"))
         .and_then(|a| a.as_array())
     {
-        state.roots = roots.clone();
+        state.roots.roots = roots.clone();
+    }
+    state.sampling = caps.and_then(|c| c.get("sampling")).is_some();
+    state.elicitation = caps.and_then(|c| c.get("elicitation")).is_some();
+}
+
+const UPSTREAM_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+const UPSTREAM_INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn upstream_rpc_timeout(method: &str) -> Duration {
+    match method {
+        "sampling/createMessage" | "elicitation/create" => UPSTREAM_INTERACTIVE_TIMEOUT,
+        _ => UPSTREAM_RPC_TIMEOUT,
+    }
+}
+
+fn client_supports_server_rpc(caps: &ClientUpstreamCaps, method: &str) -> bool {
+    match method {
+        "roots/list" => caps.roots.supported,
+        "sampling/createMessage" => caps.sampling,
+        "elicitation/create" => caps.elicitation,
+        _ => false,
+    }
+}
+
+fn upstream_rpc_params(method: &str, req: &Value) -> Value {
+    match method {
+        "roots/list" => json!({}),
+        _ => req.get("params").cloned().unwrap_or_else(|| json!({})),
+    }
+}
+
+fn upstream_json_rpc_response(id: Value, result: Result<Value, String>) -> Value {
+    match result {
+        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err(message) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32603, "message": message }
+        }),
     }
 }
 
 fn make_server_request_handler(
-    client_roots: Arc<Mutex<ClientRootsState>>,
+    client_upstream: Arc<Mutex<ClientUpstreamCaps>>,
     stdio_upstream: Arc<StdioUpstream>,
     mcp_sessions: Arc<Mutex<HashMap<String, Arc<McpSession>>>>,
     http: bool,
 ) -> ServerRequestHandler {
     Arc::new(move |req| {
         let method = req.get("method").and_then(|m| m.as_str())?;
-        let id = req.get("id")?.clone();
-        match method {
-            "roots/list" => {
-                let result = if http {
-                    let sid = ACTIVE_MCP_SESSION.with(|cell| cell.borrow().clone())?;
-                    let sessions = mcp_sessions.lock().ok()?;
-                    let session = sessions.get(&sid)?;
-                    session.upstream_call("roots/list", json!({})).ok()
-                } else if client_roots
-                    .lock()
-                    .map(|cr| cr.supported)
-                    .unwrap_or(false)
-                {
-                    stdio_upstream.call("roots/list", json!({})).ok()
-                } else {
-                    None
-                }?;
-                Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
-            }
-            _ => None,
+        if !matches!(
+            method,
+            "roots/list" | "sampling/createMessage" | "elicitation/create"
+        ) {
+            return None;
         }
+        let id = req.get("id")?.clone();
+        if !client_upstream
+            .lock()
+            .map(|caps| client_supports_server_rpc(&caps, method))
+            .unwrap_or(false)
+        {
+            return Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32601,
+                    "message": format!("upstream client does not support {method}")
+                }
+            }));
+        }
+        let params = upstream_rpc_params(method, req);
+        let timeout = upstream_rpc_timeout(method);
+        let result = if http {
+            let sid = ACTIVE_MCP_SESSION.with(|cell| cell.borrow().clone())?;
+            let sessions = mcp_sessions.lock().ok()?;
+            let session = sessions.get(&sid)?;
+            session.upstream_call_timeout(method, params, timeout)
+        } else {
+            stdio_upstream.call_timeout(method, params, timeout)
+        };
+        Some(upstream_json_rpc_response(id, result))
     })
 }
 
@@ -3487,8 +3557,8 @@ fn process_request(
     }
 
     if method == "initialize" && !state.http {
-        if let Ok(mut cr) = state.client_roots.lock() {
-            capture_client_roots_from_init(&mut cr, req.get("params"));
+        if let Ok(mut caps) = state.client_upstream.lock() {
+            capture_client_upstream_from_init(&mut caps, req.get("params"));
         }
     }
 
@@ -4133,8 +4203,8 @@ fn handle_mcp_http(
             if is_initialize {
                 if let Ok(sessions) = state.mcp_sessions.lock() {
                     if let Some(sess) = sessions.get(&session_id) {
-                        if let Ok(mut cr) = sess.client_roots.lock() {
-                            capture_client_roots_from_init(&mut cr, req.get("params"));
+                        if let Ok(mut caps) = sess.client_upstream.lock() {
+                            capture_client_upstream_from_init(&mut caps, req.get("params"));
                         }
                     }
                 }
@@ -4805,10 +4875,10 @@ fn main() {
     // tool set mid-session propagates to the client instead of being dropped.
     let downstream_dirty = Arc::new(AtomicU8::new(0));
     let mcp_sessions = Arc::new(Mutex::new(HashMap::new()));
-    let client_roots = Arc::new(Mutex::new(ClientRootsState::default()));
+    let client_upstream = Arc::new(Mutex::new(ClientUpstreamCaps::default()));
     let stdio_upstream = Arc::new(StdioUpstream::new(Arc::clone(&stdout)));
     let server_handler = make_server_request_handler(
-        Arc::clone(&client_roots),
+        Arc::clone(&client_upstream),
         Arc::clone(&stdio_upstream),
         Arc::clone(&mcp_sessions),
         http_mode,
@@ -4902,7 +4972,7 @@ fn main() {
         profile: profile.clone(),
         http: http_mode,
         mcp_sessions,
-        client_roots,
+        client_upstream,
         stdio_upstream,
         server_handler,
     };
@@ -5002,17 +5072,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capture_client_roots_records_capabilities_and_initial_roots() {
-        let mut state = ClientRootsState::default();
+    fn capture_client_upstream_records_roots_sampling_and_elicitation() {
+        let mut state = ClientUpstreamCaps::default();
         let params = json!({
-            "capabilities": { "roots": { "listChanged": true } },
+            "capabilities": {
+                "roots": { "listChanged": true },
+                "sampling": {},
+                "elicitation": {}
+            },
             "roots": { "roots": [{ "uri": "file:///tmp", "name": "tmp" }] }
         });
-        capture_client_roots_from_init(&mut state, Some(&params));
-        assert!(state.supported);
-        assert!(state.list_changed);
-        assert_eq!(state.roots.len(), 1);
-        assert_eq!(state.roots[0]["uri"], "file:///tmp");
+        capture_client_upstream_from_init(&mut state, Some(&params));
+        assert!(state.roots.supported);
+        assert!(state.roots.list_changed);
+        assert!(state.sampling);
+        assert!(state.elicitation);
+        assert_eq!(state.roots.roots.len(), 1);
+        assert_eq!(state.roots.roots[0]["uri"], "file:///tmp");
+    }
+
+    #[test]
+    fn client_supports_server_rpc_matches_declared_capabilities() {
+        let caps = ClientUpstreamCaps {
+            roots: ClientRootsState {
+                supported: true,
+                ..Default::default()
+            },
+            sampling: true,
+            elicitation: false,
+        };
+        assert!(client_supports_server_rpc(&caps, "roots/list"));
+        assert!(client_supports_server_rpc(&caps, "sampling/createMessage"));
+        assert!(!client_supports_server_rpc(&caps, "elicitation/create"));
     }
 
     /// The security-critical guarantee: the human-approval broker denies (never
@@ -5098,10 +5189,10 @@ mod tests {
     fn http_state(lazy: bool) -> GatewayState {
         let stdout = Arc::new(Mutex::new(std::io::stdout()));
         let mcp_sessions = Arc::new(Mutex::new(HashMap::new()));
-        let client_roots = Arc::new(Mutex::new(ClientRootsState::default()));
+        let client_upstream = Arc::new(Mutex::new(ClientUpstreamCaps::default()));
         let stdio_upstream = Arc::new(StdioUpstream::new(Arc::clone(&stdout)));
         let server_handler = make_server_request_handler(
-            Arc::clone(&client_roots),
+            Arc::clone(&client_upstream),
             Arc::clone(&stdio_upstream),
             Arc::clone(&mcp_sessions),
             true,
@@ -5118,7 +5209,7 @@ mod tests {
             profile: None,
             http: true,
             mcp_sessions,
-            client_roots,
+            client_upstream,
             stdio_upstream,
             server_handler,
         }
