@@ -6,6 +6,28 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-07-08
+
+Teams reliability and activation batch, ahead of the Teams launch.
+
+### Fixed
+
+- **Org-forced safety locks are released when you leave a team.** A team that enforced
+  human-in-the-loop approval, destructive-tool blocking, content defense, or
+  quarantine-on-drift used to bake that setting permanently into the member's own settings,
+  so leaving the team left the lock stuck on with no way to turn it back off. These org
+  forces are now tracked separately from your own settings and cleared the moment you leave;
+  your own toggles are never touched. (#209)
+
+### Added
+
+- **"Joining a team?" onboarding path.** The first-run wizard now offers first-class
+  invite-code entry, so a team member who was told to install Toolport can join their team
+  immediately instead of clicking through solo setup to look for it. (#210)
+- **Near-instant team policy sync.** Members now long-poll the team config, so an admin's
+  policy or access change in the dashboard enforces on member machines in about a second
+  instead of at the next poll interval. Falls back cleanly against an older team server. (#211)
+
 ## [1.5.2] - 2026-07-07
 
 Post-1.5.1 security and robustness batch from a multi-dimension gateway audit
