@@ -415,6 +415,18 @@ pub fn resolve_command(command: &str) -> String {
 }
 
 /// A bidirectional JSON-RPC channel to one downstream server.
+pub type ServerRequestHandler = Arc<dyn Fn(&Value) -> Option<Value> + Send + Sync>;
+
+/// True when a downstream line is a server-initiated JSON-RPC request (has method + id,
+/// no result/error). Such messages must be answered on the transport, not skipped.
+pub fn is_server_initiated_request(v: &Value) -> bool {
+    v.get("method").and_then(|m| m.as_str()).is_some()
+        && v.get("id").is_some_and(|id| !id.is_null())
+        && v.get("result").is_none()
+        && v.get("error").is_none()
+}
+
+/// A bidirectional JSON-RPC channel to one downstream server.
 pub trait Transport: Send {
     fn request(&mut self, method: &str, params: Value) -> Result<Value, TransportError>;
     fn request_with_cancel(
@@ -440,6 +452,9 @@ pub trait Transport: Send {
     /// tools during startup doesn't trigger a needless rebuild. Default no-op:
     /// transports without a live notification stream ignore it.
     fn arm_tools_watch(&mut self) {}
+    /// Handle server→client JSON-RPC (roots/list, sampling, …) by forwarding to the
+    /// upstream MCP client. Default no-op: unsupported server requests are ignored.
+    fn set_server_request_handler(&mut self, _handler: ServerRequestHandler) {}
 }
 
 fn downstream_trace(msg: &str) {
@@ -839,6 +854,9 @@ pub struct StdioTransport {
     /// once this is set, so tool-list changes announced during startup are
     /// ignored. Flipped on by `arm_tools_watch` after the handshake.
     armed: Arc<AtomicBool>,
+    /// Answers server-initiated JSON-RPC (e.g. `roots/list`) by forwarding to the
+    /// upstream MCP client. Set by the gateway before the connect handshake.
+    server_handler: Option<ServerRequestHandler>,
 }
 
 /// Tolerate a config that packed the whole invocation into `command` (e.g.
@@ -989,6 +1007,7 @@ impl StdioTransport {
             next_id: 1,
             read_timeout: STDIO_READ_TIMEOUT,
             armed,
+            server_handler: None,
         })
     }
 
@@ -1090,6 +1109,23 @@ impl Transport for StdioTransport {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            if is_server_initiated_request(&value) {
+                if let Some(handler) = &self.server_handler {
+                    if let Some(resp) = handler(&value) {
+                        let line = serde_json::to_string(&resp)
+                            .map_err(|e| TransportError::Fatal(e.to_string()))?;
+                        let mut stdin = self.stdin.lock().map_err(|_| {
+                            TransportError::Unavailable("downstream stdin lock poisoned".into())
+                        })?;
+                        writeln!(stdin, "{line}")
+                            .map_err(|e| TransportError::Unavailable(e.to_string()))?;
+                        stdin
+                            .flush()
+                            .map_err(|e| TransportError::Unavailable(e.to_string()))?;
+                        continue;
+                    }
+                }
+            }
             if ids_match(value.get("id"), Some(&json!(id))) {
                 if let Some(err) = value.get("error") {
                     return Err(TransportError::Fatal(err.to_string()));
@@ -1115,6 +1151,10 @@ impl Transport for StdioTransport {
 
     fn arm_tools_watch(&mut self) {
         self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn set_server_request_handler(&mut self, handler: ServerRequestHandler) {
+        self.server_handler = Some(handler);
     }
 }
 
@@ -1552,6 +1592,11 @@ impl DownstreamServer {
             cancel,
         )
     }
+
+    /// Forward a JSON-RPC notification to this downstream server.
+    pub fn notify_downstream(&mut self, method: &str, params: Value) -> Result<(), TransportError> {
+        self.transport.notify(method, params)
+    }
 }
 
 /// Pull a named array field out of a JSON-RPC result, or an empty vec.
@@ -1569,6 +1614,16 @@ mod tests {
         resolve_command, screen_resolved_addrs, screen_spawn_command, screen_spawn_env,
         CancelRegistry,
     };
+
+    #[test]
+    fn is_server_initiated_request_detects_downstream_rpc() {
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"roots/list"});
+        assert!(super::is_server_initiated_request(&req));
+        let resp = json!({"jsonrpc":"2.0","id":1,"result":{"roots":[]}});
+        assert!(!super::is_server_initiated_request(&resp));
+        let note = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
+        assert!(!super::is_server_initiated_request(&note));
+    }
 
     #[test]
     fn ssrf_resolver_screens_resolved_addresses() {
