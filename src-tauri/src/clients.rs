@@ -241,6 +241,26 @@ fn resolve_client_config_path(
                 .join("config.yaml"),
             Platform::Linux => home.join(".config").join("goose").join("config.yaml"),
         },
+        "anythingllm" => match platform {
+            Platform::Windows => config
+                .join("anythingllm-desktop")
+                .join("storage")
+                .join("plugins")
+                .join("anythingllm_mcp_servers.json"),
+            Platform::MacOs => home
+                .join("Library")
+                .join("Application Support")
+                .join("anythingllm-desktop")
+                .join("storage")
+                .join("plugins")
+                .join("anythingllm_mcp_servers.json"),
+            Platform::Linux => home
+                .join(".config")
+                .join("anythingllm-desktop")
+                .join("storage")
+                .join("plugins")
+                .join("anythingllm_mcp_servers.json"),
+        },
         "hermes" => home.join(".hermes").join("config.yaml"),
         _ => return None,
     };
@@ -296,6 +316,12 @@ fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> 
         "jan" => data.join("Jan").join("data").join("mcp_config.json"),
         "zed" => home.join(".config").join("zed").join("settings.json"),
         "goose" => home.join(".config").join("goose").join("config.yaml"),
+        "anythingllm" => home
+            .join(".config")
+            .join("anythingllm-desktop")
+            .join("storage")
+            .join("plugins")
+            .join("anythingllm_mcp_servers.json"),
         "continue" => home.join(".continue").join("config.yaml"),
         "hermes" => home.join(".hermes").join("config.yaml"),
         _ => return None,
@@ -338,6 +364,10 @@ fn claude_desktop_path() -> Option<PathBuf> {
 
 fn cursor_path() -> Option<PathBuf> {
     client_config_path("cursor")
+}
+
+fn anythingllm_path() -> Option<PathBuf> {
+    client_config_path("anythingllm")
 }
 
 fn boltai_path() -> Option<PathBuf> {
@@ -565,6 +595,14 @@ fn defs() -> Vec<ClientDef> {
             uses_connectors: false,
             path: cursor_path,
             plugin_scan: Some(scan_cursor_plugins),
+        },
+        ClientDef {
+            id: "anythingllm",
+            name: "AnythingLLM",
+            format: Format::JsonMcpServers,
+            uses_connectors: false,
+            path: anythingllm_path,
+            plugin_scan: None,
         },
         ClientDef {
             id: "vscode",
@@ -1231,9 +1269,8 @@ fn read_existing_toml(content: &str) -> Result<toml::Value, String> {
     if content.trim().is_empty() {
         return Ok(toml::Value::Table(toml::map::Map::new()));
     }
-    toml::from_str::<toml::Value>(content).map_err(|e| {
-        format!("Could not parse the existing config ({e}); leaving it untouched.")
-    })
+    toml::from_str::<toml::Value>(content)
+        .map_err(|e| format!("Could not parse the existing config ({e}); leaving it untouched."))
 }
 
 fn parse_json(content: &str, key: &str) -> Result<Vec<McpServer>, String> {
@@ -3052,8 +3089,7 @@ bad = "not-a-table"
 
         // A whole-app-state client with a genuinely-broken config errors (leaving the
         // file intact) instead of replacing it with just the gateway entry.
-        let path =
-            std::env::temp_dir().join(format!("conduit-claude-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("conduit-claude-{}.json", std::process::id()));
         let garbage = "{ \"projects\": {}, \"oauthAccount\": broken not json";
         std::fs::write(&path, garbage).unwrap();
         assert!(edit_json_gateway(&path, "mcpServers", true, None, true).is_err());
@@ -3066,8 +3102,7 @@ bad = "not-a-table"
         // Codex's config.toml holds the user's whole config; a parse failure must
         // ERROR and leave the file byte-for-byte intact, never rewrite it down to
         // just our [mcp_servers.Toolport] entry.
-        let path =
-            std::env::temp_dir().join(format!("conduit-bad-{}.toml", std::process::id()));
+        let path = std::env::temp_dir().join(format!("conduit-bad-{}.toml", std::process::id()));
         let garbage = "model = \"o3\"\n[[[ this is not valid toml";
         std::fs::write(&path, garbage).unwrap();
         assert!(edit_toml_gateway(&path, true, None).is_err());
@@ -3078,8 +3113,7 @@ bad = "not-a-table"
     #[test]
     fn toml_edit_preserves_other_settings() {
         // A parseable config.toml keeps every unrelated key when we add our entry.
-        let path =
-            std::env::temp_dir().join(format!("conduit-ok-{}.toml", std::process::id()));
+        let path = std::env::temp_dir().join(format!("conduit-ok-{}.toml", std::process::id()));
         std::fs::write(
             &path,
             "model = \"o3\"\napproval_policy = \"on-request\"\n\n[profiles.work]\nmodel = \"gpt-5\"\n",
@@ -3109,10 +3143,17 @@ bad = "not-a-table"
 
     #[test]
     fn new_json_clients_are_registered() {
-        // Warp, Amazon Q, Kiro, and LM Studio all use the standard mcpServers JSON
+        // Warp, Amazon Q, Kiro, and LM Studio, Jan, and AnythingLLM all use the standard mcpServers JSON
         // shape, so a ClientDef + path is all they need. Lock in their registration,
         // format, and that their config paths resolve on this OS.
-        for id in ["warp", "amazon-q", "kiro", "lm-studio", "jan"] {
+        for id in [
+            "warp",
+            "amazon-q",
+            "kiro",
+            "lm-studio",
+            "jan",
+            "anythingllm",
+        ] {
             let d = defs()
                 .into_iter()
                 .find(|d| d.id == id)
