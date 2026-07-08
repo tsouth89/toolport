@@ -552,12 +552,19 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
         if sp.get("forceQuarantineOnDrift").and_then(Value::as_bool) == Some(true) {
             reg.quarantine_on_drift = true;
         }
-        // Org-mandated human-in-the-loop: force the member's gateway to hold gated tool
-        // calls for human approval. Tighten-only, like the flags above.
-        if sp.get("forceHumanApproval").and_then(Value::as_bool) == Some(true) {
-            reg.human_approval = true;
-        }
     }
+    // Org-mandated human-in-the-loop: recorded in a SEPARATE, releasable lock rather than
+    // baked into the member's own `human_approval`. The old code set `reg.human_approval = true`
+    // with no release path, so an org lock outlived the team the member left, and no local
+    // toggle could clear it. Recompute from the policy on every sync (the org emits its
+    // screening policy on every push, so an absent flag means "not forced"); `remove_team`
+    // clears it on leave. The member's OWN toggle is never touched by a team config, preserving
+    // "the org can tighten but never loosen a member's own choice."
+    reg.team_forced_human_approval = team_cfg
+        .get("screeningPolicy")
+        .and_then(|sp| sp.get("forceHumanApproval"))
+        .and_then(Value::as_bool)
+        == Some(true);
 
     outcome
 }
@@ -664,6 +671,10 @@ pub fn remove_team(reg: &mut Registry, team_id: &str) {
     for p in &mut reg.profiles {
         p.enabled_server_ids.retain(|id| !ids.contains(id));
     }
+    // Release the org's human-approval lock: the member is no longer in this team, so an
+    // org-forced HITL policy must not keep gating their calls. Their OWN `human_approval`
+    // setting is left untouched.
+    reg.team_forced_human_approval = false;
 }
 
 #[cfg(test)]
@@ -765,45 +776,95 @@ mod tests {
     }
 
     #[test]
-    fn screening_policy_can_tighten_but_never_loosen() {
+    fn screening_policy_tightens_defense_and_drift_but_never_loosens_them() {
         let mut r = base_registry();
-        // Member starts with content defense off, drift-quarantine off, human approval off.
         r.content_defense = false;
         r.quarantine_on_drift = false;
-        r.human_approval = false;
 
-        // Org policy forces all three on: the member's posture is raised.
         apply_team_config(
             &mut r,
             "t1",
             &json!({ "servers": [], "screeningPolicy": {
                 "forceContentDefense": true,
                 "forceQuarantineOnDrift": true,
-                "forceHumanApproval": true,
             }}),
         );
         assert!(r.content_defense, "org policy forced content defense on");
         assert!(r.quarantine_on_drift, "org policy forced drift-quarantine on");
-        assert!(r.human_approval, "org policy forced human approval on");
 
-        // A policy with the flags false, or absent entirely, never turns them back off.
+        // A false or absent flag never turns those two back off (still tighten-only bake-in).
         apply_team_config(
             &mut r,
             "t1",
             &json!({ "servers": [], "screeningPolicy": {
                 "forceContentDefense": false,
                 "forceQuarantineOnDrift": false,
-                "forceHumanApproval": false,
             }}),
         );
-        assert!(r.content_defense, "false flag never loosens an existing lock");
-        assert!(r.quarantine_on_drift, "false flag never loosens an existing lock");
-        assert!(r.human_approval, "false flag never loosens an existing lock");
-
+        assert!(r.content_defense, "false flag never loosens content defense");
+        assert!(r.quarantine_on_drift, "false flag never loosens drift-quarantine");
         apply_team_config(&mut r, "t1", &json!({ "servers": [] }));
-        assert!(r.content_defense, "absent policy never loosens an existing lock");
-        assert!(r.quarantine_on_drift, "absent policy never loosens an existing lock");
-        assert!(r.human_approval, "absent policy never loosens an existing lock");
+        assert!(r.content_defense, "absent policy never loosens content defense");
+        assert!(r.quarantine_on_drift, "absent policy never loosens drift-quarantine");
+    }
+
+    #[test]
+    fn forced_human_approval_is_a_releasable_lock_not_baked_into_the_member() {
+        let mut r = base_registry();
+        r.human_approval = false; // the member's OWN choice is off
+
+        // Org forces human approval on: the gate is effective, but the member's own toggle is
+        // untouched, the force lives in the separate, releasable field.
+        apply_team_config(
+            &mut r,
+            "t1",
+            &json!({ "servers": [], "screeningPolicy": { "forceHumanApproval": true }}),
+        );
+        assert!(r.team_forced_human_approval, "org force recorded separately");
+        assert!(!r.human_approval, "member's own setting is never overwritten by the org");
+        assert!(r.human_approval_effective(), "gate is active while the org forces it");
+
+        // The org disabling its policy RELEASES the lock (the old code left it stuck on), and
+        // the gate reverts to the member's own choice.
+        apply_team_config(
+            &mut r,
+            "t1",
+            &json!({ "servers": [], "screeningPolicy": { "forceHumanApproval": false }}),
+        );
+        assert!(!r.team_forced_human_approval, "org released the force");
+        assert!(!r.human_approval_effective(), "gate follows the member's own choice again");
+    }
+
+    #[test]
+    fn leaving_a_team_releases_a_forced_human_approval_lock() {
+        // The exact bug: join a team that forces HITL, then leave, and it must not keep gating.
+        let mut r = base_registry();
+        r.human_approval = false;
+        apply_team_config(
+            &mut r,
+            "t1",
+            &json!({ "servers": [], "screeningPolicy": { "forceHumanApproval": true }}),
+        );
+        assert!(r.human_approval_effective(), "forced on while in the team");
+
+        remove_team(&mut r, "t1");
+        assert!(!r.team_forced_human_approval, "leaving the team clears the org lock");
+        assert!(!r.human_approval_effective(), "no team, no force -> follows member's choice");
+    }
+
+    #[test]
+    fn org_force_absent_never_disables_the_members_own_human_approval() {
+        let mut r = base_registry();
+        r.human_approval = true; // the member themselves wants HITL on
+        apply_team_config(
+            &mut r,
+            "t1",
+            &json!({ "servers": [], "screeningPolicy": { "forceHumanApproval": false }}),
+        );
+        assert!(!r.team_forced_human_approval);
+        assert!(r.human_approval_effective(), "the member's own on-setting is preserved");
+        remove_team(&mut r, "t1");
+        assert!(r.human_approval_effective(), "leaving doesn't disable the member's own choice");
     }
 
     #[test]

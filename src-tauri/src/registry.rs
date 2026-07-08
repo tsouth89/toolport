@@ -213,6 +213,14 @@ pub struct Registry {
     /// ephemeral per-session allowlist that is NOT saved here.
     #[serde(default)]
     pub human_approval_allow: Vec<String>,
+    /// Set true only while an ACTIVE team's screening policy forces human approval
+    /// (`forceHumanApproval`). Kept SEPARATE from `human_approval` (the member's own choice)
+    /// so the org lock is RELEASABLE: recomputed on every team sync and cleared when the
+    /// member leaves or is removed from a team, instead of being baked permanently into the
+    /// member's own setting (which had no release path, so an org lock outlived the team).
+    /// The gate holds a call when either is true (see [`Registry::human_approval_effective`]).
+    #[serde(default)]
+    pub team_forced_human_approval: bool,
     /// Per-tool exposure overrides, keyed by server id then ORIGINAL tool name (not the
     /// exposed name, so a rename or `_2` collision suffix can't misalign the key): rename or
     /// re-describe a tool as clients see it (e.g. neutralize a poisoned description). The
@@ -372,6 +380,7 @@ impl Default for Registry {
             confirm_destructive: false,
             human_approval: false,
             human_approval_allow: Vec::new(),
+            team_forced_human_approval: false,
             tool_overrides: HashMap::new(),
             pinned_tools: HashMap::new(),
             quarantine_on_drift: false,
@@ -588,6 +597,14 @@ impl Registry {
     /// for a person. When it gates a tool it takes precedence over `confirm_destructive`.
     pub fn set_human_approval(&mut self, on: bool) {
         self.human_approval = on;
+    }
+
+    /// Whether the HITL gate is active: the member's OWN toggle, OR an active team's forced
+    /// policy. The gate reads this instead of `human_approval` directly so an org lock stays
+    /// releasable (it lives in `team_forced_human_approval`, cleared on leave) rather than
+    /// permanently overwriting the member's own choice.
+    pub fn human_approval_effective(&self) -> bool {
+        self.human_approval || self.team_forced_human_approval
     }
 
     /// Add a `server/tool` key to the persistent "always allow" list, so the HITL gate

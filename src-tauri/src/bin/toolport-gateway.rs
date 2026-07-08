@@ -2265,7 +2265,7 @@ fn handle_request_with_cancel(
             // untrusted-provenance server) until a person approves it in the Toolport app.
             // Takes precedence over the agent-facing confirm below, and is fail-closed
             // (no broker / no answer / timeout all deny). Skipped once `confirmed`.
-            if reg.human_approval && !confirmed {
+            if reg.human_approval_effective() && !confirmed {
                 // Resolve destructiveness robustly: cache, then live router, else
                 // fail-closed (an unknown tool must not skip the human gate).
                 let is_dest = tool_is_destructive_fail_closed(name, cached, router);
