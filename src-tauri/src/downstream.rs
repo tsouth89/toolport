@@ -1355,8 +1355,8 @@ impl HttpTransport {
         resp: ureq::Response,
         wanted: Option<&Value>,
     ) -> Result<Option<Value>, TransportError> {
-        use std::io::{BufRead, BufReader};
-        let mut reader = BufReader::new(resp.into_reader());
+        use std::io::{BufRead, BufReader, Read};
+        let mut reader = BufReader::new(resp.into_reader().take(MAX_RESPONSE_BYTES + 1));
         let mut line = String::new();
         let mut bytes_read: u64 = 0;
         loop {
@@ -1726,7 +1726,7 @@ mod tests {
             let mut sse = listener.accept().unwrap().0;
             let headers = read_http_headers(&mut sse);
             if headers
-                .windows(25)
+                .windows(b"expect: 100-continue".len())
                 .any(|w| w.eq_ignore_ascii_case(b"expect: 100-continue"))
             {
                 sse.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
