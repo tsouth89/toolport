@@ -17,7 +17,7 @@ Current streamable-HTTP scope:
 
 - `POST /mcp` returns JSON-RPC responses as JSON by default.
 - If `Accept` prefers `text/event-stream`, `POST /mcp` returns a single SSE `message` event and closes.
-- Long-lived server-initiated `GET /mcp` SSE listening is not implemented yet (`405`).
+- `GET /mcp` opens a long-lived SSE listen stream for server→client JSON-RPC (keepalive comments every 30s when idle).
 
 Auth is the same bearer token as today (`CONDUIT_HTTP_TOKEN` or a registered
 `httpClients[]` entry). Non-loopback binds **require** a token.

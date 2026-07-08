@@ -18,11 +18,11 @@
 //!   model searches and calls on demand, keeping context flat.
 //! - Records every tool call to a local audit log.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{json, Value};
@@ -3041,9 +3041,141 @@ struct GatewayState {
     /// True when this process is the HTTP/OpenAPI bridge (vs a stdio client's
     /// gateway). The bridge connects the union of all registered clients' servers.
     http: bool,
-    /// Streamable-HTTP MCP sessions (`Mcp-Session-Id` → last-seen). Only used when
+    /// Streamable-HTTP MCP sessions (`Mcp-Session-Id` → state). Only used when
     /// `http` is true; empty for stdio gateways.
-    mcp_sessions: Arc<Mutex<HashMap<String, Instant>>>,
+    mcp_sessions: Arc<Mutex<HashMap<String, Arc<McpSession>>>>,
+}
+
+/// Per-session state for streamable-HTTP MCP (POST responses + GET listen stream).
+struct McpSession {
+    last_seen: Mutex<Instant>,
+    outbound: Mutex<VecDeque<String>>,
+    closed: AtomicBool,
+    listener_active: AtomicBool,
+    wait: (Mutex<()>, Condvar),
+}
+
+impl McpSession {
+    fn new() -> Self {
+        Self {
+            last_seen: Mutex::new(Instant::now()),
+            outbound: Mutex::new(VecDeque::new()),
+            closed: AtomicBool::new(false),
+            listener_active: AtomicBool::new(false),
+            wait: (Mutex::new(()), Condvar::new()),
+        }
+    }
+
+    fn touch(&self) {
+        if let Ok(mut t) = self.last_seen.lock() {
+            *t = Instant::now();
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.last_seen
+            .lock()
+            .map(|t| t.elapsed() >= MCP_SESSION_TTL)
+            .unwrap_or(true)
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.wait.1.notify_all();
+    }
+
+    fn try_begin_listen(&self) -> bool {
+        !self.listener_active.swap(true, Ordering::SeqCst)
+    }
+
+    fn end_listen(&self) {
+        self.listener_active.store(false, Ordering::SeqCst);
+        self.wait.1.notify_all();
+    }
+
+    fn push_message(&self, json: String) {
+        self.outbound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(json);
+        self.wait.1.notify_all();
+    }
+
+    fn next_sse_chunk(&self, timeout: Duration) -> Option<Vec<u8>> {
+        let mut guard = self
+            .wait
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if self.closed.load(Ordering::SeqCst) || self.is_expired() {
+                return None;
+            }
+            if let Some(msg) = self
+                .outbound
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+            {
+                return Some(mcp_sse_body(&msg).into_bytes());
+            }
+            let result = self
+                .wait
+                .1
+                .wait_timeout(guard, timeout)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = result.0;
+            if result.1.timed_out() {
+                return Some(b": keepalive\n\n".to_vec());
+            }
+        }
+    }
+}
+
+/// Blocking `Read` adapter for a long-lived `GET /mcp` SSE listen stream.
+struct McpSseReader {
+    session: Arc<McpSession>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl McpSseReader {
+    fn new(session: Arc<McpSession>) -> Self {
+        Self {
+            session,
+            buf: Vec::new(),
+            pos: 0,
+        }
+    }
+}
+
+impl Read for McpSseReader {
+    fn read(&mut self, dest: &mut [u8]) -> std::io::Result<usize> {
+        if dest.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.pos < self.buf.len() {
+                let n = dest.len().min(self.buf.len() - self.pos);
+                dest[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+                self.pos += n;
+                return Ok(n);
+            }
+            match self.session.next_sse_chunk(MCP_SSE_KEEPALIVE) {
+                Some(chunk) => {
+                    self.buf = chunk;
+                    self.pos = 0;
+                }
+                None => return Ok(0),
+            }
+        }
+    }
+}
+
+impl Drop for McpSseReader {
+    fn drop(&mut self) {
+        self.session.end_listen();
+    }
 }
 
 /// How long an idle MCP streamable-HTTP session stays valid before a request
@@ -3051,6 +3183,8 @@ struct GatewayState {
 const MCP_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Upper bound on concurrent MCP sessions to avoid unbounded memory growth.
 const MCP_SESSION_MAX: usize = 4096;
+/// SSE comment frames on idle `GET /mcp` listen streams.
+const MCP_SSE_KEEPALIVE: Duration = Duration::from_secs(30);
 
 /// Cryptographically random session id (visible ASCII, per MCP streamable-HTTP).
 fn new_mcp_session_id() -> String {
@@ -3062,16 +3196,34 @@ fn new_mcp_session_id() -> String {
 /// Mint a new MCP session after TTL cleanup. Returns 503 when at capacity.
 fn mint_mcp_session(state: &GatewayState) -> Result<String, HttpOut> {
     let sid = new_mcp_session_id();
+    let session = Arc::new(McpSession::new());
     let mut sessions = state
         .mcp_sessions
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    sessions.retain(|_, last| last.elapsed() < MCP_SESSION_TTL);
+    sessions.retain(|_, s| !s.is_expired() && !s.closed.load(Ordering::SeqCst));
     if sessions.len() >= MCP_SESSION_MAX {
         return Err(HttpOut::json_err(503, "too many MCP sessions; retry later"));
     }
-    sessions.insert(sid.clone(), Instant::now());
+    sessions.insert(sid.clone(), Arc::clone(&session));
     Ok(sid)
+}
+
+/// Queue a server→client JSON-RPC message on an HTTP MCP session (#167 prep).
+fn mcp_push_server_message(state: &GatewayState, session_id: &str, msg: &Value) -> bool {
+    let Ok(json) = serde_json::to_string(msg) else {
+        return false;
+    };
+    let sessions = state
+        .mcp_sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(sess) = sessions.get(session_id) {
+        sess.push_message(json);
+        true
+    } else {
+        false
+    }
 }
 
 /// True when `id` is a non-empty visible-ASCII session id (0x21..=0x7E).
@@ -3536,6 +3688,8 @@ struct HttpOut {
     ctype: &'static str,
     body: String,
     extra: Vec<(String, String)>,
+    /// Long-lived `GET /mcp` SSE listen stream (chunked response).
+    mcp_listen: Option<Arc<McpSession>>,
 }
 
 impl HttpOut {
@@ -3545,7 +3699,23 @@ impl HttpOut {
             ctype,
             body,
             extra: Vec::new(),
+            mcp_listen: None,
         }
+    }
+
+    fn mcp_listen(session: Arc<McpSession>) -> Self {
+        Self {
+            status: 200,
+            ctype: "text/event-stream",
+            body: String::new(),
+            extra: Vec::new(),
+            mcp_listen: Some(session),
+        }
+    }
+
+    #[cfg(test)]
+    fn is_mcp_listen(&self) -> bool {
+        self.mcp_listen.is_some()
     }
 
     fn with_header(mut self, name: &str, value: &str) -> Self {
@@ -3562,8 +3732,11 @@ impl HttpOut {
     }
 }
 
-/// Touch / validate an existing MCP session. Returns Ok(session_id) or an HttpOut error.
-fn mcp_require_session(state: &GatewayState, session_hdr: Option<&str>) -> Result<String, HttpOut> {
+/// Touch / validate an existing MCP session. Returns Ok((id, session)) or an HttpOut error.
+fn mcp_require_session(
+    state: &GatewayState,
+    session_hdr: Option<&str>,
+) -> Result<(String, Arc<McpSession>), HttpOut> {
     let Some(sid) = session_hdr.map(str::trim).filter(|s| !s.is_empty()) else {
         return Err(HttpOut::json_err(
             400,
@@ -3577,12 +3750,11 @@ fn mcp_require_session(state: &GatewayState, session_hdr: Option<&str>) -> Resul
         .mcp_sessions
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Drop expired sessions opportunistically.
-    sessions.retain(|_, last| last.elapsed() < MCP_SESSION_TTL);
-    match sessions.get_mut(sid) {
-        Some(last) => {
-            *last = Instant::now();
-            Ok(sid.to_string())
+    sessions.retain(|_, s| !s.is_expired() && !s.closed.load(Ordering::SeqCst));
+    match sessions.get(sid) {
+        Some(sess) => {
+            sess.touch();
+            Ok((sid.to_string(), Arc::clone(sess)))
         }
         None => Err(HttpOut::json_err(
             404,
@@ -3660,16 +3832,26 @@ fn handle_mcp_http(
 ) -> HttpOut {
     let prefer_sse = mcp_prefers_sse(accept);
     match method {
-        // GET opens a long-lived SSE stream for server→client messages. We don't
-        // yet push unsolicited messages, so advertise that with 405 (allowed by
-        // the spec) rather than hanging an empty stream.
-        "GET" => HttpOut::new(
-            405,
-            "application/json",
-            json!({ "error": "SSE listen not offered; use POST /mcp for JSON-RPC" }).to_string(),
-        ),
+        "GET" => {
+            if !mcp_prefers_sse(accept) {
+                return HttpOut::json_err(406, "Accept must include text/event-stream");
+            }
+            match mcp_require_session(state, session_hdr) {
+                Ok((sid, session)) => {
+                    if !session.try_begin_listen() {
+                        return HttpOut::json_err(
+                            409,
+                            "SSE listen already active for this session",
+                        );
+                    }
+                    HttpOut::mcp_listen(session).with_header("Mcp-Session-Id", &sid)
+                }
+                Err(e) => e,
+            }
+        }
         "DELETE" => match mcp_require_session(state, session_hdr) {
-            Ok(sid) => {
+            Ok((sid, session)) => {
+                session.close();
                 state
                     .mcp_sessions
                     .lock()
@@ -3708,7 +3890,7 @@ fn handle_mcp_http(
                     // Client re-sent a session on initialize: accept if still live,
                     // otherwise mint a fresh one (spec: start over without the old id).
                     match mcp_require_session(state, Some(existing)) {
-                        Ok(sid) => sid,
+                        Ok((sid, _)) => sid,
                         Err(_) => match mint_mcp_session(state) {
                             Ok(sid) => sid,
                             Err(e) => return e,
@@ -3722,7 +3904,7 @@ fn handle_mcp_http(
                 }
             } else {
                 match mcp_require_session(state, session_hdr) {
-                    Ok(sid) => sid,
+                    Ok((sid, _)) => sid,
                     Err(e) => return e,
                 }
             };
@@ -3799,7 +3981,7 @@ fn handle_http(
             "text/plain; charset=utf-8",
             "Toolport gateway (HTTP mode).\n\
              OpenAPI: GET /openapi.json, POST /{tool_name} with a JSON body.\n\
-             MCP streamable-HTTP: POST /mcp with JSON-RPC (initialize, tools/list, tools/call).\n\
+             MCP streamable-HTTP: POST /mcp with JSON-RPC; GET /mcp for server→client SSE.\n\
              Auth: Authorization: Bearer <CONDUIT_HTTP_TOKEN>."
                 .to_string(),
         ),
@@ -4028,6 +4210,54 @@ fn reap_finished_workers(workers: &mut Vec<std::thread::JoinHandle<()>>) {
     }
 }
 
+fn respond_mcp_sse_listen(
+    request: tiny_http::Request,
+    out: HttpOut,
+    allow_headers: String,
+) {
+    let Some(session) = out.mcp_listen else {
+        let mut response =
+            tiny_http::Response::from_string(out.body).with_status_code(out.status);
+        if let Ok(h) = tiny_http::Header::from_bytes(b"Content-Type", out.ctype.as_bytes()) {
+            response = response.with_header(h);
+        }
+        let _ = request.respond(response);
+        return;
+    };
+
+    let mut headers = vec![
+        tiny_http::Header::from_bytes(b"Content-Type", b"text/event-stream").unwrap(),
+        tiny_http::Header::from_bytes(b"Cache-Control", b"no-cache").unwrap(),
+        tiny_http::Header::from_bytes(b"Access-Control-Allow-Origin", b"*").unwrap(),
+        tiny_http::Header::from_bytes(
+            b"Access-Control-Allow-Methods",
+            b"GET, POST, DELETE, OPTIONS",
+        )
+        .unwrap(),
+        tiny_http::Header::from_bytes(b"Access-Control-Allow-Headers", allow_headers.as_bytes())
+            .unwrap(),
+        tiny_http::Header::from_bytes(b"Access-Control-Expose-Headers", b"Mcp-Session-Id").unwrap(),
+    ];
+    for (name, value) in out.extra {
+        let safe = sanitize_header_value(&value);
+        if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), safe.as_bytes()) {
+            headers.push(h);
+        }
+    }
+
+    let reader = McpSseReader::new(session);
+    let response = tiny_http::Response::new(
+        tiny_http::StatusCode(200),
+        headers,
+        reader,
+        None,
+        None,
+    )
+    .with_chunked_threshold(0)
+    .boxed();
+    let _ = request.respond(response);
+}
+
 fn serve_http_loop(
     server: tiny_http::Server,
     state: GatewayState,
@@ -4159,6 +4389,11 @@ fn handle_connection(
                 }
             }
         };
+
+        if out.mcp_listen.is_some() {
+            respond_mcp_sse_listen(request, out, allow_headers);
+            return;
+        }
 
         let mut response = tiny_http::Response::from_string(out.body).with_status_code(out.status);
         let cors: [(&[u8], &[u8]); 5] = [
@@ -5254,7 +5489,112 @@ mod tests {
     }
 
     #[test]
-    fn mcp_http_get_returns_405() {
+    fn mcp_http_get_opens_listen_stream() {
+        let state = http_state(true);
+        let search = SearchGuard::default();
+        let confirm = ConfirmGuard::new();
+        let init = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": { "name": "test", "version": "0" }
+                }
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let sid = mcp_session_of(&init);
+        let out = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "GET",
+            "/mcp",
+            "",
+            Some(&sid),
+            Some("text/event-stream"),
+            None,
+            None,
+        );
+        assert_eq!(out.status, 200);
+        assert_eq!(out.ctype, "text/event-stream");
+        assert!(out.is_mcp_listen());
+    }
+
+    #[test]
+    fn mcp_http_get_without_sse_accept_returns_406() {
+        let state = http_state(true);
+        let search = SearchGuard::default();
+        let confirm = ConfirmGuard::new();
+        let init = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": { "name": "test", "version": "0" }
+                }
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let sid = mcp_session_of(&init);
+        let out = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "GET",
+            "/mcp",
+            "",
+            Some(&sid),
+            Some("application/json"),
+            None,
+            None,
+        );
+        assert_eq!(out.status, 406);
+    }
+
+    #[test]
+    fn mcp_push_server_message_queues_sse_payload() {
+        let state = http_state(true);
+        let sid = mint_mcp_session(&state).ok().unwrap();
+        let msg = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
+        assert!(mcp_push_server_message(&state, &sid, &msg));
+        let sessions = state.mcp_sessions.lock().unwrap();
+        let session = sessions.get(&sid).unwrap();
+        let mut reader = McpSseReader::new(Arc::clone(session));
+        let mut buf = [0u8; 512];
+        let n = reader.read(&mut buf).unwrap();
+        assert!(n > 0);
+        let chunk = String::from_utf8_lossy(&buf[..n]);
+        assert!(chunk.contains("event: message"));
+        assert!(chunk.contains("tools/list_changed"));
+    }
+
+    #[test]
+    fn mcp_http_get_without_session_returns_400() {
         let state = http_state(true);
         let out = handle_http(
             &state,
@@ -5264,11 +5604,11 @@ mod tests {
             "/mcp",
             "",
             None,
-            None,
+            Some("text/event-stream"),
             None,
             None,
         );
-        assert_eq!(out.status, 405);
+        assert_eq!(out.status, 400);
     }
 
     #[test]

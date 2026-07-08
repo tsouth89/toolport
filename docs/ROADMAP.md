@@ -84,11 +84,10 @@ low real exposure since the gateway only writes when `allow_agent_control` is on
       profiles. (M)
 - [ ] **Opt-in** OTel/Prometheus exporter (`/metrics` or OTLP push), OFF by default
       so zero-infra stays the default experience; keep the in-app dashboard primary. (M)
-- [~] **Streamable-HTTP upstream transport** — `POST /mcp` on the HTTP bridge ships
+- [~] **Streamable-HTTP upstream transport** — `POST /mcp` and `GET /mcp` listen stream ship
   (session ids, JSON-RPC, selective SSE responses; see `docs/headless.md` +
   `docker-compose.example.yml`). OpenAPI HTTP mode already shipped for Open WebUI.
-  Remaining: long-lived `GET /mcp` listen stream and server→client RPC passthrough
-  (sampling / elicitation / roots; #167). (M)
+  Remaining: server→client RPC passthrough (sampling / elicitation / roots; #167). (M)
 
 **Strategic**
 
