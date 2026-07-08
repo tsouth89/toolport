@@ -9,9 +9,12 @@
 //! The HTTP calls (join/pull/push) are thin; the value and the risk live in the merge,
 //! which is pure and unit-tested below.
 
-use serde_json::Value;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use serde_json::{json, Value};
 
 use crate::registry::{EnvVar, Registry, ServerEntry, TeamConnection};
+use crate::usage_report;
 
 /// Reserved keychain slot for the member bearer token (one team connection at a time).
 pub const TEAM_TOKEN_SERVER: &str = "__conduit_team__";
@@ -219,6 +222,30 @@ pub fn push_config(server_url: &str, team_id: &str, token: &str, config: &Value)
         .ok_or_else(|| "team server did not return a version after push".to_string())
 }
 
+/// Report one UTC day's usage rollup (counts + estimates only, see `usage_report`).
+/// `Ok(true)` means the server recorded it; `Ok(false)` means the server predates the
+/// usage endpoint (404), mirroring `MembershipCheck::Unsupported` so a new client
+/// still works against an old self-hosted server.
+fn post_usage_day(
+    server_url: &str,
+    team_id: &str,
+    token: &str,
+    day: &str,
+    rows: Vec<Value>,
+) -> Result<bool, String> {
+    require_secure_team_url(server_url)?;
+    let url = format!("{}/teams/{}/usage", base(server_url), team_id);
+    match agent()
+        .post(&url)
+        .set("authorization", &format!("Bearer {token}"))
+        .send_json(json!({ "day": day, "rows": rows }))
+    {
+        Ok(_) => Ok(true),
+        Err(ureq::Error::Status(404 | 405, _)) => Ok(false),
+        Err(e) => Err(stringify(e)),
+    }
+}
+
 fn stringify(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, resp) => {
@@ -254,6 +281,7 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
         member_name: member_name.map(String::from),
         last_version: 0,
         last_etag: None,
+        usage_reported: HashMap::new(),
     };
     reg.team = Some(conn);
     let mut outcome = MergeOutcome::default();
@@ -363,11 +391,123 @@ fn sync_inner(wait_secs: u64) -> Result<SyncResult, String> {
         t.role = role.clone();
     }
     crate::registry::save(&reg)?;
+    // Best-effort showback after the config work: report today's/yesterday's per-server
+    // usage rollup to the team server. Any failure here must never affect the sync
+    // result — the member's config is already applied and saved.
+    report_usage(&conn, &token);
     Ok(SyncResult::Ok {
         role,
         role_changed,
         applied,
     })
+}
+
+/// Merge a fresh local rollup with what was already reported for that day, taking the
+/// max per counter. The local logs only grow within a day, so a SMALLER local number
+/// means a log rotation trimmed history — and since the server's `record_usage`
+/// upserts by replacement, re-sending the shrunken count would erase usage the server
+/// already recorded. Max is always the authoritative daily total.
+fn merge_reported(
+    local: &BTreeMap<String, usage_report::Row>,
+    reported: Option<&HashMap<String, [u64; 2]>>,
+) -> HashMap<String, [u64; 2]> {
+    let mut merged: HashMap<String, [u64; 2]> = reported.cloned().unwrap_or_default();
+    for (server, row) in local {
+        let e = merged.entry(server.clone()).or_insert([0, 0]);
+        e[0] = e[0].max(row.calls);
+        e[1] = e[1].max(row.tokens_saved);
+    }
+    merged
+}
+
+/// Best-effort usage showback: roll up today + yesterday (UTC) for THIS team's servers
+/// only (`source = "team:<id>"` — a member's personal servers are never reported) and
+/// POST the rollups. Counts and token/dollar estimates only; tool names stay local
+/// (rows are per server). Skips silently when there is nothing new, the server is too
+/// old for the endpoint, or the network is down — never fails the sync it rides on.
+fn report_usage(conn: &TeamConnection, token: &str) {
+    let tag = tag_for(&conn.team_id);
+    let (team_servers, reported) = {
+        let Ok(reg) = crate::registry::load() else { return };
+        // The user disconnected or switched teams mid-sync: report nothing.
+        match reg.team.as_ref() {
+            Some(t) if t.team_id == conn.team_id => {}
+            _ => return,
+        }
+        let ids: HashSet<String> = reg
+            .servers
+            .iter()
+            .filter(|s| s.source.as_deref() == Some(tag.as_str()))
+            .map(|s| s.id.clone())
+            .collect();
+        let reported = reg
+            .team
+            .as_ref()
+            .map(|t| t.usage_reported.clone())
+            .unwrap_or_default();
+        (ids, reported)
+    };
+    if team_servers.is_empty() {
+        return;
+    }
+    let audit_lines = crate::audit::read_recent(usize::MAX);
+    let savings_lines = crate::savings::entries();
+    let mut new_state: HashMap<String, HashMap<String, [u64; 2]>> = HashMap::new();
+    let mut changed = false;
+    for back in 0..2u64 {
+        let day = usage_report::utc_day_back(back);
+        let local = usage_report::rollup(&day, &audit_lines, &savings_lines, &team_servers);
+        let merged = merge_reported(&local, reported.get(&day));
+        if merged.is_empty() {
+            continue;
+        }
+        if reported.get(&day) == Some(&merged) {
+            // Nothing new since the last successful report: keep the watermark, skip
+            // the POST so an idle 5-minute background sync costs the server nothing.
+            new_state.insert(day, merged);
+            continue;
+        }
+        let rows: Vec<Value> = merged
+            .iter()
+            .map(|(server, [calls, saved])| {
+                json!({
+                    "server": server,
+                    "calls": calls,
+                    "tokens_saved": saved,
+                    "est_cost": usage_report::est_cost(*saved),
+                })
+            })
+            .collect();
+        match post_usage_day(&conn.server_url, &conn.team_id, token, &day, rows) {
+            Ok(true) => {
+                new_state.insert(day, merged);
+                changed = true;
+            }
+            // Old server without the endpoint: nothing to persist, don't retry the
+            // other day either.
+            Ok(false) => return,
+            // Transient failure: keep the previous watermark for this day so the next
+            // sync re-sends the full daily total.
+            Err(_) => {
+                if let Some(prev) = reported.get(&day) {
+                    new_state.insert(day, prev.clone());
+                }
+            }
+        }
+    }
+    if !changed {
+        return;
+    }
+    // Persist the watermarks on a FRESH registry (same clobber-avoidance as sync_inner:
+    // the POSTs above are network round trips another command may have raced past).
+    // `new_state` only ever holds today + yesterday, so old days prune themselves.
+    let Ok(mut reg) = crate::registry::load() else { return };
+    if let Some(t) = reg.team.as_mut() {
+        if t.team_id == conn.team_id {
+            t.usage_reported = new_state;
+            let _ = crate::registry::save(&reg);
+        }
+    }
 }
 
 /// Leave the team: remove its merged servers, clear the connection and the token.
@@ -707,6 +847,30 @@ pub fn remove_team(reg: &mut Registry, team_id: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn merge_reported_takes_the_max_per_counter() {
+        // A log rotation can shrink the local rollup mid-day; the already-reported
+        // watermark must win so the re-send never erases counts the server has.
+        let mut local = BTreeMap::new();
+        local.insert("github".to_string(), usage_report::Row { calls: 3, tokens_saved: 900 });
+        local.insert("stripe".to_string(), usage_report::Row { calls: 7, tokens_saved: 0 });
+        let mut reported = HashMap::new();
+        reported.insert("github".to_string(), [10, 100]); // rotation ate 7 calls; saved grew
+        let merged = merge_reported(&local, Some(&reported));
+        assert_eq!(merged["github"], [10, 900]); // max per counter, independently
+        assert_eq!(merged["stripe"], [7, 0]); // new server passes through
+    }
+
+    #[test]
+    fn merge_reported_keeps_servers_the_rollup_no_longer_sees() {
+        // A server reported earlier today then trimmed from the logs entirely must
+        // survive the merge, or the replacement upsert would zero it server-side.
+        let mut reported = HashMap::new();
+        reported.insert("github".to_string(), [5, 50]);
+        let merged = merge_reported(&BTreeMap::new(), Some(&reported));
+        assert_eq!(merged["github"], [5, 50]);
+    }
 
     fn base_registry() -> Registry {
         let mut r = Registry::default();

@@ -343,6 +343,12 @@ pub struct TeamConnection {
     /// carries a per-member suffix that a reconstructed "v{n}" would never match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_etag: Option<String>,
+    /// Usage rows already reported to the team server, "YYYY-MM-DD" (UTC) -> server id ->
+    /// [calls, tokens_saved]. The next report sends max(local rollup, this), so a local
+    /// log rotation mid-day can never shrink a count the server already has. Pruned to
+    /// the report window (today + yesterday) on every successful report.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub usage_reported: HashMap<String, HashMap<String, [u64; 2]>>,
 }
 
 /// Settings for embedding-based search re-ranking. The embedding API key, if the
