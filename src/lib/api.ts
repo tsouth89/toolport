@@ -343,6 +343,15 @@ export function teamSync(): Promise<Registry> {
   return invoke<Registry>("team_sync");
 }
 
+/**
+ * Long-polling sync: parks on the server for up to `waitSecs` and returns the instant the
+ * team config view changes (or the wait elapses), so a dashboard policy edit enforces in
+ * ~1s. Drive it in a loop; it returns like {@link teamSync}.
+ */
+export function teamSyncWait(waitSecs: number): Promise<Registry> {
+  return invoke<Registry>("team_sync_wait", { waitSecs });
+}
+
 /** Leave the team: remove its merged servers and clear the saved token. */
 export function teamDisconnect(): Promise<Registry> {
   return invoke<Registry>("team_disconnect");

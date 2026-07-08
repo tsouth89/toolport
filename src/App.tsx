@@ -30,7 +30,7 @@ import {
   removeServer,
   setAllEnabled,
   setServerEnabled,
-  teamSync,
+  teamSyncWait,
 } from "@/lib/api";
 import {
   importableServers,
@@ -246,36 +246,48 @@ function App() {
     };
   }, []);
 
-  // Keep a team member's shared server set AND security policy current even if they
-  // never open the Teams tab: an admin tightening a force-quarantine / approval policy
-  // must reach every member, not just those who happen to click "Sync now". Runs on
-  // connect and on a modest interval; cheap when unchanged (the server 304s on an
-  // unchanged config), and not tied to the Teams view. Keyed on the team id so it
+  // Keep a team member's shared server set AND security policy current even if they never
+  // open the Teams tab: an admin tightening a force-quarantine / approval policy must reach
+  // every member near-instantly, not just those who happen to click "Sync now". This runs a
+  // continuous long-poll: each call parks on the server for up to WAIT_SECS and returns the
+  // instant the team config view changes (or the wait elapses), so a dashboard edit lands in
+  // ~1s while staying cheap when idle. Not tied to the Teams view. Keyed on the team id so it
   // starts on connect and tears down on disconnect/removal.
   const teamId = registry?.team?.teamId;
   useEffect(() => {
     if (!teamId) return;
     let cancelled = false;
-    let running = false;
-    const tick = async () => {
-      if (running || cancelled) return;
-      running = true;
-      try {
-        const fresh = await teamSync();
-        if (!cancelled) setRegistry(fresh);
-      } catch {
-        // A transient network error is fine; the next tick retries. Removal is a clean
-        // 401/403 the backend turns into a cleared team + the team-removed event, not a
-        // throw, so it won't land here.
-      } finally {
-        running = false;
+    const WAIT_SECS = 25;
+    // Floor between re-parks. A change is applied the instant it arrives (below), so this only
+    // paces the NEXT poll, never delays enforcement. It also keeps us gentle against an OLDER
+    // server that doesn't support `?wait` and so returns immediately: without a floor that would
+    // be a hot loop; with it, an old server degrades to a polite ~3s poll.
+    const FLOOR_MS = 3000;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const loop = async () => {
+      while (!cancelled) {
+        const started = Date.now();
+        try {
+          const fresh = await teamSyncWait(WAIT_SECS);
+          if (cancelled) break;
+          setRegistry(fresh);
+        } catch {
+          // Network blip or server down: back off before re-parking so we don't spin.
+          // Removal is a clean 401/403 the backend turns into a cleared team + the
+          // team-removed event, not a throw, so it won't land here.
+          if (cancelled) break;
+          await sleep(15000);
+          continue;
+        }
+        // If the call returned well before the wait window (a real change, already applied
+        // above, or an old server ignoring `?wait`), pace the next park.
+        const elapsed = Date.now() - started;
+        if (!cancelled && elapsed < FLOOR_MS) await sleep(FLOOR_MS - elapsed);
       }
     };
-    void tick();
-    const id = setInterval(tick, 5 * 60 * 1000);
+    void loop();
     return () => {
       cancelled = true;
-      clearInterval(id);
     };
   }, [teamId]);
 

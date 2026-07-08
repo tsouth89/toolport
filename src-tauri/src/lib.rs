@@ -1260,21 +1260,45 @@ fn team_connect(
 #[tauri::command]
 fn team_sync(app: tauri::AppHandle, state: State<RegistryState>) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    match teams::sync_now()? {
+    finish_sync(&app, state.inner(), teams::sync_now()?)
+}
+
+/// Long-polling sync for the member's background loop: the config pull parks on the server
+/// for up to `wait_secs` (clamped) and returns the instant the team config view changes, so
+/// a dashboard policy edit enforces in ~1s instead of at the next interval. Otherwise
+/// identical to [`team_sync`]; the frontend re-invokes it in a loop.
+#[tauri::command]
+fn team_sync_wait(
+    app: tauri::AppHandle,
+    state: State<RegistryState>,
+    wait_secs: u64,
+) -> Result<Registry, String> {
+    flush_to_disk(state.inner())?;
+    finish_sync(&app, state.inner(), teams::sync_wait(wait_secs.min(30))?)
+}
+
+/// Apply a sync result to the shared registry state and tell the UI what happened. Shared by
+/// the immediate ([`team_sync`]) and long-polling ([`team_sync_wait`]) commands.
+fn finish_sync(
+    app: &tauri::AppHandle,
+    state: &RegistryState,
+    result: teams::SyncResult,
+) -> Result<Registry, String> {
+    match result {
         teams::SyncResult::Removed => {
-            // The member was removed; sync_now already cleared the local team. Reload
-            // so the UI drops the team, and tell it why so it can surface a notice
-            // rather than the raw error the config pull used to throw.
-            let fresh = reload_into_state(state.inner())?;
-            nudge_gateway(state.inner());
+            // The member was removed; sync already cleared the local team. Reload so the UI
+            // drops the team, and tell it why so it can surface a notice rather than the raw
+            // error the config pull used to throw.
+            let fresh = reload_into_state(state)?;
+            nudge_gateway(state);
             let _ = app.emit("team-removed", serde_json::json!({}));
             Ok(fresh)
         }
         teams::SyncResult::Ok { applied, .. } => {
             let outcome = applied.map(|(_, o)| o).unwrap_or_default();
-            let fresh = reload_into_state(state.inner())?;
-            nudge_gateway(state.inner());
-            emit_team_review(&app, outcome);
+            let fresh = reload_into_state(state)?;
+            nudge_gateway(state);
+            emit_team_review(app, outcome);
             Ok(fresh)
         }
     }
@@ -2180,6 +2204,7 @@ pub fn run() {
             set_allow_agent_control,
             team_connect,
             team_sync,
+            team_sync_wait,
             team_disconnect,
             team_push,
             set_auth_token,

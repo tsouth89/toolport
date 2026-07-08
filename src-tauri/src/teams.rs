@@ -65,8 +65,15 @@ fn require_secure_team_url(server_url: &str) -> Result<(), String> {
 /// command thread, so a slow or black-holed team server must not hang the UI: bare
 /// `ureq::get/post/put` have no timeout, this does.
 fn agent() -> ureq::Agent {
+    agent_with_timeout(30)
+}
+
+/// A ureq agent with an explicit total timeout. A long-poll config pull needs a client
+/// timeout comfortably above the server's `wait` window, so the server (not the client)
+/// decides when to return.
+fn agent_with_timeout(secs: u64) -> ureq::Agent {
     ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(secs))
         .build()
 }
 
@@ -105,16 +112,27 @@ pub fn pull_config(
     token: &str,
     last_version: i64,
     last_etag: Option<&str>,
+    wait_secs: u64,
 ) -> Result<Option<(i64, Value, Option<String>)>, String> {
     require_secure_team_url(server_url)?;
-    let url = format!("{}/teams/{}/config", base(server_url), team_id);
+    let mut url = format!("{}/teams/{}/config", base(server_url), team_id);
+    // Long-poll: ask the server to hold the request until the team config view changes (or
+    // `wait_secs` elapses), so a dashboard policy edit reaches us in ~1s instead of at the
+    // next cycle. Give the client a timeout above the server's window so the server decides
+    // when to return; a 304/200 the moment something changes.
+    let ag = if wait_secs > 0 {
+        url.push_str(&format!("?wait={wait_secs}"));
+        agent_with_timeout(wait_secs + 10)
+    } else {
+        agent()
+    };
     // Echo the exact ETag the server last gave us. A restricted member's ETag carries a
     // per-member access suffix ("v{n}-m{hash}"), so a reconstructed "v{n}" would never
     // 304 for them; fall back to "v{n}" only before we've ever stored one.
     let etag = last_etag
         .map(str::to_string)
         .unwrap_or_else(|| format!("\"v{last_version}\""));
-    let req = agent()
+    let req = ag
         .get(&url)
         .set("authorization", &format!("Bearer {token}"))
         .set("if-none-match", &etag);
@@ -240,7 +258,7 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
     reg.team = Some(conn);
     let mut outcome = MergeOutcome::default();
     if let Some((version, cfg, etag)) =
-        pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0, None)?
+        pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0, None, 0)?
     {
         outcome = apply_team_config(&mut reg, &joined.team_id, &cfg);
         if let Some(t) = reg.team.as_mut() {
@@ -270,6 +288,18 @@ pub enum SyncResult {
 }
 
 pub fn sync_now() -> Result<SyncResult, String> {
+    sync_inner(0)
+}
+
+/// Long-polling variant of [`sync_now`]: the config pull parks on the server for up to
+/// `wait_secs`, returning the instant the team's config view changes so a dashboard policy
+/// edit enforces in about a second. The membership heartbeat still runs first each cycle,
+/// so removal and role changes are caught at least once per cycle. The caller loops.
+pub fn sync_wait(wait_secs: u64) -> Result<SyncResult, String> {
+    sync_inner(wait_secs)
+}
+
+fn sync_inner(wait_secs: u64) -> Result<SyncResult, String> {
     // Snapshot only what the network calls need; do NOT hold this copy to save later.
     let conn = {
         let reg = crate::registry::load()?;
@@ -300,6 +330,7 @@ pub fn sync_now() -> Result<SyncResult, String> {
         &token,
         conn.last_version,
         conn.last_etag.as_deref(),
+        wait_secs,
     )?;
 
     // Re-load a FRESH registry now, AFTER the (possibly multi-second) network round
