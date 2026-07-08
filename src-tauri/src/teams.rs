@@ -536,35 +536,27 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
         }
     }
 
-    // 4. Policy can only tighten safety.
-    if team_cfg.get("denyDestructive").and_then(Value::as_bool) == Some(true) {
-        reg.deny_destructive = true;
-    }
-
-    // 5. Screening policy is tighten-only as well: the org can force content defense,
-    //    drift-quarantine, and human approval ON, but a member can never be loosened by a
-    //    team config. A missing policy or a `false` flag is a no-op (it does not turn a
-    //    member's own toggle off), so this only ever raises the member's safety posture.
-    if let Some(sp) = team_cfg.get("screeningPolicy") {
-        if sp.get("forceContentDefense").and_then(Value::as_bool) == Some(true) {
-            reg.content_defense = true;
-        }
-        if sp.get("forceQuarantineOnDrift").and_then(Value::as_bool) == Some(true) {
-            reg.quarantine_on_drift = true;
-        }
-    }
-    // Org-mandated human-in-the-loop: recorded in a SEPARATE, releasable lock rather than
-    // baked into the member's own `human_approval`. The old code set `reg.human_approval = true`
-    // with no release path, so an org lock outlived the team the member left, and no local
-    // toggle could clear it. Recompute from the policy on every sync (the org emits its
-    // screening policy on every push, so an absent flag means "not forced"); `remove_team`
-    // clears it on leave. The member's OWN toggle is never touched by a team config, preserving
-    // "the org can tighten but never loosen a member's own choice."
-    reg.team_forced_human_approval = team_cfg
-        .get("screeningPolicy")
-        .and_then(|sp| sp.get("forceHumanApproval"))
-        .and_then(Value::as_bool)
-        == Some(true);
+    // Team-forced safety is recorded ENTIRELY in separate, releasable overlays (see the
+    // registry field docs), never baked into the member's own settings. The old code set e.g.
+    // `reg.human_approval = true` (and the same for deny/defense/quarantine) with no release
+    // path, so an org lock outlived the team the member left, and no local toggle could clear
+    // it. Recompute every flag from the CURRENT team config on each sync (the org emits its
+    // full policy on every push, so an absent flag means "not forced"); `remove_team` clears
+    // them on leave. The member's OWN toggles are never touched, preserving "the org can
+    // tighten but never loosen a member's own choice." Enforcement reads the `*_effective()`
+    // helpers (own OR team-forced).
+    let policy_forces = |key: &str| {
+        team_cfg
+            .get("screeningPolicy")
+            .and_then(|sp| sp.get(key))
+            .and_then(Value::as_bool)
+            == Some(true)
+    };
+    reg.team_forced_deny_destructive =
+        team_cfg.get("denyDestructive").and_then(Value::as_bool) == Some(true);
+    reg.team_forced_content_defense = policy_forces("forceContentDefense");
+    reg.team_forced_quarantine_on_drift = policy_forces("forceQuarantineOnDrift");
+    reg.team_forced_human_approval = policy_forces("forceHumanApproval");
 
     outcome
 }
@@ -671,10 +663,13 @@ pub fn remove_team(reg: &mut Registry, team_id: &str) {
     for p in &mut reg.profiles {
         p.enabled_server_ids.retain(|id| !ids.contains(id));
     }
-    // Release the org's human-approval lock: the member is no longer in this team, so an
-    // org-forced HITL policy must not keep gating their calls. Their OWN `human_approval`
-    // setting is left untouched.
+    // Release ALL of this team's forced safety locks: the member is no longer in the team, so
+    // an org-forced policy (HITL, destructive-block, content defense, drift-quarantine) must not
+    // keep applying. Their OWN settings are left untouched.
     reg.team_forced_human_approval = false;
+    reg.team_forced_deny_destructive = false;
+    reg.team_forced_content_defense = false;
+    reg.team_forced_quarantine_on_drift = false;
 }
 
 #[cfg(test)]
@@ -766,17 +761,25 @@ mod tests {
     }
 
     #[test]
-    fn policy_can_tighten_but_never_loosen() {
+    fn team_forced_deny_destructive_is_releasable_and_leaves_the_member_untouched() {
         let mut r = base_registry();
-        r.deny_destructive = false;
+        r.deny_destructive = false; // member's own choice: off
         apply_team_config(&mut r, "t1", &json!({ "servers": [], "denyDestructive": true }));
-        assert!(r.deny_destructive, "team policy tightened safety");
+        assert!(r.team_forced_deny_destructive, "org force recorded separately");
+        assert!(!r.deny_destructive, "member's own setting is untouched");
+        assert!(r.deny_destructive_effective(), "enforced while the org forces it");
+        // Org drops the flag -> released, gate follows the member's own (off).
         apply_team_config(&mut r, "t1", &json!({ "servers": [] }));
-        assert!(r.deny_destructive, "absence of the flag never loosens an existing lock");
+        assert!(!r.deny_destructive_effective(), "org released the lock");
+        // And leaving the team releases it too.
+        apply_team_config(&mut r, "t1", &json!({ "servers": [], "denyDestructive": true }));
+        remove_team(&mut r, "t1");
+        assert!(!r.team_forced_deny_destructive, "leaving clears the lock");
+        assert!(!r.deny_destructive_effective());
     }
 
     #[test]
-    fn screening_policy_tightens_defense_and_drift_but_never_loosens_them() {
+    fn forced_content_defense_and_drift_quarantine_are_releasable() {
         let mut r = base_registry();
         r.content_defense = false;
         r.quarantine_on_drift = false;
@@ -789,23 +792,56 @@ mod tests {
                 "forceQuarantineOnDrift": true,
             }}),
         );
-        assert!(r.content_defense, "org policy forced content defense on");
-        assert!(r.quarantine_on_drift, "org policy forced drift-quarantine on");
+        assert!(r.content_defense_effective(), "org forced content defense on");
+        assert!(r.quarantine_on_drift_effective(), "org forced drift-quarantine on");
+        assert!(!r.content_defense, "member's own content-defense is untouched");
 
-        // A false or absent flag never turns those two back off (still tighten-only bake-in).
+        // Org dropping the policy releases both to the member's own (off), no permanent lock.
+        apply_team_config(&mut r, "t1", &json!({ "servers": [] }));
+        assert!(!r.content_defense_effective(), "content defense released");
+        assert!(!r.quarantine_on_drift_effective(), "drift-quarantine released");
+    }
+
+    #[test]
+    fn leaving_a_team_releases_every_forced_safety_lock() {
+        let mut r = base_registry();
+        // Member's OWN settings all off, so "effective" is driven purely by the org lock
+        // (content_defense defaults on, so set it explicitly to isolate the forced overlay).
+        r.human_approval = false;
+        r.deny_destructive = false;
+        r.content_defense = false;
+        r.quarantine_on_drift = false;
         apply_team_config(
             &mut r,
             "t1",
-            &json!({ "servers": [], "screeningPolicy": {
-                "forceContentDefense": false,
-                "forceQuarantineOnDrift": false,
+            &json!({ "servers": [], "denyDestructive": true, "screeningPolicy": {
+                "forceHumanApproval": true,
+                "forceContentDefense": true,
+                "forceQuarantineOnDrift": true,
             }}),
         );
-        assert!(r.content_defense, "false flag never loosens content defense");
-        assert!(r.quarantine_on_drift, "false flag never loosens drift-quarantine");
-        apply_team_config(&mut r, "t1", &json!({ "servers": [] }));
-        assert!(r.content_defense, "absent policy never loosens content defense");
-        assert!(r.quarantine_on_drift, "absent policy never loosens drift-quarantine");
+        assert!(
+            r.human_approval_effective()
+                && r.deny_destructive_effective()
+                && r.content_defense_effective()
+                && r.quarantine_on_drift_effective(),
+            "all four enforced while in the team"
+        );
+        remove_team(&mut r, "t1");
+        assert!(
+            !r.team_forced_human_approval
+                && !r.team_forced_deny_destructive
+                && !r.team_forced_content_defense
+                && !r.team_forced_quarantine_on_drift,
+            "leaving clears every org lock"
+        );
+        assert!(
+            !r.human_approval_effective()
+                && !r.deny_destructive_effective()
+                && !r.content_defense_effective()
+                && !r.quarantine_on_drift_effective(),
+            "no team -> every flag follows the member's own (off) settings"
+        );
     }
 
     #[test]

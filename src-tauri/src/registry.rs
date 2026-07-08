@@ -221,6 +221,17 @@ pub struct Registry {
     /// The gate holds a call when either is true (see [`Registry::human_approval_effective`]).
     #[serde(default)]
     pub team_forced_human_approval: bool,
+    /// The same releasable org-lock treatment as [`team_forced_human_approval`] for the other
+    /// tighten-only screening flags (`denyDestructive`, `forceContentDefense`,
+    /// `forceQuarantineOnDrift`). Set from the active team's policy, recomputed each sync and
+    /// cleared on leave, so an org lock never permanently overwrites the member's own setting.
+    /// Enforcement reads `*_effective()` (member's own OR team-forced).
+    #[serde(default)]
+    pub team_forced_deny_destructive: bool,
+    #[serde(default)]
+    pub team_forced_content_defense: bool,
+    #[serde(default)]
+    pub team_forced_quarantine_on_drift: bool,
     /// Per-tool exposure overrides, keyed by server id then ORIGINAL tool name (not the
     /// exposed name, so a rename or `_2` collision suffix can't misalign the key): rename or
     /// re-describe a tool as clients see it (e.g. neutralize a poisoned description). The
@@ -381,6 +392,9 @@ impl Default for Registry {
             human_approval: false,
             human_approval_allow: Vec::new(),
             team_forced_human_approval: false,
+            team_forced_deny_destructive: false,
+            team_forced_content_defense: false,
+            team_forced_quarantine_on_drift: false,
             tool_overrides: HashMap::new(),
             pinned_tools: HashMap::new(),
             quarantine_on_drift: false,
@@ -605,6 +619,18 @@ impl Registry {
     /// permanently overwriting the member's own choice.
     pub fn human_approval_effective(&self) -> bool {
         self.human_approval || self.team_forced_human_approval
+    }
+
+    /// Effective (member's own OR team-forced) values for the other tighten-only safety flags,
+    /// so an org lock is releasable on leave instead of permanently overwriting the member's own.
+    pub fn deny_destructive_effective(&self) -> bool {
+        self.deny_destructive || self.team_forced_deny_destructive
+    }
+    pub fn content_defense_effective(&self) -> bool {
+        self.content_defense || self.team_forced_content_defense
+    }
+    pub fn quarantine_on_drift_effective(&self) -> bool {
+        self.quarantine_on_drift || self.team_forced_quarantine_on_drift
     }
 
     /// Add a `server/tool` key to the persistent "always allow" list, so the HITL gate
