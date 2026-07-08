@@ -3114,18 +3114,34 @@ impl StdioUpstream {
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id_key, tx);
+            .insert(id_key.clone(), tx);
         let req = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let mut out = self
-            .stdout
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        writeln!(out, "{req}").map_err(|e| e.to_string())?;
-        out.flush().map_err(|e| e.to_string())?;
-        drop(out);
-        let resp = rx
-            .recv_timeout(timeout)
-            .map_err(|_| "upstream client did not answer".to_string())?;
+        let send = {
+            let mut out = self
+                .stdout
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            writeln!(out, "{req}")
+                .and_then(|_| out.flush())
+                .map_err(|e| e.to_string())
+        };
+        if let Err(e) = send {
+            self.pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id_key);
+            return Err(e);
+        }
+        let resp = match rx.recv_timeout(timeout) {
+            Ok(v) => v,
+            Err(_) => {
+                self.pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&id_key);
+                return Err("upstream client did not answer".to_string());
+            }
+        };
         if let Some(err) = resp.get("error") {
             return Err(err.to_string());
         }
@@ -3197,13 +3213,29 @@ impl McpSession {
         self.upstream_pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id_key, tx);
+            .insert(id_key.clone(), tx);
         let req = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let json_str = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+        let json_str = match serde_json::to_string(&req) {
+            Ok(s) => s,
+            Err(e) => {
+                self.upstream_pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&id_key);
+                return Err(e.to_string());
+            }
+        };
         self.push_message(json_str);
-        let resp = rx
-            .recv_timeout(timeout)
-            .map_err(|_| "upstream MCP client did not answer".to_string())?;
+        let resp = match rx.recv_timeout(timeout) {
+            Ok(v) => v,
+            Err(_) => {
+                self.upstream_pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&id_key);
+                return Err("upstream MCP client did not answer".to_string());
+            }
+        };
         if let Some(err) = resp.get("error") {
             return Err(err.to_string());
         }
@@ -3420,6 +3452,7 @@ fn cancellation_reason(req: &Value) -> Option<&str> {
 }
 
 fn capture_client_upstream_from_init(state: &mut ClientUpstreamCaps, params: Option<&Value>) {
+    *state = ClientUpstreamCaps::default();
     let Some(params) = params else {
         return;
     };
@@ -3478,6 +3511,17 @@ fn upstream_json_rpc_response(id: Value, result: Result<Value, String>) -> Value
     }
 }
 
+fn upstream_client_unsupported(id: Value, method: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32601,
+            "message": format!("upstream client does not support {method}")
+        }
+    })
+}
+
 fn make_server_request_handler(
     client_upstream: Arc<Mutex<ClientUpstreamCaps>>,
     stdio_upstream: Arc<StdioUpstream>,
@@ -3493,28 +3537,31 @@ fn make_server_request_handler(
             return None;
         }
         let id = req.get("id")?.clone();
-        if !client_upstream
-            .lock()
-            .map(|caps| client_supports_server_rpc(&caps, method))
-            .unwrap_or(false)
-        {
-            return Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {
-                    "code": -32601,
-                    "message": format!("upstream client does not support {method}")
-                }
-            }));
-        }
         let params = upstream_rpc_params(method, req);
         let timeout = upstream_rpc_timeout(method);
         let result = if http {
             let sid = ACTIVE_MCP_SESSION.with(|cell| cell.borrow().clone())?;
-            let sessions = mcp_sessions.lock().ok()?;
-            let session = sessions.get(&sid)?;
+            let session = {
+                let sessions = mcp_sessions.lock().ok()?;
+                sessions.get(&sid).cloned()?
+            };
+            let supported = session
+                .client_upstream
+                .lock()
+                .map(|caps| client_supports_server_rpc(&caps, method))
+                .unwrap_or(false);
+            if !supported {
+                return Some(upstream_client_unsupported(id, method));
+            }
             session.upstream_call_timeout(method, params, timeout)
         } else {
+            let supported = client_upstream
+                .lock()
+                .map(|caps| client_supports_server_rpc(&caps, method))
+                .unwrap_or(false);
+            if !supported {
+                return Some(upstream_client_unsupported(id, method));
+            }
             stdio_upstream.call_timeout(method, params, timeout)
         };
         Some(upstream_json_rpc_response(id, result))
@@ -5089,6 +5136,18 @@ mod tests {
         assert!(state.elicitation);
         assert_eq!(state.roots.roots.len(), 1);
         assert_eq!(state.roots.roots[0]["uri"], "file:///tmp");
+    }
+
+    #[test]
+    fn capture_client_upstream_resets_stale_capabilities_on_reinitialize() {
+        let mut state = ClientUpstreamCaps {
+            sampling: true,
+            elicitation: true,
+            ..Default::default()
+        };
+        capture_client_upstream_from_init(&mut state, Some(&json!({"capabilities": {}})));
+        assert!(!state.sampling);
+        assert!(!state.elicitation);
     }
 
     #[test]
