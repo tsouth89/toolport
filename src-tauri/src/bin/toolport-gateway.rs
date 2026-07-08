@@ -2265,7 +2265,7 @@ fn handle_request_with_cancel(
             // untrusted-provenance server) until a person approves it in the Toolport app.
             // Takes precedence over the agent-facing confirm below, and is fail-closed
             // (no broker / no answer / timeout all deny). Skipped once `confirmed`.
-            if reg.human_approval && !confirmed {
+            if reg.human_approval_effective() && !confirmed {
                 // Resolve destructiveness robustly: cache, then live router, else
                 // fail-closed (an unknown tool must not skip the human gate).
                 let is_dest = tool_is_destructive_fail_closed(name, cached, router);
@@ -2405,7 +2405,7 @@ fn handle_request_with_cancel(
                     }
                     // Content defense: scan this untrusted tool output for injection
                     // and label any flagged text as data before it reaches the agent.
-                    if reg.content_defense {
+                    if reg.content_defense_effective() {
                         integrity::inspect_result(srv, tool, &mut result);
                     }
                     // Result-shaping: cap an oversized result, cache the full body, and
@@ -2490,7 +2490,7 @@ fn handle_request_with_cancel(
                 Ok(mut result) => {
                     // Content defense: a resource is as attacker-controllable as a tool
                     // result, so scan it for injection and label any flagged text as data.
-                    if reg.content_defense {
+                    if reg.content_defense_effective() {
                         integrity::inspect_result(uri, "resource", &mut result);
                     }
                     Some(success(id, result))
@@ -2538,7 +2538,7 @@ fn handle_request_with_cancel(
                 Ok(mut result) => {
                     // Content defense: a prompt's messages are attacker-controllable too;
                     // scan for injection and label any flagged text as data.
-                    if reg.content_defense {
+                    if reg.content_defense_effective() {
                         integrity::inspect_result(name, "prompt", &mut result);
                     }
                     Some(success(id, result))
@@ -2588,10 +2588,10 @@ fn build_router(
     }
     let policy = ToolPolicy {
         disabled,
-        deny_destructive: reg.deny_destructive,
+        deny_destructive: reg.deny_destructive_effective(),
         // Hide already-quarantined tools from the first build (the set persists across
         // restarts); newly detected drift is added during the integrity check below.
-        quarantined: if reg.quarantine_on_drift {
+        quarantined: if reg.quarantine_on_drift_effective() {
             integrity::quarantined(profile)
         } else {
             Default::default()
@@ -2718,7 +2718,7 @@ fn maybe_check_integrity(
         let r = registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (r.integrity_check, r.quarantine_on_drift)
+        (r.integrity_check, r.quarantine_on_drift_effective())
     };
     if !enabled {
         return false;
