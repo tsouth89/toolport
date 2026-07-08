@@ -1614,6 +1614,7 @@ mod tests {
         resolve_command, screen_resolved_addrs, screen_spawn_command, screen_spawn_env,
         CancelRegistry,
     };
+    use serde_json::json;
 
     #[test]
     fn is_server_initiated_request_detects_downstream_rpc() {
