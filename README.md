@@ -209,7 +209,8 @@ any HTTP/OpenAPI MCP consumer (n8n, LibreChat, custom agents).
 The same `--http` process also serves **MCP streamable-HTTP** at `POST /mcp`, so
 sandboxed coding agents and remote clients can use a URL instead of stdio. For
 Docker, env-file secrets, and a compose example, see
-[docs/headless.md](docs/headless.md).
+[docs/headless.md](docs/headless.md). Prebuilt image:
+`docker pull ghcr.io/tsouth89/toolport-gateway:latest` (published from `main`).
 
 ## Configuration
 

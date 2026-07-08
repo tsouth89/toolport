@@ -1,10 +1,14 @@
 # Example headless Toolport gateway. Copy to docker-compose.yml and fill .env.
-# Local/dev only — do not push secrets or this file with real tokens.
+#
+# Option A — pull the published image (after GHCR package is public):
+#   image: ghcr.io/tsouth89/toolport-gateway:latest
+# Option B — build locally:
+#   build: .
 
 services:
   toolport-gateway:
     build: .
-    image: toolport-gateway:local
+    image: ghcr.io/tsouth89/toolport-gateway:latest
     ports:
       - "8765:8765"
     volumes:

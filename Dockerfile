@@ -1,8 +1,8 @@
 # Headless Toolport gateway image (OpenAPI + MCP streamable-HTTP).
 # Build from the repo root:
 #   docker build -t toolport-gateway .
-#
-# Local/dev only on this branch — do not push to GHCR until you cut a release.
+# Published to ghcr.io/tsouth89/toolport-gateway on push to main (see
+# .github/workflows/docker-publish.yml).
 
 FROM rust:1-slim AS build
 WORKDIR /src
@@ -29,7 +29,7 @@ COPY src-tauri/src ./src
 RUN touch src/lib.rs src/main.rs src/bin/toolport-gateway.rs src/bin/mock-mcp-server.rs && \
     cargo build --release --bin toolport-gateway
 
-FROM rust:1-slim
+FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates libssl3 libdbus-1-3 curl \
     && rm -rf /var/lib/apt/lists/*
