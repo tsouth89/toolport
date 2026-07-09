@@ -1086,19 +1086,86 @@ fn backup_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Recover the registry from the `.bak` sibling that `save_to` maintains. Returns
-/// the parsed backup (and best-effort rewrites the primary from it so a later read
-/// self-heals), or None when there's no usable backup.
-fn restore_from_backup(path: &Path) -> Option<Registry> {
-    let content = std::fs::read_to_string(backup_path(path)).ok()?;
-    if content.trim().is_empty() {
-        return None;
+/// How many rolling backup generations `save_to` keeps beyond the single `.bak`.
+/// The registry is a few KB, so 5 generations is negligible on disk but means
+/// recovery has several recent snapshots to fall back to, not one file that (as
+/// in the 2026-07-07 incident) may itself be stale.
+const BACKUP_GENERATIONS: usize = 5;
+
+/// The rolling journal generations written by `save_to`, named
+/// `<registry>.bak.<ts-millis>`. Timestamps are fixed-width for any realistic
+/// epoch, so name order is age order; returned oldest-first. Excludes the single
+/// `<registry>.bak` (no trailing timestamp) and the `.unreadable-*` quarantine
+/// files, which use a different prefix.
+fn backup_generations(path: &Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(base)) = (path.parent(), path.file_name().and_then(|f| f.to_str()))
+    else {
+        return Vec::new();
+    };
+    let prefix = format!("{base}.bak.");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut gens: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f.starts_with(&prefix))
+        })
+        .collect();
+    gens.sort();
+    gens
+}
+
+/// Append the current good registry to the rolling journal and prune to the
+/// newest `BACKUP_GENERATIONS`. Best-effort: a failure here never fails a save -
+/// the primary write and the single `.bak` remain the durability guarantees, and
+/// this only adds recovery depth on top of them.
+fn write_backup_generation(path: &Path, content: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".bak.{ts}"));
+    if atomic_write(&PathBuf::from(name), content).is_err() {
+        return;
     }
-    let registry: Registry = serde_json::from_str(&content).ok()?;
-    // Best-effort: restore the primary so we don't keep reading the .bak. Recovery
-    // still succeeds if this write fails.
-    let _ = atomic_write(path, &content);
-    Some(registry)
+    let mut gens = backup_generations(path);
+    while gens.len() > BACKUP_GENERATIONS {
+        let _ = std::fs::remove_file(gens.remove(0));
+    }
+}
+
+/// Recover the registry from the backups `save_to` maintains, newest-first: the
+/// single `.bak` (the last-known-good fast path), then the rolling journal
+/// generations from newest to oldest. Returns the first that parses (and
+/// best-effort rewrites the primary from it so a later read self-heals), or None
+/// when nothing usable remains. Walking the journal means one stale or corrupt
+/// `.bak` no longer strands recovery when fresher snapshots exist.
+fn restore_from_backup(path: &Path) -> Option<Registry> {
+    let mut candidates = vec![backup_path(path)];
+    let mut gens = backup_generations(path);
+    gens.reverse(); // newest generation first
+    candidates.extend(gens);
+
+    for candidate in candidates {
+        let Ok(content) = std::fs::read_to_string(&candidate) else {
+            continue;
+        };
+        if content.trim().is_empty() {
+            continue;
+        }
+        if let Ok(registry) = serde_json::from_str::<Registry>(&content) {
+            // Best-effort: restore the primary so we don't keep reading a backup.
+            // Recovery still succeeds if this write fails.
+            let _ = atomic_write(path, &content);
+            return Some(registry);
+        }
+    }
+    None
 }
 
 /// What a (retried) read of the registry file actually found.
@@ -1219,7 +1286,12 @@ pub fn save_to(path: &Path, registry: &Registry) -> Result<(), String> {
     if let Ok(existing) = std::fs::read_to_string(path) {
         if !existing.trim().is_empty() {
             if serde_json::from_str::<Registry>(&existing).is_ok() {
+                // Single last-known-good (compat + the load_from fast path)...
                 let _ = atomic_write(&backup_path(path), &existing);
+                // ...plus a rolling journal generation, so recovery can fall back
+                // to the immediately-previous state and a few before it, not just
+                // whatever the one .bak happens to hold.
+                write_backup_generation(path, &existing);
             } else {
                 quarantine_unreadable(path, &existing);
             }
@@ -1843,6 +1915,78 @@ mod tests {
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_file(&bak).ok();
+    }
+
+    #[test]
+    fn save_journal_prunes_to_the_generation_cap() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-reg-journal-{}.json", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+        for g in backup_generations(&path) {
+            std::fs::remove_file(g).ok();
+        }
+
+        // The first save has no prior file to snapshot; every save after that
+        // writes one generation. Well past the cap, the journal must stay bounded
+        // to the newest BACKUP_GENERATIONS.
+        let mut reg = Registry::default();
+        for i in 0..(BACKUP_GENERATIONS + 3) {
+            reg.add_server(sample_server(&format!("s{i}")));
+            save_to(&path, &reg).unwrap();
+            // Distinct millisecond timestamps so each generation gets its own file.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let gens = backup_generations(&path);
+        assert_eq!(
+            gens.len(),
+            BACKUP_GENERATIONS,
+            "journal must be pruned to the newest {BACKUP_GENERATIONS} generations"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+        for g in backup_generations(&path) {
+            std::fs::remove_file(g).ok();
+        }
+    }
+
+    #[test]
+    fn recovery_uses_the_journal_when_bak_is_gone() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-reg-recover-journal-{}.json", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+        for g in backup_generations(&path) {
+            std::fs::remove_file(g).ok();
+        }
+
+        // Six saves: the last on-disk state has 6 servers; the immediately-previous
+        // state (in .bak and the newest journal generation) has 5.
+        let mut reg = Registry::default();
+        for i in 0..6 {
+            reg.add_server(sample_server(&format!("s{i}")));
+            save_to(&path, &reg).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Corrupt the primary AND remove the single .bak, so recovery has only the
+        // rolling journal to fall back to. This is the acceptance case: recover the
+        // immediately-previous state, not a stale one.
+        std::fs::write(&path, "{ not json").unwrap();
+        std::fs::remove_file(backup_path(&path)).ok();
+
+        let recovered = load_from(&path).unwrap();
+        assert_eq!(
+            recovered.servers.len(),
+            5,
+            "recovered the immediately-previous state from the journal"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+        for g in backup_generations(&path) {
+            std::fs::remove_file(g).ok();
+        }
     }
 
     #[test]
