@@ -6,12 +6,19 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-07-09
+
+**Windows auto-update fix.** If Cursor or another MCP client held `toolport-gateway.exe`
+open, the in-app updater could fail to replace the install-dir binary. This patch
+publishes a versioned gateway under `%APPDATA%\\Roaming\\Conduit\\bin` and stops only
+spawned gateway processes before install.
+
 ### Fixed
 
 - **Windows auto-update with locked gateway** — MCP configs point at a versioned
   `toolport-gateway-{version}.exe` under `%APPDATA%\\Roaming\\Conduit\\bin` instead of
   the install-dir copy; before updating, Toolport stops only spawned gateway processes so
-  NSIS can replace locked binaries without closing Cursor or other agents.
+  NSIS can replace locked binaries without closing Cursor or other agents. (#244)
 
 ## [1.6.0] - 2026-07-09
 
@@ -1194,7 +1201,8 @@ driven by the agent on your terms, and supports two more clients.
 - First public release: local MCP gateway and manager with lazy discovery,
   per-agent profiles, the catalog, the tool playground, and the activity log.
 
-[Unreleased]: https://github.com/tsouth89/toolport/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/tsouth89/toolport/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/tsouth89/toolport/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/tsouth89/toolport/releases/tag/v1.6.0
 [1.5.3]: https://github.com/tsouth89/toolport/releases/tag/v1.5.3
 [0.3.16]: https://github.com/tsouth89/conduit/releases/tag/v0.3.16
