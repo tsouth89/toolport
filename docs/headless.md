@@ -74,15 +74,18 @@ docker compose up -d
 
 ### Build locally
 
+From source (slow — compiles inside Docker):
+
 ```bash
-# from repo root
+docker build -f Dockerfile.source -t toolport-gateway .
+```
+
+Or use the runtime Dockerfile after building the binary on the host:
+
+```bash
+cargo build --release --bin toolport-gateway --manifest-path src-tauri/Cargo.toml
+cp src-tauri/target/release/toolport-gateway toolport-gateway-bin
 docker build -t toolport-gateway .
-mkdir -p data
-cp data/registry.json.example data/registry.json
-# edit data/registry.json for your servers, then:
-cp docker-compose.example.yml docker-compose.yml
-# create .env with at least CONDUIT_HTTP_TOKEN=...
-docker compose up --build
 ```
 
 Image defaults:
