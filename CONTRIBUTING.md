@@ -46,6 +46,9 @@ If a client reports the gateway "was not found," you forgot this step.
 # Backend (Rust)
 cargo test --manifest-path src-tauri/Cargo.toml
 
+# Headless gateway smoke (Windows; build gateway first)
+powershell -ExecutionPolicy Bypass -File scripts/smoke-headless.ps1
+
 # Frontend unit tests (Vitest)
 npm run test
 
