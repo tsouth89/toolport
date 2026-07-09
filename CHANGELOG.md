@@ -16,6 +16,11 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ### Fixed
 
+- **OAuth callback port collision across clients** — concurrent gateway processes now
+  serialize browser OAuth for the same remote server with a short-lived filesystem
+  lock, so only one callback listener/browser flow runs and waiters reuse the
+  vaulted auth state when it completes. (#228)
+
 - **Gateway stale secrets** — `secrets_generation` in the registry bumps on vault
   changes so running gateways reload credentials without a manual restart. (#226)
 
