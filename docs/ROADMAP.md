@@ -87,8 +87,9 @@ low real exposure since the gateway only writes when `allow_agent_control` is on
 - [~] **Streamable-HTTP upstream transport** — `POST /mcp` and `GET /mcp` listen stream ship
   (session ids, JSON-RPC, selective SSE responses; see `docs/headless.md` +
   `docker-compose.example.yml`). OpenAPI HTTP mode already shipped for Open WebUI.
-  Remaining (#167): long-lived `GET /mcp` listen on HTTP downstream for servers
-  that push server-initiated RPC outside SSE POST responses. (S)
+  **GHCR:** `ghcr.io/tsouth89/toolport-gateway` published from `main`. Optional
+  follow-up: long-lived `GET /mcp` listen on HTTP downstream for servers that push
+  RPC outside SSE POST responses. (S)
 
 **Strategic**
 

@@ -58,6 +58,22 @@ curl -s -X POST http://127.0.0.1:8765/mcp \
 
 ## Docker
 
+### Pull from GHCR (recommended)
+
+After the first CI publish, make the package public (GitHub → Packages →
+`toolport-gateway` → Package settings → Change visibility). Then:
+
+```bash
+docker pull ghcr.io/tsouth89/toolport-gateway:latest
+mkdir -p data
+cp data/registry.json.example data/registry.json
+cp docker-compose.example.yml docker-compose.yml
+# create .env with at least CONDUIT_HTTP_TOKEN=...
+docker compose up -d
+```
+
+### Build locally
+
 ```bash
 # from repo root
 docker build -t toolport-gateway .
