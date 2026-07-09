@@ -1,11 +1,14 @@
 //! Tauri desktop shell: tray, webview IPC commands, approval broker, HTTP bridge.
 
+use std::io::ErrorKind;
 use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Listener, Manager, State};
 use tauri_plugin_notification::NotificationExt;
+use sha2::{Digest, Sha256};
 
 use crate::approval_broker;
 use crate::approval;
@@ -28,6 +31,104 @@ use crate::usage_report;
 use crate::vendors;
 
 type RegistryState = Mutex<Registry>;
+
+const OAUTH_LOCK_LEASE_SECS: u64 = 180;
+const OAUTH_LOCK_WAIT_SECS: u64 = 30;
+const OAUTH_LOCK_POLL_MS: u64 = 250;
+
+struct OAuthFlowLock {
+    path: std::path::PathBuf,
+}
+
+impl Drop for OAuthFlowLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn oauth_lock_key(server_id: &str, url: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(server_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(url.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn oauth_lock_path(server_id: &str, url: &str) -> Result<std::path::PathBuf, String> {
+    let dir = registry::conduit_dir().ok_or("could not resolve the data directory")?;
+    let locks = dir.join("oauth-locks");
+    std::fs::create_dir_all(&locks)
+        .map_err(|e| format!("could not create oauth lock directory: {e}"))?;
+    Ok(locks.join(format!("{}.lock", oauth_lock_key(server_id, url))))
+}
+
+fn lock_is_expired(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return true;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let Ok(elapsed) = modified.elapsed() else {
+        return false;
+    };
+    elapsed.as_secs() >= OAUTH_LOCK_LEASE_SECS
+}
+
+fn try_acquire_oauth_lock(path: &std::path::Path) -> Result<Option<OAuthFlowLock>, String> {
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut f) => {
+            use std::io::Write;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _ = writeln!(
+                f,
+                "pid={} started={} lease_secs={}",
+                std::process::id(),
+                now,
+                OAUTH_LOCK_LEASE_SECS
+            );
+            Ok(Some(OAuthFlowLock {
+                path: path.to_path_buf(),
+            }))
+        }
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            if lock_is_expired(path) {
+                let _ = std::fs::remove_file(path);
+                return try_acquire_oauth_lock(path);
+            }
+            Ok(None)
+        }
+        Err(e) => Err(format!("could not create oauth lock file: {e}")),
+    }
+}
+
+fn oauth_auth_complete(server_id: &str) -> bool {
+    secrets::get_secret(server_id, secrets::HTTP_AUTH_KEY).is_some()
+        && secrets::get_secret(server_id, remote::OAUTH_STATE_KEY).is_some()
+}
+
+fn acquire_or_wait_oauth_lock(server_id: &str, url: &str) -> Result<Option<OAuthFlowLock>, String> {
+    let path = oauth_lock_path(server_id, url)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(OAUTH_LOCK_WAIT_SECS);
+    loop {
+        if let Some(lock) = try_acquire_oauth_lock(&path)? {
+            return Ok(Some(lock));
+        }
+        if oauth_auth_complete(server_id) {
+            return Ok(None);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(
+                "another Toolport process is already running OAuth for this server; timed out waiting for it to finish"
+                    .to_string(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(OAUTH_LOCK_POLL_MS));
+    }
+}
 
 /// Tracks the optional `toolport-gateway --http` child the app supervises so
 /// HTTP/OpenAPI clients (Open WebUI and the like) can connect with one click,
@@ -1438,6 +1539,10 @@ async fn authenticate_oauth(
     server_id: String,
     url: String,
 ) -> Result<(), String> {
+    let Some(_lock) = acquire_or_wait_oauth_lock(&server_id, &url)? else {
+        // Another process completed the OAuth flow for this same server while we waited.
+        return Ok(());
+    };
     let resource = url.clone();
     let res = tauri::async_runtime::spawn_blocking(move || oauth::authenticate(&url))
         .await
@@ -2412,6 +2517,39 @@ mod tests {
             source: None,
             disabled_tools: vec![],
         }
+    }
+
+    #[test]
+    fn oauth_lock_serializes_concurrent_attempts() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("conduit-oauth-lock-{unique}.lock"));
+        let lock1 = try_acquire_oauth_lock(&path)
+            .expect("first lock should not fail")
+            .expect("first lock should be acquired");
+        assert!(
+            try_acquire_oauth_lock(&path)
+                .expect("second lock should not fail")
+                .is_none(),
+            "second concurrent lock must wait"
+        );
+        drop(lock1);
+        let lock2 = try_acquire_oauth_lock(&path)
+            .expect("third lock should not fail")
+            .expect("lock should be available after release");
+        drop(lock2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn oauth_lock_key_is_stable_and_scoped() {
+        let a = oauth_lock_key("srv-1", "https://mcp.example.com");
+        let b = oauth_lock_key("srv-1", "https://mcp.example.com");
+        let c = oauth_lock_key("srv-2", "https://mcp.example.com");
+        assert_eq!(a, b, "same server identity must map to same lock key");
+        assert_ne!(a, c, "different server identity must map to different lock keys");
     }
 
     #[test]
