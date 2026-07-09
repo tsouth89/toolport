@@ -96,7 +96,7 @@ fn oauth_completion_path(path: &std::path::Path, attempt_id: &str) -> std::path:
 
 fn oauth_lock_contents(attempt_id: &str) -> String {
     format!(
-        "nonce={attempt_id}
+        "attempt_id={attempt_id}
 pid={}
 started={}
 lease_secs={}
@@ -110,7 +110,7 @@ lease_secs={}
 fn parse_lock_attempt_id(content: &str) -> Option<String> {
     content
         .lines()
-        .find_map(|line| line.strip_prefix("nonce=").map(ToOwned::to_owned))
+        .find_map(|line| line.strip_prefix("attempt_id=").or_else(|| line.strip_prefix("nonce=")).map(ToOwned::to_owned))
 }
 
 fn read_oauth_lock_snapshot(path: &std::path::Path) -> Result<Option<OAuthLockSnapshot>, String> {
@@ -2741,7 +2741,7 @@ mod tests {
 
         let current = std::fs::read_to_string(&path).expect("current lock should be readable");
         assert!(
-            current.contains(&format!("nonce={fresh_id}")),
+            current.contains(&format!("attempt_id={fresh_id}")),
             "fresh lock instance must remain intact"
         );
         let _ = std::fs::remove_file(path);
