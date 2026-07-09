@@ -6,6 +6,19 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+### Added
+
+- **Dev data directory** — debug/`tauri dev` builds use `Conduit-dev` instead of the
+  production `Conduit` folder (`CONDUIT_DATA_DIR` overrides). (#232)
+- **Registry recovery notice** — when `registry.json` is restored from `.bak`, the app
+  shows a one-time toast with the recovery time (and quarantine path when applicable).
+  (#231)
+
+### Fixed
+
+- **Gateway stale secrets** — `secrets_generation` in the registry bumps on vault
+  changes so running gateways reload credentials without a manual restart. (#226)
+
 ## [1.6.2] - 2026-07-09
 
 **Windows install fix (completes 1.6.1).** Manual installer downloads and the

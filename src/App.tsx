@@ -25,6 +25,7 @@ import { toastError } from "@/lib/toast";
 import {
   detectClients,
   getRegistry,
+  takeRegistryRecoveryNotice,
   importServers,
   probeServers,
   removeServer,
@@ -177,9 +178,26 @@ function App() {
       setLoading(true);
       setError(null);
       try {
-        const [reg, dc] = await Promise.all([getRegistry(), detectClients()]);
+        const [reg, dc, recovery] = await Promise.all([
+          getRegistry(),
+          detectClients(),
+          takeRegistryRecoveryNotice(),
+        ]);
         setRegistry(reg);
         setClients(dc);
+        if (recovery) {
+          const when = new Date(recovery.recoveredAtMs).toLocaleString();
+          const detail =
+            recovery.reason === "corrupt"
+              ? `The registry file was damaged. Restored from backup (${when}).`
+              : `The registry file was missing. Restored from backup (${when}).`;
+          toast.warning("Registry recovered from backup", {
+            description: recovery.quarantinePath
+              ? `${detail} A copy of the bad file was saved for inspection.`
+              : detail,
+            duration: 12_000,
+          });
+        }
         loadedOnce.current = true;
         setActivityKey((k) => k + 1);
         if (announce) {

@@ -532,6 +532,7 @@ fn set_secret(
             }),
         }
     }
+    reg.secrets_generation = reg.secrets_generation.wrapping_add(1);
     registry::save(&reg)?;
     Ok(reg.clone())
 }
@@ -548,6 +549,7 @@ fn delete_secret(
     if let Some(server) = reg.servers.iter_mut().find(|s| s.id == server_id) {
         server.env.retain(|e| e.key != key);
     }
+    reg.secrets_generation = reg.secrets_generation.wrapping_add(1);
     registry::save(&reg)?;
     Ok(reg.clone())
 }
@@ -1381,6 +1383,19 @@ fn nudge_gateway(state: &RegistryState) {
     let _ = registry::save(&reg);
 }
 
+/// Bump [`Registry::secrets_generation`] and save so gateways reload even when
+/// only the keychain changed.
+fn bump_secrets_generation(state: &RegistryState) {
+    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.secrets_generation = reg.secrets_generation.wrapping_add(1);
+    let _ = registry::save(&reg);
+}
+
+#[tauri::command]
+fn take_registry_recovery_notice() -> Option<registry::RegistryRecoveryNotice> {
+    registry::take_recovery_notice()
+}
+
 /// Store a bearer token for an http server (used as `Authorization: Bearer ...`).
 #[tauri::command]
 fn set_auth_token(
@@ -1389,14 +1404,14 @@ fn set_auth_token(
     token: String,
 ) -> Result<(), String> {
     secrets::set_secret(&server_id, secrets::HTTP_AUTH_KEY, &token)?;
-    nudge_gateway(state.inner());
+    bump_secrets_generation(state.inner());
     Ok(())
 }
 
 #[tauri::command]
 fn clear_auth_token(state: State<RegistryState>, server_id: String) -> Result<(), String> {
     secrets::delete_secret(&server_id, secrets::HTTP_AUTH_KEY)?;
-    nudge_gateway(state.inner());
+    bump_secrets_generation(state.inner());
     Ok(())
 }
 
@@ -1435,7 +1450,7 @@ async fn authenticate_oauth(
         res.refresh_token,
         Some(resource),
     )?;
-    nudge_gateway(state.inner());
+    bump_secrets_generation(state.inner());
     Ok(())
 }
 
@@ -2147,6 +2162,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             detect_clients,
             get_registry,
+            take_registry_recovery_notice,
             import_servers,
             parse_server_snippet,
             add_server,

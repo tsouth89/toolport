@@ -19,6 +19,11 @@ npm run build:gateway   # build the gateway binary (clients spawn it; needed whe
 npm run tauri dev       # run the desktop app
 ```
 
+**Dev data directory:** debug builds (`tauri dev`, `cargo build` without `--release`)
+use a separate data dir — `%APPDATA%\\Roaming\\Conduit-dev` on Windows,
+`~/.config/Conduit-dev` on Linux/macOS — so development never touches your
+installed release data. Override with `CONDUIT_DATA_DIR` for headless tests.
+
 On macOS/Linux, see the platform notes in the [README troubleshooting](README.md#troubleshooting).
 
 ## Development workflow
