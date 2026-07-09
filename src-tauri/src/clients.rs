@@ -1043,11 +1043,26 @@ fn launcher_package_arg(command: &str, args: &[String]) -> Option<String> {
         "pipx" if sub == Some("run") => 1,
         _ => return None,
     };
-    // The package is the first token after the sub-command that isn't a flag.
-    argv.iter()
-        .skip(pkg_start)
-        .find(|t| !t.starts_with('-'))
-        .cloned()
+    // Find the package among the runner's args. An explicit `--package=<pkg>` /
+    // `--package <pkg>` / `-p <pkg>` wins; otherwise it's the first positional
+    // (non-flag) token. Stop at `--`: everything after it is the command to run
+    // inside the package, not the package itself.
+    let mut it = argv.iter().skip(pkg_start);
+    while let Some(tok) = it.next() {
+        if tok == "--" {
+            break;
+        }
+        if let Some(pkg) = tok.strip_prefix("--package=") {
+            return Some(pkg.to_string());
+        }
+        if tok == "--package" || tok == "-p" {
+            return it.next().cloned();
+        }
+        if !tok.starts_with('-') {
+            return Some(tok.clone());
+        }
+    }
+    None
 }
 
 /// Turn a package spec into a friendly server name: drop the `@scope/`, drop a
@@ -1077,6 +1092,18 @@ fn package_friendly_name(pkg: &str) -> String {
     if core.is_empty() { no_version } else { core }.to_string()
 }
 
+/// The file stem of a command path, splitting on both `/` and `\` so a
+/// Windows-style path resolves on a Unix host too (std's `Path` only treats `/`
+/// as a separator there, so `C:\...\foo.exe` would otherwise stay intact). Keeps
+/// original case; drops a single trailing extension, preserving dotfiles.
+fn command_stem(command: &str) -> String {
+    let file = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    match file.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+        _ => file.to_string(),
+    }
+}
+
 /// Derive a display name for a bare (unnamed) pasted server from its invocation:
 /// the package a runner launches (so every `npx ...` server doesn't collapse to
 /// the name "npx"), else the command's own file stem.
@@ -1084,11 +1111,7 @@ fn name_from_invocation(command: &str, args: &[String]) -> String {
     if let Some(pkg) = launcher_package_arg(command, args) {
         return package_friendly_name(&pkg);
     }
-    std::path::Path::new(command)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(command)
-        .to_string()
+    command_stem(command)
 }
 
 /// Parse a JSON snippet, trying each known wrapper key, then a bare server object.
@@ -3734,6 +3757,33 @@ OD_DATA_DIR = "/tmp/data"
         assert_eq!(name_from_invocation("npx -y @verygoodplugins/mcp-automem", &[]), "automem");
         // A non-runner keeps its own command file stem (unchanged behavior).
         assert_eq!(name_from_invocation("/usr/local/bin/my-server", &[]), "my-server");
+    }
+
+    #[test]
+    fn launcher_handles_package_flag_and_separator() {
+        let vs = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // An explicit --package=/--package/-p names the package, not the command
+        // after `--` (which is what to run inside the package env), issue #251 f/u.
+        assert_eq!(
+            name_from_invocation("npm", &vs(&["exec", "--package=@scope/mcp-weather", "--", "server"])),
+            "weather"
+        );
+        assert_eq!(
+            name_from_invocation("npx", &vs(&["--package=@acme/mcp-thing", "--", "cmd"])),
+            "thing"
+        );
+        assert_eq!(
+            name_from_invocation("npx", &vs(&["--package", "@scope/mcp-foo", "--", "cmd"])),
+            "foo"
+        );
+        assert_eq!(name_from_invocation("npx", &vs(&["-p", "@scope/mcp-foo", "cmd"])), "foo");
+        // A positional package before `--` still wins, and `--` stops the search.
+        assert_eq!(
+            name_from_invocation("npx", &vs(&["-y", "@scope/mcp-a", "--", "not-a-package"])),
+            "a"
+        );
+        // Cross-platform: a Windows path resolves to its stem even on a Unix host.
+        assert_eq!(name_from_invocation("C:\\tools\\my-server.exe", &[]), "my-server");
     }
 
     #[test]
