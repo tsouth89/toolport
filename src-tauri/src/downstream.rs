@@ -28,6 +28,16 @@ const STDIO_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// so one hung server should fail in seconds, not stall everything for the full
 /// live-call timeout. Restored to STDIO_READ_TIMEOUT once connected.
 const STDIO_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// First-`initialize` budget for download-then-run launchers (npx, uvx, pnpm dlx,
+/// ...). On a cold cache these resolve and download the server package before the
+/// process can answer anything - easily 15-60s, far past the normal handshake
+/// budget - so the tight timeout misreports a healthy-but-installing server as
+/// broken (it then works on the next refresh, once the cache is warm). Being
+/// alive-but-quiet is expected during the download; a child that actually dies
+/// still fails immediately because its stdout closing ends the wait. Batch
+/// connects run one thread per server, so several cold launchers install in
+/// parallel and a batch waits out this budget at most once, not per server.
+const LAUNCHER_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Keep at most this many bytes of a child's stderr tail for error reporting.
 const STDERR_TAIL_CAP: usize = 4096;
 
@@ -447,6 +457,13 @@ pub trait Transport: Send {
     /// connect handshake fast. Default no-op: transports with their own fixed
     /// request timeout (e.g. HTTP) ignore it.
     fn set_read_timeout(&mut self, _timeout: Duration) {}
+    /// Budget for the connect handshake's `initialize`. Stdio invocations that
+    /// download their package before running (npx and friends) report the long
+    /// launcher budget; everything else keeps the tight default so one hung
+    /// server can't stall a batch probe.
+    fn connect_timeout(&self) -> Duration {
+        STDIO_CONNECT_TIMEOUT
+    }
     /// Start reacting to the server's own `notifications/tools/list_changed`.
     /// Called once the connect handshake is done, so a server that announces its
     /// tools during startup doesn't trigger a needless rebuild. Default no-op:
@@ -854,6 +871,10 @@ pub struct StdioTransport {
     /// once this is set, so tool-list changes announced during startup are
     /// ignored. Flipped on by `arm_tools_watch` after the handshake.
     armed: Arc<AtomicBool>,
+    /// The command is a download-then-run launcher (npx, uvx, ...): its first
+    /// `initialize` gets the long connect budget, and a connect timeout is
+    /// reported as "still installing" rather than a dead server.
+    launcher: bool,
     /// Answers server-initiated JSON-RPC (e.g. `roots/list`) by forwarding to the
     /// upstream MCP client. Set by the gateway before the connect handshake.
     server_handler: Option<ServerRequestHandler>,
@@ -876,6 +897,46 @@ pub fn normalize_invocation(command: &str, args: &[String]) -> (String, Vec<Stri
         }
     }
     (command.to_string(), args.to_vec())
+}
+
+/// True when the invocation is a download-then-run launcher: the command may have
+/// to resolve and download the actual server package before it can respond (npx /
+/// bunx from the npm registry, uvx / pipx from PyPI, and the package managers'
+/// dlx/exec forms). Matches the executable's basename so absolute paths and
+/// Windows shims (`npx.cmd`, `npx.exe`) count too.
+pub fn is_download_launcher(command: &str, args: &[String]) -> bool {
+    let (command, args) = normalize_invocation(command, args);
+    let base = Path::new(&command)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&command)
+        .to_ascii_lowercase();
+    let base = base
+        .strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".cmd"))
+        .or_else(|| base.strip_suffix(".ps1"))
+        .unwrap_or(&base);
+    let first = args.first().map(String::as_str);
+    match base {
+        "npx" | "uvx" | "bunx" => true,
+        // These only download via their run-a-package subcommand; `pnpm start`
+        // and friends run what's already there.
+        "pnpm" | "yarn" => first == Some("dlx"),
+        "npm" => matches!(first, Some("exec") | Some("x")),
+        "pipx" => first == Some("run"),
+        _ => false,
+    }
+}
+
+/// The connect-handshake read timeout policy for a stdio invocation: launchers
+/// that may be downloading their package on first run get the long budget,
+/// everything else the tight one (so a hung server still fails fast).
+pub fn stdio_connect_timeout(command: &str, args: &[String]) -> Duration {
+    if is_download_launcher(command, args) {
+        LAUNCHER_CONNECT_TIMEOUT
+    } else {
+        STDIO_CONNECT_TIMEOUT
+    }
 }
 
 impl StdioTransport {
@@ -1007,6 +1068,7 @@ impl StdioTransport {
             next_id: 1,
             read_timeout: STDIO_READ_TIMEOUT,
             armed,
+            launcher: is_download_launcher(command, args),
             server_handler: None,
         })
     }
@@ -1093,9 +1155,23 @@ impl Transport for StdioTransport {
             let line = match self.rx.recv_timeout(remaining) {
                 Ok(l) => l,
                 Err(RecvTimeoutError::Timeout) => {
+                    // A launcher child that is alive but never answered `initialize`
+                    // even after the long budget is almost certainly still installing
+                    // its package (cold npm/PyPI cache, slow network). Say so: a bare
+                    // timeout reads as a broken server when it isn't. A dead child
+                    // never reaches here (its stdout closing ends the wait below).
+                    let alive = self.child.try_wait().map(|s| s.is_none()).unwrap_or(false);
+                    if self.launcher && alive && method == "initialize" {
+                        return Err(TransportError::Unavailable(
+                            "timed out waiting for 'initialize'; the launcher is likely \
+                             still downloading the server package (first run on a cold \
+                             cache). It usually connects on the next refresh."
+                                .to_string(),
+                        ));
+                    }
                     return Err(TransportError::Unavailable(format!(
                         "timed out waiting for '{method}' response"
-                    )))
+                    )));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(TransportError::Unavailable(self.closed_error()))
@@ -1147,6 +1223,14 @@ impl Transport for StdioTransport {
 
     fn set_read_timeout(&mut self, timeout: Duration) {
         self.read_timeout = timeout;
+    }
+
+    fn connect_timeout(&self) -> Duration {
+        if self.launcher {
+            LAUNCHER_CONNECT_TIMEOUT
+        } else {
+            STDIO_CONNECT_TIMEOUT
+        }
     }
 
     fn arm_tools_watch(&mut self) {
@@ -1538,8 +1622,12 @@ impl DownstreamServer {
     /// endpoint. The gateway calls `load_resources_prompts` to populate them.
     pub fn connect(id: String, mut transport: Box<dyn Transport>) -> Result<Self, String> {
         // Fail the handshake fast so one unresponsive server can't stall the whole
-        // batch probe / router rebuild for the full live-call timeout.
-        transport.set_read_timeout(STDIO_CONNECT_TIMEOUT);
+        // batch probe / router rebuild for the full live-call timeout. The transport
+        // picks the budget: download-then-run launchers (npx, uvx, ...) get a long
+        // first-`initialize` window because a cold cache means the package downloads
+        // before the server can answer at all.
+        let handshake_timeout = transport.connect_timeout();
+        transport.set_read_timeout(handshake_timeout);
         let init = transport.request(
             "initialize",
             json!({
@@ -1553,6 +1641,10 @@ impl DownstreamServer {
         let caps_prompts = caps.and_then(|c| c.get("prompts")).is_some();
         transport.notify("notifications/initialized", json!({})).map_err(|e| e.to_string())?;
 
+        // `initialize` answered, so any launcher download is done: the rest of the
+        // handshake goes back to the tight budget - a server that comes up but then
+        // hangs on `tools/list` should still fail in seconds.
+        transport.set_read_timeout(STDIO_CONNECT_TIMEOUT);
         let result = transport.request("tools/list", json!({})).map_err(|e| e.to_string())?;
         let tools = extract_array(&result, "tools");
 
@@ -1700,6 +1792,74 @@ mod tests {
         CancelRegistry,
     };
     use serde_json::json;
+
+    #[test]
+    fn download_launchers_get_the_long_connect_budget() {
+        use super::{stdio_connect_timeout, LAUNCHER_CONNECT_TIMEOUT};
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Bare launchers, wherever they live and however Windows shims them.
+        for cmd in [
+            "npx",
+            "uvx",
+            "bunx",
+            "/usr/local/bin/npx",
+            r"C:\Program Files\nodejs\npx.cmd",
+            "NPX.EXE",
+            "uvx.exe",
+        ] {
+            assert_eq!(
+                stdio_connect_timeout(cmd, &a(&["-y", "@scope/pkg"])),
+                LAUNCHER_CONNECT_TIMEOUT,
+                "{cmd} should get the launcher budget"
+            );
+        }
+        // Package managers count only in their download-then-run form.
+        for (cmd, args) in [
+            ("pnpm", vec!["dlx", "some-mcp"]),
+            ("yarn", vec!["dlx", "some-mcp"]),
+            ("npm", vec!["exec", "some-mcp"]),
+            ("npm", vec!["x", "some-mcp"]),
+            ("pipx", vec!["run", "some-mcp"]),
+        ] {
+            assert_eq!(
+                stdio_connect_timeout(cmd, &a(&args)),
+                LAUNCHER_CONNECT_TIMEOUT,
+                "{cmd} {args:?} should get the launcher budget"
+            );
+        }
+        // A config that packed the whole invocation into `command` is normalized
+        // the same way the spawn path does before matching.
+        assert_eq!(
+            stdio_connect_timeout("npx -y @scope/pkg", &[]),
+            LAUNCHER_CONNECT_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn ordinary_commands_keep_the_tight_connect_budget() {
+        use super::{stdio_connect_timeout, STDIO_CONNECT_TIMEOUT};
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for (cmd, args) in [
+            // Already-installed runtimes: nothing to download, fail fast.
+            ("node", vec!["server.js"]),
+            ("python", vec!["-m", "some_mcp"]),
+            ("docker", vec!["run", "npx"]), // launcher name in args is not a launcher
+            (r"C:\tools\my-server.exe", vec![]),
+            // Package managers running an existing project, not fetching one.
+            ("pnpm", vec!["run", "start"]),
+            ("yarn", vec!["start"]),
+            ("npm", vec!["start"]),
+            ("pipx", vec![]),
+            // A path that merely contains a launcher-ish segment.
+            ("/opt/npx-tools/server", vec![]),
+        ] {
+            assert_eq!(
+                stdio_connect_timeout(cmd, &a(&args)),
+                STDIO_CONNECT_TIMEOUT,
+                "{cmd} {args:?} should keep the tight budget"
+            );
+        }
+    }
 
     #[test]
     fn is_server_initiated_request_detects_downstream_rpc() {
