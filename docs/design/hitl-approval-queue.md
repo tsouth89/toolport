@@ -1,6 +1,6 @@
 # Design: Human-in-the-Loop (HITL) Tool-Approval Queue
 
-Status: P1 IMPLEMENTED in PR #82 (2026-07-02, rev 2 architecture). Remaining before merge: a runtime end-to-end check (needs the app running). Deferred to P2: named-pipe/uds transport hardening, an async "held, will resume" fallback, and tool+args-hash dedupe.
+Status: SHIPPED and live (P1 landed in PR #82; approve-for-session, per-tool overrides, desktop notification on held calls, and severity tiering followed). This is the original design record - the body below is kept as written for history. Follow-on items once tracked as P2 (named-pipe/uds transport hardening, async "held, will resume" fallback, tool+args-hash dedupe) may still be open; see the roadmap for current status.
 
 ## Goal
 

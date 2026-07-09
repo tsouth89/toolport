@@ -154,7 +154,7 @@ and refreshes too.
 
 ## Supported clients
 
-Toolport auto-detects these **21 AI clients**, installs the gateway into each with one
+Toolport auto-detects these **22 AI clients**, installs the gateway into each with one
 click, and can import a client's existing servers. It writes the config file shown
 below for you, so you never have to edit these by hand.
 
@@ -181,6 +181,7 @@ below for you, so you never have to edit these by hand.
 | Pi             | `~/.pi/agent/mcp.json`                                                                     | JSON (`mcpServers`)      |
 | Goose          | `~/.config/goose/config.yaml`                                                              | YAML (`extensions`)      |
 | Hermes         | `~/.hermes/config.yaml`                                                                    | YAML (`mcp_servers`)     |
+| AnythingLLM    | `<config>/anythingllm-desktop/storage/plugins/anythingllm_mcp_servers.json`                | JSON (`mcpServers`)      |
 
 `<config>` is your OS application-config dir (`%APPDATA%` on Windows, `~/Library/Application Support` on macOS, `~/.config` on Linux); `<data>` is the data dir (`~/.local/share` on Linux, the same as `<config>` elsewhere). Zed and Goose paths vary slightly by OS; Toolport resolves the right one automatically.
 
@@ -382,7 +383,7 @@ Run it whichever way you prefer:
 
 - **Hosted:** sign in at [toolport.app/teams](https://toolport.app/teams) and invite your
   team, no infrastructure to run.
-- **Self-hosted:** one Docker command (`docker pull ghcr.io/tsouth89/conduit-teams`).
+- **Self-hosted:** one Docker command (`docker pull ghcr.io/tsouth89/toolport-teams`).
 
 Same pricing hosted or self-hosted:
 

@@ -217,7 +217,7 @@ screening, downstream SSRF guards on OAuth, destructive-tool governance, and
 fail-closed approval when the broker is missing. Those paths were hardened in
 the v1.5.1–1.5.2 audit batch (#203–#207).
 
-### What is new in 1.6.0 (less field time)
+### What is new in 1.6.0
 
 | Area                     | Risk                                                                 | Mitigations in code                                                         |
 | ------------------------ | -------------------------------------------------------------------- | --------------------------------------------------------------------------- |
