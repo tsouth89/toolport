@@ -38,12 +38,12 @@ const OAUTH_LOCK_POLL_MS: u64 = 250;
 
 struct OAuthFlowLock {
     path: std::path::PathBuf,
-    nonce: String,
+    attempt_id: String,
 }
 
 impl Drop for OAuthFlowLock {
     fn drop(&mut self) {
-        let completion = oauth_completion_path(&self.path, &self.nonce);
+        let completion = oauth_completion_path(&self.path, &self.attempt_id);
         let _ = std::fs::write(
             completion,
             format!("done={} pid={}
@@ -57,7 +57,7 @@ impl Drop for OAuthFlowLock {
 struct OAuthLockSnapshot {
     modified: SystemTime,
     content: String,
-    nonce: Option<String>,
+    attempt_id: Option<String>,
 }
 
 impl OAuthLockSnapshot {
@@ -78,7 +78,7 @@ fn now_unix_secs() -> u64 {
         .as_secs()
 }
 
-fn oauth_attempt_nonce() -> String {
+fn oauth_attempt_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -86,17 +86,17 @@ fn oauth_attempt_nonce() -> String {
     format!("{}-{nanos}", std::process::id())
 }
 
-fn oauth_completion_path(path: &std::path::Path, nonce: &str) -> std::path::PathBuf {
+fn oauth_completion_path(path: &std::path::Path, attempt_id: &str) -> std::path::PathBuf {
     let name = path
         .file_name()
         .and_then(|v| v.to_str())
         .unwrap_or("oauth.lock");
-    path.with_file_name(format!("{name}.{nonce}.done"))
+    path.with_file_name(format!("{name}.{attempt_id}.done"))
 }
 
-fn oauth_lock_contents(nonce: &str) -> String {
+fn oauth_lock_contents(attempt_id: &str) -> String {
     format!(
-        "nonce={nonce}
+        "nonce={attempt_id}
 pid={}
 started={}
 lease_secs={}
@@ -107,7 +107,7 @@ lease_secs={}
     )
 }
 
-fn parse_lock_nonce(content: &str) -> Option<String> {
+fn parse_lock_attempt_id(content: &str) -> Option<String> {
     content
         .lines()
         .find_map(|line| line.strip_prefix("nonce=").map(ToOwned::to_owned))
@@ -124,11 +124,11 @@ fn read_oauth_lock_snapshot(path: &std::path::Path) -> Result<Option<OAuthLockSn
         .map_err(|e| format!("could not read oauth lock timestamp: {e}"))?;
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("could not read oauth lock file: {e}"))?;
-    let nonce = parse_lock_nonce(&content);
+    let attempt_id = parse_lock_attempt_id(&content);
     Ok(Some(OAuthLockSnapshot {
         modified,
         content,
-        nonce,
+        attempt_id,
     }))
 }
 
@@ -139,15 +139,15 @@ fn lock_snapshot_is_expired(snapshot: &OAuthLockSnapshot) -> bool {
     elapsed.as_secs() >= OAUTH_LOCK_LEASE_SECS
 }
 
-fn completion_exists(path: &std::path::Path, nonce: &str) -> bool {
-    oauth_completion_path(path, nonce).exists()
+fn completion_exists(path: &std::path::Path, attempt_id: &str) -> bool {
+    oauth_completion_path(path, attempt_id).exists()
 }
 
 fn try_replace_stale_lock(
     path: &std::path::Path,
     observed: &OAuthLockSnapshot,
     contender_contents: &str,
-    contender_nonce: &str,
+    contender_attempt_id: &str,
 ) -> Result<bool, String> {
     let Some(current) = read_oauth_lock_snapshot(path)? else {
         return Ok(false);
@@ -155,7 +155,7 @@ fn try_replace_stale_lock(
     if current.instance_key() != observed.instance_key() {
         return Ok(false);
     }
-    let _ = std::fs::remove_file(oauth_completion_path(path, contender_nonce));
+    let _ = std::fs::remove_file(oauth_completion_path(path, contender_attempt_id));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .truncate(true)
@@ -186,9 +186,9 @@ fn oauth_lock_path(server_id: &str, url: &str) -> Result<std::path::PathBuf, Str
 }
 
 fn try_acquire_oauth_lock(path: &std::path::Path) -> Result<Option<OAuthFlowLock>, String> {
-    let nonce = oauth_attempt_nonce();
-    let contents = oauth_lock_contents(&nonce);
-    let _ = std::fs::remove_file(oauth_completion_path(path, &nonce));
+    let attempt_id = oauth_attempt_id();
+    let contents = oauth_lock_contents(&attempt_id);
+    let _ = std::fs::remove_file(oauth_completion_path(path, &attempt_id));
     match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut f) => {
             use std::io::Write;
@@ -196,7 +196,7 @@ fn try_acquire_oauth_lock(path: &std::path::Path) -> Result<Option<OAuthFlowLock
                 .map_err(|e| format!("could not write oauth lock file: {e}"))?;
             Ok(Some(OAuthFlowLock {
                 path: path.to_path_buf(),
-                nonce,
+                attempt_id,
             }))
         }
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
@@ -204,11 +204,11 @@ fn try_acquire_oauth_lock(path: &std::path::Path) -> Result<Option<OAuthFlowLock
                 return Ok(None);
             };
             if lock_snapshot_is_expired(&observed)
-                && try_replace_stale_lock(path, &observed, &contents, &nonce)?
+                && try_replace_stale_lock(path, &observed, &contents, &attempt_id)?
             {
                 return Ok(Some(OAuthFlowLock {
                     path: path.to_path_buf(),
-                    nonce,
+                    attempt_id,
                 }));
             }
             Ok(None)
@@ -219,12 +219,12 @@ fn try_acquire_oauth_lock(path: &std::path::Path) -> Result<Option<OAuthFlowLock
 
 fn acquire_or_wait_oauth_lock(_server_id: &str, url: &str) -> Result<Option<OAuthFlowLock>, String> {
     let path = oauth_lock_path(_server_id, url)?;
-    let mut observed_nonce: Option<String> = None;
+    let mut observed_attempt_id: Option<String> = None;
     let deadline = std::time::Instant::now() + Duration::from_secs(OAUTH_LOCK_WAIT_SECS);
     loop {
         if let Some(lock) = try_acquire_oauth_lock(&path)? {
-            if let Some(nonce) = &observed_nonce {
-                if completion_exists(&path, nonce) {
+            if let Some(attempt_id) = &observed_attempt_id {
+                if completion_exists(&path, attempt_id) {
                     drop(lock);
                     return Ok(None);
                 }
@@ -232,12 +232,12 @@ fn acquire_or_wait_oauth_lock(_server_id: &str, url: &str) -> Result<Option<OAut
             return Ok(Some(lock));
         }
         if let Some(snapshot) = read_oauth_lock_snapshot(&path)? {
-            if let Some(nonce) = snapshot.nonce {
-                observed_nonce = Some(nonce);
+            if let Some(attempt_id) = snapshot.attempt_id {
+                observed_attempt_id = Some(attempt_id);
             }
         }
-        if let Some(nonce) = &observed_nonce {
-            if completion_exists(&path, nonce) {
+        if let Some(attempt_id) = &observed_attempt_id {
+            if completion_exists(&path, attempt_id) {
                 return Ok(None);
             }
         }
@@ -2675,7 +2675,7 @@ mod tests {
 
 
     #[test]
-    fn oauth_waiter_uses_attempt_completion_nonce() {
+    fn oauth_waiter_uses_attempt_completion_id() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -2685,23 +2685,24 @@ mod tests {
         let lock = try_acquire_oauth_lock(&path)
             .expect("lock acquisition should not fail")
             .expect("lock should be acquired");
-        let nonce = lock.nonce.clone();
+        let attempt_id = lock.attempt_id.clone();
 
-        let stale_done = oauth_completion_path(&path, "old-attempt");
+        let stale_attempt = format!("old-attempt-{unique}");
+        let stale_done = oauth_completion_path(&path, &stale_attempt);
         std::fs::write(&stale_done, "done=1").expect("stale completion should be writable");
         assert!(
-            !completion_exists(&path, &nonce),
+            !completion_exists(&path, &attempt_id),
             "completion from a prior attempt must not satisfy current waiter"
         );
 
         drop(lock);
         assert!(
-            completion_exists(&path, &nonce),
+            completion_exists(&path, &attempt_id),
             "lock drop should mark the specific attempt complete"
         );
 
         let _ = std::fs::remove_file(stale_done);
-        let _ = std::fs::remove_file(oauth_completion_path(&path, &nonce));
+        let _ = std::fs::remove_file(oauth_completion_path(&path, &attempt_id));
         let _ = std::fs::remove_file(path);
     }
 
@@ -2713,20 +2714,24 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("conduit-oauth-lock-{unique}.lock"));
 
-        std::fs::write(&path, oauth_lock_contents("observed")).expect("initial lock write should work");
+        let observed_id = format!("observed-{unique}");
+        let fresh_id = format!("fresh-owner-{unique}");
+        let contender_id = format!("contender-{unique}");
+        std::fs::write(&path, oauth_lock_contents(&observed_id))
+            .expect("initial lock write should work");
         let observed = read_oauth_lock_snapshot(&path)
             .expect("snapshot read should work")
             .expect("snapshot should exist");
 
         std::thread::sleep(Duration::from_millis(5));
-        std::fs::write(&path, oauth_lock_contents("fresh-owner"))
+        std::fs::write(&path, oauth_lock_contents(&fresh_id))
             .expect("fresh lock write should work");
 
         let replaced = try_replace_stale_lock(
             &path,
             &observed,
-            &oauth_lock_contents("contender"),
-            "contender",
+            &oauth_lock_contents(&contender_id),
+            &contender_id,
         )
         .expect("replace check should not error");
         assert!(
@@ -2736,7 +2741,7 @@ mod tests {
 
         let current = std::fs::read_to_string(&path).expect("current lock should be readable");
         assert!(
-            current.contains("nonce=fresh-owner"),
+            current.contains(&format!("nonce={fresh_id}")),
             "fresh lock instance must remain intact"
         );
         let _ = std::fs::remove_file(path);
