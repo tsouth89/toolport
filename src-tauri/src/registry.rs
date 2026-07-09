@@ -777,13 +777,23 @@ impl Registry {
     }
 
     /// Resolve a profile by id or (case-insensitive) name, returning its id.
-    /// Falls back to the active profile when the reference doesn't match.
+    ///
+    /// An **empty/whitespace** reference means "unscoped": it follows the active
+    /// profile. A **named** reference that matches no existing profile (e.g. one
+    /// that was deleted or renamed out from under a scoped client) fails CLOSED:
+    /// it resolves to itself, which `is_enabled` matches to no servers, so the
+    /// client sees an empty set rather than silently widening to the active
+    /// profile's servers. Only ever widen scope on an explicit unscoped request,
+    /// never on a dangling reference.
     pub fn resolve_profile_id(&self, profile_ref: &str) -> String {
+        if profile_ref.trim().is_empty() {
+            return self.active_profile_id();
+        }
         self.profiles
             .iter()
             .find(|p| p.id == profile_ref || p.name.eq_ignore_ascii_case(profile_ref))
             .map(|p| p.id.clone())
-            .unwrap_or_else(|| self.active_profile_id())
+            .unwrap_or_else(|| profile_ref.to_string())
     }
 
     /// Servers enabled in a specific profile (id or name). Powers per-client
@@ -1458,8 +1468,29 @@ mod tests {
         assert_eq!(by_name, vec![pay.clone()]);
         let by_id: Vec<_> = r.enabled_servers_for("default").iter().map(|s| s.id.clone()).collect();
         assert_eq!(by_id, vec![db]);
-        // Unknown reference falls back to the active profile (default).
-        assert_eq!(r.enabled_servers_for("nope").len(), 1);
+        // A NAMED reference that matches no profile (deleted/renamed) fails CLOSED:
+        // an empty set, NOT a silent widening to the active profile's servers.
+        assert!(
+            r.enabled_servers_for("nope").is_empty(),
+            "unknown profile must fail closed, not fall back to active"
+        );
+    }
+
+    #[test]
+    fn unknown_profile_fails_closed_but_empty_ref_follows_active() {
+        let mut r = Registry::default();
+        let db = r.add_server(sample_server("postgres"));
+        r.set_server_enabled("default", &db, true).unwrap();
+
+        // A deleted/renamed profile a scoped client still references resolves to
+        // nothing (fail closed), so the client can't inherit the active profile.
+        assert!(r.enabled_servers_for("deleted-profile").is_empty());
+        assert_eq!(r.resolve_profile_id("deleted-profile"), "deleted-profile");
+
+        // An empty/whitespace ref is the *unscoped* case and still follows active.
+        assert_eq!(r.resolve_profile_id(""), r.active_profile_id());
+        assert_eq!(r.resolve_profile_id("   "), r.active_profile_id());
+        assert_eq!(r.enabled_servers_for("").len(), 1);
     }
 
     #[test]
