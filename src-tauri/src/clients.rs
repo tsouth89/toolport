@@ -2274,6 +2274,10 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
 // ---------------------------------------------------------------------------
 
 pub(crate) fn resolve_gateway_path() -> Option<PathBuf> {
+    if let Some(p) = crate::gateway_publish::client_gateway_path() {
+        return Some(p);
+    }
+
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let ext = std::env::consts::EXE_SUFFIX;
@@ -2551,7 +2555,18 @@ fn gateway_command_is_stale(stored: &str, current: &str) -> bool {
     if stored.is_empty() || stored == current {
         return false;
     }
-    stored.to_lowercase().contains("conduit-gateway") || !Path::new(stored).exists()
+    if crate::gateway_publish::is_unversioned_install_gateway_path(stored) {
+        return true;
+    }
+    if stored.to_lowercase().contains("conduit-gateway") || !Path::new(stored).exists() {
+        return true;
+    }
+    // Published bin dir: repoint when the app version bumped the gateway path.
+    let current_norm = current.replace('/', "\\").to_ascii_lowercase();
+    if current_norm.contains("\\conduit\\bin\\toolport-gateway-") {
+        return true;
+    }
+    false
 }
 
 /// Best-effort read of the gateway entry's `CONDUIT_PROFILE` from raw client-config

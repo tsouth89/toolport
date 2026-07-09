@@ -105,7 +105,8 @@ function VersionFooter({
     if (!update) return;
     setInstalling(true);
     toast.info(`Updating to v${update.version}…`, {
-      description: "Toolport will restart when it's done.",
+      description:
+        "Stopping gateway processes so the installer can replace files. MCP clients may disconnect briefly; your editors can stay open.",
     });
     try {
       await installUpdate(update);

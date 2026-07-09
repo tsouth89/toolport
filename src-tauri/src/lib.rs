@@ -7,6 +7,7 @@ pub mod audit;
 pub mod catalog;
 pub mod clients;
 pub mod downstream;
+pub mod gateway_publish;
 pub mod inspect;
 pub mod integrity;
 pub mod oauth;

@@ -6,6 +6,13 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows auto-update with locked gateway** — MCP configs point at a versioned
+  `toolport-gateway-{version}.exe` under `%APPDATA%\\Roaming\\Conduit\\bin` instead of
+  the install-dir copy; before updating, Toolport stops only spawned gateway processes so
+  NSIS can replace locked binaries without closing Cursor or other agents.
+
 ## [1.6.0] - 2026-07-09
 
 **Headless gateway.** Deploy `toolport-gateway` in Docker, speak MCP over HTTP/SSE, pull

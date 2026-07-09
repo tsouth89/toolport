@@ -1848,6 +1848,13 @@ fn http_bridge_alive(bridge: &mut HttpBridge) -> bool {
     alive
 }
 
+/// Stop client-spawned gateway processes before an in-app update (Windows).
+/// MCP clients stay open; only `toolport-gateway` children exit.
+#[tauri::command]
+fn stop_spawned_gateways() -> u32 {
+    crate::gateway_publish::stop_spawned_gateways()
+}
+
 /// Start `toolport-gateway --http <port>` as a supervised child so HTTP/OpenAPI
 /// clients can connect. Idempotent: if it's already running, returns the current
 /// status; otherwise spawns the bundled gateway binary and tracks it.
@@ -2220,6 +2227,7 @@ pub fn run() {
             start_http_bridge,
             stop_http_bridge,
             http_bridge_status,
+            stop_spawned_gateways,
         ])
         // Close-to-tray: the window's X hides it instead of quitting, so the gateway and
         // approval broker keep running (HITL only works while the app is alive). Quit is
@@ -2269,6 +2277,12 @@ pub fn run() {
             // that path no longer exists). Surgical + backed up; a no-op once every
             // client is on the current path.
             std::thread::spawn(|| {
+                if let Some(published) = crate::gateway_publish::publish_bundled_gateway() {
+                    eprintln!(
+                        "toolport: published client gateway at {}",
+                        published.display()
+                    );
+                }
                 let repointed = clients::repoint_stale_gateways();
                 if !repointed.is_empty() {
                     eprintln!(

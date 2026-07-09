@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 
@@ -21,6 +22,7 @@ export async function checkForUpdate(): Promise<UpdateCheck> {
 
 /** Download + install the update, then relaunch into the new version. */
 export async function installUpdate(update: Update): Promise<void> {
+  await invoke<number>("stop_spawned_gateways");
   await update.downloadAndInstall();
   await relaunch();
 }
