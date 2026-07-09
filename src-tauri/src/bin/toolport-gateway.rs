@@ -1117,7 +1117,7 @@ fn enabled_summary(
     }
 
     let mut out = format!("{header} has {} enabled server(s):\n", servers.len());
-    for s in servers {
+    for s in &servers {
         let target = match (&s.command, &s.url) {
             (Some(cmd), _) => format!("{} {}", cmd, s.args.join(" ")),
             (None, Some(url)) => url.clone(),
@@ -1142,10 +1142,33 @@ fn enabled_summary(
                 *counts.entry(prefix).or_insert(0) += 1;
             }
         }
+        // Only surface the "0 tools" hint once the catalog has actually populated
+        // (at least one server produced tools). Before that, every server reads as
+        // zero simply because downstream connections are still coming up, which
+        // would be pure noise rather than a signal.
         if !counts.is_empty() {
             out.push_str("\nTools by server (pass the prefix as `server` to list them all):\n");
-            for (p, c) in counts {
+            for (p, c) in &counts {
                 out.push_str(&format!("- {p}: {c} tool(s)\n"));
+            }
+            // An enabled server contributing no tools to a populated catalog is the
+            // classic symptom of an auth-gated server that hasn't been signed into
+            // yet (e.g. Atlassian's OAuth), or one that failed to connect. Call it
+            // out so the agent (and user) can self-diagnose instead of assuming the
+            // server is simply missing.
+            let silent: Vec<&str> = servers
+                .iter()
+                .filter(|s| !counts.contains_key(&sanitize_segment(&s.id)))
+                .map(|s| s.name.as_str())
+                .collect();
+            if !silent.is_empty() {
+                out.push_str(
+                    "\nEnabled but exposing 0 tools (may still be connecting, or may need \
+                     authentication - e.g. an OAuth sign-in in Conduit):\n",
+                );
+                for name in silent {
+                    out.push_str(&format!("- {name}\n"));
+                }
             }
         }
     }
@@ -2906,6 +2929,31 @@ fn save_tool_cache(tools: &[Value], profile: Option<&str>) {
     }
 }
 
+/// Resolve this client's live profile from `registry.client_scopes[client_id]`
+/// (kept current by `watch_registry` on every reload). Three cases:
+/// - a non-empty entry: this client is scoped to that named profile;
+/// - an empty-string entry: this client is *explicitly* unscoped (follow the
+///   active profile now), so return `None` and do NOT fall back to the boot env
+///   var - that's what makes a live re-scope to "all servers" take effect
+///   without restarting the client (see `Registry::set_client_unscoped`);
+/// - no entry at all: fall back to the `CONDUIT_PROFILE` this process started
+///   with (e.g. an install from before `CONDUIT_CLIENT_ID` existed).
+/// Callers with no `client_id` at all (the HTTP bridge, or a pre-CLIENT_ID
+/// install) always fall through to `env_profile` unchanged. Note current
+/// installs - scoped or unscoped - always write `CONDUIT_CLIENT_ID`, so an
+/// unscoped one lands in the empty-string case above, not here.
+fn resolve_live_profile(
+    reg: &Registry,
+    client_id: Option<&str>,
+    env_profile: &Option<String>,
+) -> Option<String> {
+    match client_id.and_then(|id| reg.client_scopes.get(id)) {
+        Some(p) if p.trim().is_empty() => None,
+        Some(p) => Some(p.clone()),
+        None => env_profile.clone(),
+    }
+}
+
 /// Poll the registry file; on change, reload, rebuild the router, and tell the
 /// client its tool list changed. This is what makes a toggle apply live.
 #[allow(clippy::too_many_arguments)]
@@ -2915,7 +2963,9 @@ fn watch_registry(
     router: Arc<Mutex<Arc<Router>>>,
     stdout: Arc<Mutex<std::io::Stdout>>,
     cached_tools: Arc<Mutex<Vec<Value>>>,
-    profile: Option<String>,
+    profile: Arc<Mutex<Option<String>>>,
+    client_id: Option<String>,
+    env_profile: Option<String>,
     http_mode: bool,
     downstream_dirty: Arc<AtomicU8>,
     server_handler: ServerRequestHandler,
@@ -2949,14 +2999,28 @@ fn watch_registry(
                 }
             };
             last = current;
+            let resolved = resolve_live_profile(&new_reg, client_id.as_deref(), &env_profile);
+            // Capture the profile we were serving before this reload so the log can
+            // show the transition - the single most useful line when diagnosing
+            // "why can't this client see server X": it pins down which profile is
+            // actually in effect and how many servers it resolved to.
+            let previous = {
+                let mut guard = profile
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let prev = guard.clone();
+                *guard = resolved.clone();
+                prev
+            };
             // Build the new router (spawns processes) before taking locks.
             let new_router = build_router(
                 &new_reg,
-                profile.as_deref(),
+                resolved.as_deref(),
                 http_mode,
                 &downstream_dirty,
                 Arc::clone(&server_handler),
             );
+            let server_count = new_router.server_count();
             let tools = new_router.aggregated_tools();
             *registry
                 .lock()
@@ -2964,10 +3028,28 @@ fn watch_registry(
             *router
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(new_router);
-            let tools = requarantine_if_needed(&registry, &router, tools, profile.as_deref());
-            persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
-            eprintln!("toolport: registry changed, sent tools/list_changed");
+            let tools = requarantine_if_needed(&registry, &router, tools, resolved.as_deref());
+            persist_and_emit(&tools, &cached_tools, &stdout, resolved.as_deref());
+            let fmt_profile = |p: &Option<String>| match p {
+                Some(name) => format!("'{name}'"),
+                None => "(active profile / unscoped)".to_string(),
+            };
+            eprintln!(
+                "toolport: registry changed{} -> profile {} (was {}); {} server(s), {} tools; sent tools/list_changed",
+                client_id
+                    .as_deref()
+                    .map(|c| format!(" [client={c}]"))
+                    .unwrap_or_default(),
+                fmt_profile(&resolved),
+                fmt_profile(&previous),
+                server_count,
+                tools.len(),
+            );
         } else {
+            let resolved = profile
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             // One or more live servers announced a list change. Re-query only the
             // affected list(s) in place rather than re-spawning: a runtime or
             // session-scoped change (the usual reason a server sends this) would be
@@ -2996,8 +3078,8 @@ fn watch_registry(
                 *router
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(next);
-                let tools = requarantine_if_needed(&registry, &router, tools, profile.as_deref());
-                persist_and_emit(&tools, &cached_tools, &stdout, profile.as_deref());
+                let tools = requarantine_if_needed(&registry, &router, tools, resolved.as_deref());
+                persist_and_emit(&tools, &cached_tools, &stdout, resolved.as_deref());
                 eprintln!("toolport: downstream tools/list_changed, refreshed + sent");
             }
             if downstream_changed & downstream::change::RESOURCES != 0 {
@@ -3061,7 +3143,10 @@ struct GatewayState {
     /// server_count under the router lock and skip.
     rebuild_lock: Arc<Mutex<()>>,
     lazy: bool,
-    profile: Option<String>,
+    /// Live-updated: the registry watcher keeps this in sync with
+    /// `registry.client_scopes` for a scoped client, so a profile switch reaches
+    /// every reader here without a gateway restart.
+    profile: Arc<Mutex<Option<String>>>,
     /// True when this process is the HTTP/OpenAPI bridge (vs a stdio client's
     /// gateway). The bridge connects the union of all registered clients' servers.
     http: bool,
@@ -3631,6 +3716,14 @@ fn process_request(
         }
     }
 
+    // Snapshot the live-updated profile once: the watcher may swap it mid-request,
+    // but a single request should see one consistent value throughout.
+    let profile_snapshot = state
+        .profile
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+
     // Self-heal: a call with no live downstream servers means the startup read
     // found none (transient) or a server was authed after we built. Reload and
     // rebuild once so the call can route instead of failing.
@@ -3665,7 +3758,7 @@ fn process_request(
                 .clone();
             let built = build_router(
                 &reg,
-                state.profile.as_deref(),
+                profile_snapshot.as_deref(),
                 state.http,
                 &state.downstream_dirty,
                 Arc::clone(&state.server_handler),
@@ -3681,7 +3774,7 @@ fn process_request(
                         .cached_tools
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = tools.clone();
-                    save_tool_cache(&tools, state.profile.as_deref());
+                    save_tool_cache(&tools, profile_snapshot.as_deref());
                 }
                 glog(&format!(
                     "self-heal: rebuilt router ({} servers, {} tools)",
@@ -3725,7 +3818,7 @@ fn process_request(
         &router,
         &cache_snapshot,
         state.lazy,
-        state.profile.as_deref(),
+        profile_snapshot.as_deref(),
         guard,
         confirm,
         allowed,
@@ -4859,7 +4952,18 @@ fn main() {
     let _ = DISCOVERY_MODE.set(mode);
     let lazy = matches!(mode, DiscoveryMode::Lazy);
     // Per-client scoping: this gateway exposes only the named profile's servers.
-    let profile = std::env::var("CONDUIT_PROFILE")
+    // This is only the bootstrap value - once the registry loads below, the live
+    // value (kept in sync with registry.client_scopes on every watcher tick) wins.
+    let env_profile = std::env::var("CONDUIT_PROFILE")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    // Identifies this client for a live profile lookup in registry.client_scopes,
+    // so any re-scope (scoped->scoped, scoped->unscoped, unscoped->scoped)
+    // propagates without restarting the client. Every install now writes this,
+    // scoped or not; only a client installed before this env var existed lacks it
+    // (until its next reinstall) and falls back to CONDUIT_PROFILE - see
+    // docs/drafts/profile-switch-live-reload-plan.md.
+    let client_id = std::env::var("CONDUIT_CLIENT_ID")
         .ok()
         .filter(|s| !s.trim().is_empty());
     // HTTP/OpenAPI bridge mode: one process serves every registered client, so the
@@ -4868,7 +4972,7 @@ fn main() {
     let http_mode = http_port_opt.is_some();
     glog("=== gateway start ===");
     glog(&format!(
-        "cwd={:?} CONDUIT_REGISTRY={:?} registry_path={:?} dir_resolution={:?} lazy={lazy} profile={profile:?}",
+        "cwd={:?} CONDUIT_REGISTRY={:?} registry_path={:?} dir_resolution={:?} lazy={lazy} profile={env_profile:?} client_id={client_id:?}",
         std::env::current_dir().ok(),
         std::env::var("CONDUIT_REGISTRY").ok(),
         registry::resolved_path(),
@@ -4911,6 +5015,10 @@ fn main() {
         }
     };
     inspect::clear();
+    // Resolve the live profile immediately from what's already on disk, rather than
+    // waiting for the watcher's first tick: a scoped client re-launched after being
+    // re-scoped should see the new profile from its very first request.
+    let resolved_profile = resolve_live_profile(&loaded, client_id.as_deref(), &env_profile);
     let registry = Arc::new(Mutex::new(loaded));
     // Empty router + cached catalog: the handshake and tools/list answer instantly
     // (from cache), while downstream servers connect in the background for the
@@ -4920,7 +5028,11 @@ fn main() {
     // request loop, the watcher, and the self-heal path all follow this, so there's
     // no deadlock; keep new code consistent with it.
     let router = Arc::new(Mutex::new(Arc::new(Router::new())));
-    let cached_tools = Arc::new(Mutex::new(load_tool_cache(profile.as_deref())));
+    let cached_tools = Arc::new(Mutex::new(load_tool_cache(resolved_profile.as_deref())));
+    // Shared, live-updated: the watcher re-resolves this from registry.client_scopes
+    // on every reload (falling back to `env_profile` if this client has no scope
+    // entry), so a profile switch reaches every reader below without a restart.
+    let profile = Arc::new(Mutex::new(resolved_profile));
     let stdout = Arc::new(Mutex::new(std::io::stdout()));
     let ready = Arc::new(AtomicBool::new(false));
     // Flipped by any downstream transport that emits notifications/tools/list_changed.
@@ -4952,19 +5064,17 @@ fn main() {
         let cached_tools = Arc::clone(&cached_tools);
         let downstream_dirty = Arc::clone(&downstream_dirty);
         let server_handler = Arc::clone(&server_handler);
-        let profile = profile.clone();
+        let profile = Arc::clone(&profile);
         std::thread::spawn(move || {
             let reg = registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            let built = build_router(
-                &reg,
-                profile.as_deref(),
-                http_mode,
-                &downstream_dirty,
-                server_handler,
-            );
+            let p = profile
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let built = build_router(&reg, p.as_deref(), http_mode, &downstream_dirty, server_handler);
             let tools = built.aggregated_tools();
             glog(&format!(
                 "background build: {} tools from {} servers",
@@ -4981,7 +5091,7 @@ fn main() {
                 *cached_tools
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = tools.clone();
-                save_tool_cache(&tools, profile.as_deref());
+                save_tool_cache(&tools, p.as_deref());
             } else {
                 glog("background build was empty; keeping previous tool cache");
             }
@@ -4997,7 +5107,9 @@ fn main() {
         let cached_tools = Arc::clone(&cached_tools);
         let downstream_dirty = Arc::clone(&downstream_dirty);
         let server_handler = Arc::clone(&server_handler);
-        let profile = profile.clone();
+        let profile = Arc::clone(&profile);
+        let client_id = client_id.clone();
+        let env_profile = env_profile.clone();
         std::thread::spawn(move || {
             watch_registry(
                 path,
@@ -5006,6 +5118,8 @@ fn main() {
                 stdout,
                 cached_tools,
                 profile,
+                client_id,
+                env_profile,
                 http_mode,
                 downstream_dirty,
                 server_handler,
@@ -5022,7 +5136,7 @@ fn main() {
         downstream_dirty: Arc::clone(&downstream_dirty),
         rebuild_lock: Arc::new(Mutex::new(())),
         lazy,
-        profile: profile.clone(),
+        profile: Arc::clone(&profile),
         http: http_mode,
         mcp_sessions,
         client_upstream,
@@ -5123,6 +5237,84 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_live_profile_prefers_client_scope_over_frozen_env_var() {
+        // The bug: a scoped client's profile used to be frozen at CONDUIT_PROFILE
+        // for the process lifetime. Once client_scopes has an entry for this
+        // client, it must win - that's what makes a profile switch apply without
+        // restarting the client.
+        let mut reg = Registry::default();
+        reg.set_client_scope("cursor", Some("Billing"));
+        let env_profile = Some("Default".to_string());
+        assert_eq!(
+            resolve_live_profile(&reg, Some("cursor"), &env_profile),
+            Some("Billing".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_live_profile_falls_back_to_env_var_when_scope_unset() {
+        // A client_id with no client_scopes entry yet (e.g. installed before
+        // CONDUIT_CLIENT_ID existed, or never re-scoped) keeps the bootstrap value.
+        let reg = Registry::default();
+        let env_profile = Some("Default".to_string());
+        assert_eq!(
+            resolve_live_profile(&reg, Some("cursor"), &env_profile),
+            Some("Default".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_live_profile_explicit_unscope_overrides_frozen_env_var() {
+        // Re-scoping a client to "all servers" records an explicit-unscoped marker
+        // (empty string), which must resolve to None (follow the active profile)
+        // rather than falling back to the CONDUIT_PROFILE this process booted with.
+        // Without this, switching from a named profile to unscoped wouldn't apply
+        // until the client restarted.
+        let mut reg = Registry::default();
+        reg.set_client_unscoped("cursor");
+        let env_profile = Some("Billing".to_string());
+        assert_eq!(resolve_live_profile(&reg, Some("cursor"), &env_profile), None);
+    }
+
+    #[test]
+    fn resolve_live_profile_ignores_other_clients_scopes() {
+        let mut reg = Registry::default();
+        reg.set_client_scope("windsurf", Some("Billing"));
+        let env_profile = Some("Default".to_string());
+        assert_eq!(
+            resolve_live_profile(&reg, Some("cursor"), &env_profile),
+            Some("Default".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_live_profile_unscoped_client_always_uses_env_profile() {
+        // No client_id at all (unscoped install): never consult client_scopes.
+        // This path already resolves the active profile live elsewhere, via
+        // Registry::enabled_servers().
+        let mut reg = Registry::default();
+        reg.set_client_scope("cursor", Some("Billing"));
+        assert_eq!(resolve_live_profile(&reg, None, &None), None);
+    }
+
+    #[test]
+    fn resolve_live_profile_switch_takes_effect_on_next_resolution() {
+        // Simulates a profile switch mid-session: same client_id, registry
+        // mutated in place (as the watcher would see across two poll ticks).
+        let mut reg = Registry::default();
+        reg.set_client_scope("cursor", Some("Billing"));
+        assert_eq!(
+            resolve_live_profile(&reg, Some("cursor"), &None),
+            Some("Billing".to_string())
+        );
+        reg.set_client_scope("cursor", Some("Engineering"));
+        assert_eq!(
+            resolve_live_profile(&reg, Some("cursor"), &None),
+            Some("Engineering".to_string())
+        );
+    }
 
     #[test]
     fn capture_client_upstream_records_roots_sampling_and_elicitation() {
@@ -5271,7 +5463,7 @@ mod tests {
             downstream_dirty: Arc::new(AtomicU8::new(0)),
             rebuild_lock: Arc::new(Mutex::new(())),
             lazy,
-            profile: None,
+            profile: Arc::new(Mutex::new(None)),
             http: true,
             mcp_sessions,
             client_upstream,
@@ -5650,6 +5842,59 @@ mod tests {
         assert!(scoped.contains("bravo"));
         assert!(!scoped.contains("alpha"));
         assert!(!scoped.contains("alpha-cmd"));
+    }
+
+    #[test]
+    fn status_flags_enabled_servers_that_expose_no_tools() {
+        let mut reg = Registry::default();
+        for id in ["github", "atlassian"] {
+            reg.servers.push(ServerEntry {
+                id: id.into(),
+                name: id.into(),
+                transport: "http".into(),
+                command: None,
+                args: vec![],
+                env: vec![],
+                url: Some(format!("https://mcp.{id}.example/mcp")),
+                source: None,
+                disabled_tools: vec![],
+            });
+            reg.set_server_enabled("default", id, true).unwrap();
+        }
+        // Catalog has loaded (github contributed tools) but atlassian is silent -
+        // the classic "connected but unauthed" case (e.g. OAuth not completed).
+        let cached = vec![
+            json!({ "name": "github__list_repos" }),
+            json!({ "name": "github__create_issue" }),
+        ];
+        let out = enabled_summary(&reg, &cached, None, None);
+        assert!(out.contains("github: 2 tool(s)"));
+        assert!(out.contains("Enabled but exposing 0 tools"));
+        // The silent server is named under the hint; the one with tools is not.
+        let hint = out.split("Enabled but exposing 0 tools").nth(1).unwrap();
+        assert!(hint.contains("atlassian"));
+        assert!(!hint.contains("github"));
+    }
+
+    #[test]
+    fn status_omits_zero_tool_hint_before_catalog_populates() {
+        // Before any server has produced tools (empty catalog = still connecting),
+        // the hint must stay silent - otherwise every server reads as "0 tools".
+        let mut reg = Registry::default();
+        reg.servers.push(ServerEntry {
+            id: "github".into(),
+            name: "github".into(),
+            transport: "http".into(),
+            command: None,
+            args: vec![],
+            env: vec![],
+            url: Some("https://mcp.github.example/mcp".into()),
+            source: None,
+            disabled_tools: vec![],
+        });
+        reg.set_server_enabled("default", "github", true).unwrap();
+        let out = enabled_summary(&reg, &[], None, None);
+        assert!(!out.contains("Enabled but exposing 0 tools"));
     }
 
     #[test]

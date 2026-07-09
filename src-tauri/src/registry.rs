@@ -839,6 +839,22 @@ impl Registry {
         }
     }
 
+    /// Record that a client is *explicitly* unscoped: it follows the active
+    /// profile (the full connected set), and we want that to apply live. This is
+    /// deliberately distinct from having no entry at all: an empty-string marker
+    /// means "follow the active profile now", so a running gateway can drop its
+    /// previous scope on the next reload; a missing entry means "no recorded
+    /// scope, fall back to the CONDUIT_PROFILE this process booted with" (e.g. an
+    /// install from before CONDUIT_CLIENT_ID existed). Without this distinction,
+    /// re-scoping a client from a named profile to "all servers" wouldn't take
+    /// effect until the client restarted. The frontend already reads a missing
+    /// or empty scope identically (`clientScopes?.[id] ?? ""`), so this needs no
+    /// UI change.
+    pub fn set_client_unscoped(&mut self, client_id: &str) {
+        self.client_scopes
+            .insert(client_id.to_string(), String::new());
+    }
+
     /// Find the registered HTTP client whose stored hash matches `token`'s
     /// SHA-256, if any. The bridge uses this to resolve a bearer to its scope.
     pub fn http_client_for_token(&self, token: &str) -> Option<&HttpClient> {
@@ -1375,6 +1391,22 @@ mod tests {
         r.set_client_scope("claude", Some("Work"));
         r.set_client_scope("claude", None);
         assert!(!r.client_scopes.contains_key("claude"));
+    }
+
+    #[test]
+    fn explicit_unscoped_is_distinct_from_no_entry() {
+        let mut r = Registry::default();
+        // Explicit-unscoped is recorded as an empty-string entry, NOT a removal, so
+        // the gateway can tell "follow the active profile now" (present, empty)
+        // apart from "no recorded scope, fall back to boot env" (absent).
+        r.set_client_unscoped("cursor");
+        assert_eq!(r.client_scopes.get("cursor").map(String::as_str), Some(""));
+        assert!(r.client_scopes.contains_key("cursor"));
+        // Re-scoping to a named profile replaces the marker; uninstall clears it.
+        r.set_client_scope("cursor", Some("Billing"));
+        assert_eq!(r.client_scopes.get("cursor").map(String::as_str), Some("Billing"));
+        r.set_client_scope("cursor", None);
+        assert!(!r.client_scopes.contains_key("cursor"));
     }
 
     #[test]

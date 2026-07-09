@@ -417,6 +417,42 @@ fn server_from_detected(server: &clients::McpServer, client_id: &str) -> ServerE
     }
 }
 
+/// Servers to add to the registry from a set of detected clients: both a
+/// client's main config servers and its plugin-detected ones (e.g. Cursor/Roo
+/// project-level scans), skipping the gateway's own entry and anything whose
+/// name already exists (checked against `existing` plus whatever this same
+/// call has already picked, so duplicate names across clients collapse to one).
+/// The onboarding banner promises a count across both server sources (see
+/// `importableServers` in `src/lib/types.ts`), so this must actually cover
+/// both or it silently under-imports relative to what was promised.
+fn servers_to_import(detected: &[clients::DetectedClient], existing: &Registry) -> Vec<ServerEntry> {
+    let mut picked: Vec<ServerEntry> = Vec::new();
+    let mut names: std::collections::HashSet<String> = existing
+        .servers
+        .iter()
+        .map(|s| s.name.to_lowercase())
+        .collect();
+    for client in detected {
+        for server in client.servers.iter().chain(client.plugin_servers.iter()) {
+            let entry = server_from_detected(server, &client.id);
+            // Recognize the gateway by command path too, not just the "conduit"
+            // name: an entry registered under any other name (a leftover from
+            // before the rename, a manual add, whatever) still points straight
+            // at our own binary, and importing it risks the gateway proxying
+            // itself. See is_gateway_server's doc comment - this is the exact
+            // contract it promises but this call site wasn't honoring.
+            if clients::is_gateway_server(&entry) {
+                continue;
+            }
+            let key = entry.name.to_lowercase();
+            if names.insert(key) {
+                picked.push(entry);
+            }
+        }
+    }
+    picked
+}
+
 /// Pull servers from every detected client into the registry, skipping any whose
 /// name already exists.
 #[tauri::command]
@@ -425,20 +461,8 @@ async fn import_servers(state: State<'_, RegistryState>) -> Result<Registry, Str
         .await
         .map_err(|e| e.to_string())?;
     let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    for client in &detected {
-        for server in &client.servers {
-            // Never import our own gateway entry (it would recurse).
-            if server.name.eq_ignore_ascii_case(clients::GATEWAY_ENTRY_NAME) {
-                continue;
-            }
-            let exists = reg
-                .servers
-                .iter()
-                .any(|e| e.name.eq_ignore_ascii_case(&server.name));
-            if !exists {
-                reg.add_server(server_from_detected(server, &client.id));
-            }
-        }
+    for server in servers_to_import(&detected, &reg) {
+        reg.add_server(server);
     }
     registry::save(&reg)?;
     Ok(reg.clone())
@@ -591,8 +615,14 @@ fn install_gateway(
     let outcome = clients::install_gateway(&client_id, profile.as_deref())?;
     // Record the scope we just wrote into the client's config, so the UI can show
     // and re-apply this client's effective scope without re-reading the config.
+    // A concrete profile is stored by name; "no profile" is recorded as an
+    // explicit-unscoped marker (not a removal) so a running gateway drops its old
+    // scope live instead of falling back to its boot-time CONDUIT_PROFILE.
     let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_client_scope(&client_id, profile.as_deref());
+    match profile.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => reg.set_client_scope(&client_id, Some(p)),
+        None => reg.set_client_unscoped(&client_id),
+    }
     registry::save(&reg)?;
     Ok(outcome)
 }
@@ -716,9 +746,14 @@ async fn migrate_client(
     clients::migrate_to_gateway(&client_id, profile.as_deref())?;
 
     // Record the scope now that the client config was rewritten to the gateway.
+    // "No profile" becomes an explicit-unscoped marker (not a removal) so a live
+    // re-scope to "all servers" applies without restarting the client.
     let registry = {
         let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        reg.set_client_scope(&client_id, profile.as_deref());
+        match profile.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            Some(p) => reg.set_client_scope(&client_id, Some(p)),
+            None => reg.set_client_unscoped(&client_id),
+        }
         registry::save(&reg)?;
         reg.clone()
     };
@@ -2638,6 +2673,106 @@ mod tests {
             source: None,
             disabled_tools: vec![],
         }
+    }
+
+    fn detected_mcp_server(name: &str) -> clients::McpServer {
+        clients::McpServer {
+            name: name.into(),
+            transport: "stdio".into(),
+            command: Some("x".into()),
+            args: vec![],
+            env_keys: vec![],
+            url: None,
+        }
+    }
+
+    fn detected_mcp_server_with_command(name: &str, command: &str) -> clients::McpServer {
+        clients::McpServer {
+            command: Some(command.into()),
+            ..detected_mcp_server(name)
+        }
+    }
+
+    fn detected_client(id: &str, servers: Vec<&str>, plugin_servers: Vec<&str>) -> clients::DetectedClient {
+        clients::DetectedClient {
+            id: id.into(),
+            name: id.into(),
+            uses_connectors: false,
+            config_path: String::new(),
+            config_exists: true,
+            app_present: true,
+            servers: servers.into_iter().map(detected_mcp_server).collect(),
+            plugin_servers: plugin_servers.into_iter().map(detected_mcp_server).collect(),
+            gateway_installed: false,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn servers_to_import_includes_plugin_detected_servers() {
+        // The onboarding banner promises a count across BOTH client.servers and
+        // client.plugin_servers (see importableServers in src/lib/types.ts); the
+        // import used to only walk client.servers, silently dropping every
+        // plugin-detected one (e.g. Cursor/Roo project-level scans) and leaving
+        // the actual import far short of the promised count.
+        let detected = vec![detected_client(
+            "cursor",
+            vec!["node_repl"],
+            vec!["linear", "github", "figma"],
+        )];
+        let reg = Registry::default();
+        let picked = servers_to_import(&detected, &reg);
+        let names: std::collections::HashSet<_> =
+            picked.iter().map(|s| s.name.to_lowercase()).collect();
+        assert_eq!(names.len(), 4);
+        assert!(names.contains("node_repl"));
+        assert!(names.contains("linear"));
+        assert!(names.contains("github"));
+        assert!(names.contains("figma"));
+    }
+
+    #[test]
+    fn servers_to_import_dedupes_by_name_across_clients_and_sources() {
+        let detected = vec![
+            detected_client("cursor", vec!["Linear"], vec!["linear"]),
+            detected_client("claude-code", vec!["linear"], vec![]),
+        ];
+        let reg = Registry::default();
+        let picked = servers_to_import(&detected, &reg);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].name.to_lowercase(), "linear");
+    }
+
+    #[test]
+    fn servers_to_import_skips_existing_and_own_gateway_entry() {
+        let detected = vec![detected_client(
+            "cursor",
+            vec!["already-here", clients::GATEWAY_ENTRY_NAME],
+            vec!["new-one"],
+        )];
+        let mut reg = Registry::default();
+        reg.add_server(plain_server("x", "already-here"));
+        let picked = servers_to_import(&detected, &reg);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].name, "new-one");
+    }
+
+    #[test]
+    fn servers_to_import_skips_gateway_registered_under_a_different_name() {
+        // Regression: a real config had the gateway entry named "toolport"
+        // (not "conduit"), pointing at toolport-gateway.exe - a leftover from
+        // before the rename or a manual add. The name-only check let it through
+        // and imported the gateway as if it were a normal downstream server,
+        // which risks the gateway proxying itself if ever enabled.
+        let mut client = detected_client("claude-code", vec!["linear"], vec![]);
+        client.servers.push(detected_mcp_server_with_command(
+            "toolport",
+            r"C:\Users\x\AppData\Local\Toolport\toolport-gateway.exe",
+        ));
+        let reg = Registry::default();
+        let picked = servers_to_import(&[client], &reg);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].name.to_lowercase(), "linear");
     }
 
     #[test]

@@ -1883,12 +1883,17 @@ fn write_yaml_extensions(path: &Path, servers: &[ServerEntry]) -> Result<(), Str
     atomic_write(path, &out)
 }
 
-fn edit_yaml_gateway(path: &Path, install: bool, profile: Option<&str>) -> Result<(), String> {
+fn edit_yaml_gateway(
+    path: &Path,
+    install: bool,
+    profile: Option<&str>,
+    client_id: &str,
+) -> Result<(), String> {
     let mut root = read_existing_yaml(path)?;
     let exts = yaml_extensions_mut(&mut root);
     let key = serde_yaml::Value::String(GATEWAY_ENTRY_NAME.into());
     if install {
-        exts.insert(key, entry_to_goose_yaml(&gateway_entry(profile)?));
+        exts.insert(key, entry_to_goose_yaml(&gateway_entry(profile, client_id)?));
     } else {
         exts.remove(&key);
     }
@@ -2039,6 +2044,7 @@ fn edit_continue_yaml_gateway(
     path: &Path,
     install: bool,
     profile: Option<&str>,
+    client_id: &str,
 ) -> Result<(), String> {
     let mut root = read_existing_yaml(path)?;
 
@@ -2053,7 +2059,7 @@ fn edit_continue_yaml_gateway(
     });
 
     if install {
-        servers.push(entry_to_continue_yaml(&gateway_entry(profile)?));
+        servers.push(entry_to_continue_yaml(&gateway_entry(profile, client_id)?));
     }
 
     let out = serde_yaml::to_string(&root).map_err(|e| e.to_string())?;
@@ -2229,12 +2235,16 @@ fn edit_hermes_yaml_gateway(
     path: &Path,
     install: bool,
     profile: Option<&str>,
+    client_id: &str,
 ) -> Result<(), String> {
     let mut root = read_existing_hermes_yaml(path)?;
     let mcp_servers = hermes_mcp_servers_mut(&mut root);
     let key = serde_yaml::Value::String(GATEWAY_ENTRY_NAME.into());
     if install {
-        mcp_servers.insert(key, entry_to_hermes_yaml(&gateway_entry(profile)?));
+        mcp_servers.insert(
+            key,
+            entry_to_hermes_yaml(&gateway_entry(profile, client_id)?),
+        );
     } else {
         mcp_servers.remove(&key);
     }
@@ -2381,7 +2391,7 @@ fn stable_gateway_copy(src: &std::path::Path) -> Option<PathBuf> {
     Some(dest)
 }
 
-fn gateway_entry(profile: Option<&str>) -> Result<ServerEntry, String> {
+fn gateway_entry(profile: Option<&str>, client_id: &str) -> Result<ServerEntry, String> {
     let path = resolve_gateway_path().ok_or("Could not locate the toolport-gateway binary")?;
     let env_var = |k: &str, v: &str| crate::registry::EnvVar {
         key: k.to_string(),
@@ -2394,8 +2404,19 @@ fn gateway_entry(profile: Option<&str>) -> Result<ServerEntry, String> {
     // gateway (e.g. Antigravity), where a config env would never take effect.
     // Only per-client profile scoping needs an env var.
     let mut env: Vec<crate::registry::EnvVar> = Vec::new();
-    // Optionally scope this client to one profile, so it only ever sees that
-    // slice of servers (no cross-domain tool ambiguity).
+    // Always identify the client. The gateway re-resolves this client's live
+    // profile from registry.client_scopes[CONDUIT_CLIENT_ID] on every reload, so
+    // every re-scope applies without restarting the client - scoped->scoped,
+    // scoped->unscoped, AND unscoped->scoped (an unscoped install still carries
+    // its id, and its empty-string scope marker just resolves to "follow the
+    // active profile" until it's given a named one). A client installed before
+    // this env var existed simply has no CONDUIT_CLIENT_ID until its next
+    // reinstall and falls back to CONDUIT_PROFILE meanwhile. See
+    // docs/drafts/profile-switch-live-reload-plan.md.
+    env.push(env_var("CONDUIT_CLIENT_ID", client_id));
+    // CONDUIT_PROFILE is only the *initial* value for a scoped install; once the
+    // registry loads, the live client_scopes entry wins. Unscoped installs omit
+    // it (and record an empty-string scope marker via set_client_unscoped).
     if let Some(p) = profile.map(str::trim).filter(|p| !p.is_empty()) {
         env.push(env_var("CONDUIT_PROFILE", p));
     }
@@ -2418,6 +2439,7 @@ fn edit_json_gateway(
     install: bool,
     profile: Option<&str>,
     lenient: bool,
+    client_id: &str,
 ) -> Result<(), String> {
     let mut root = if path.exists() {
         let content = read_config_file(path)?;
@@ -2439,7 +2461,7 @@ fn edit_json_gateway(
     if install {
         servers.insert(
             GATEWAY_ENTRY_NAME.to_string(),
-            entry_to_json(&gateway_entry(profile)?),
+            entry_to_json(&gateway_entry(profile, client_id)?),
         );
     } else {
         servers.remove(GATEWAY_ENTRY_NAME);
@@ -2449,7 +2471,12 @@ fn edit_json_gateway(
     atomic_write(path, &out)
 }
 
-fn edit_toml_gateway(path: &Path, install: bool, profile: Option<&str>) -> Result<(), String> {
+fn edit_toml_gateway(
+    path: &Path,
+    install: bool,
+    profile: Option<&str>,
+    client_id: &str,
+) -> Result<(), String> {
     let mut root = if path.exists() {
         let content = read_config_file(path)?;
         read_existing_toml(&content)?
@@ -2478,7 +2505,7 @@ fn edit_toml_gateway(path: &Path, install: bool, profile: Option<&str>) -> Resul
     if install {
         servers.insert(
             GATEWAY_ENTRY_NAME.to_string(),
-            entry_to_toml(&gateway_entry(profile)?),
+            entry_to_toml(&gateway_entry(profile, client_id)?),
         );
     } else {
         servers.remove(GATEWAY_ENTRY_NAME);
@@ -2512,16 +2539,20 @@ fn install_or_remove(
     let lenient = config_is_whole_app_state(client_id);
     match def.format {
         Format::JsonMcpServers => {
-            edit_json_gateway(&path, "mcpServers", install, profile, lenient)?
+            edit_json_gateway(&path, "mcpServers", install, profile, lenient, client_id)?
         }
-        Format::JsonServers => edit_json_gateway(&path, "servers", install, profile, lenient)?,
+        Format::JsonServers => {
+            edit_json_gateway(&path, "servers", install, profile, lenient, client_id)?
+        }
         Format::JsonContextServers => {
-            edit_json_gateway(&path, "context_servers", install, profile, true)?
+            edit_json_gateway(&path, "context_servers", install, profile, true, client_id)?
         }
-        Format::TomlMcpServers => edit_toml_gateway(&path, install, profile)?,
-        Format::YamlExtensions => edit_yaml_gateway(&path, install, profile)?,
-        Format::YamlMcpServers => edit_hermes_yaml_gateway(&path, install, profile)?,
-        Format::YamlMcpServersList => edit_continue_yaml_gateway(&path, install, profile)?,
+        Format::TomlMcpServers => edit_toml_gateway(&path, install, profile, client_id)?,
+        Format::YamlExtensions => edit_yaml_gateway(&path, install, profile, client_id)?,
+        Format::YamlMcpServers => edit_hermes_yaml_gateway(&path, install, profile, client_id)?,
+        Format::YamlMcpServersList => {
+            edit_continue_yaml_gateway(&path, install, profile, client_id)?
+        }
     }
     Ok(WriteOutcome {
         path: path.display().to_string(),
@@ -2545,7 +2576,7 @@ pub fn uninstall_gateway(client_id: &str) -> Result<WriteOutcome, String> {
 /// the client talking only to the gateway. Backs up first; unrelated config keys
 /// are preserved. Caller is responsible for importing first so nothing is lost.
 pub fn migrate_to_gateway(client_id: &str, profile: Option<&str>) -> Result<WriteOutcome, String> {
-    write_servers(client_id, &[gateway_entry(profile)?])
+    write_servers(client_id, &[gateway_entry(profile, client_id)?])
 }
 
 /// Whether a client's stored gateway command should be re-pointed: it names the
@@ -2920,7 +2951,7 @@ bad = "not-a-table"
         )
         .unwrap();
 
-        edit_json_gateway(&path, "mcpServers", true, Some("Billing"), false).unwrap();
+        edit_json_gateway(&path, "mcpServers", true, Some("Billing"), false, "claude-code").unwrap();
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let servers = root["mcpServers"].as_object().unwrap();
@@ -2934,13 +2965,40 @@ bad = "not-a-table"
         assert_eq!(root["theme"], "dark");
         assert_eq!(servers["existing"]["env"]["SECRET"], "keepme");
 
-        edit_json_gateway(&path, "mcpServers", false, None, false).unwrap();
+        edit_json_gateway(&path, "mcpServers", false, None, false, "claude-code").unwrap();
         let root2: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let servers2 = root2["mcpServers"].as_object().unwrap();
         assert!(!servers2.contains_key("conduit"));
         assert!(servers2.contains_key("existing"));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn scoped_install_writes_client_id_for_live_profile_resolution() {
+        // A scoped install must carry CONDUIT_CLIENT_ID alongside CONDUIT_PROFILE,
+        // so the running gateway can re-resolve this client's profile live from
+        // registry.client_scopes instead of trusting a frozen env var forever.
+        let entry = gateway_entry(Some("Billing"), "cursor").unwrap();
+        let env: std::collections::HashMap<_, _> = entry
+            .env
+            .iter()
+            .map(|e| (e.key.clone(), e.value.clone()))
+            .collect();
+        assert_eq!(env.get("CONDUIT_PROFILE").unwrap().as_deref(), Some("Billing"));
+        assert_eq!(env.get("CONDUIT_CLIENT_ID").unwrap().as_deref(), Some("cursor"));
+
+        // Unscoped installs still carry CONDUIT_CLIENT_ID (so the client can be
+        // re-scoped to a named profile live later, without a restart) but omit
+        // CONDUIT_PROFILE - the gateway resolves the active profile live for them.
+        let unscoped = gateway_entry(None, "cursor").unwrap();
+        let uenv: std::collections::HashMap<_, _> = unscoped
+            .env
+            .iter()
+            .map(|e| (e.key.clone(), e.value.clone()))
+            .collect();
+        assert_eq!(uenv.get("CONDUIT_CLIENT_ID").unwrap().as_deref(), Some("cursor"));
+        assert!(uenv.get("CONDUIT_PROFILE").is_none());
     }
 
     // Informational (no assert): prints what the Cursor plugin scanner finds on
@@ -3071,7 +3129,7 @@ bad = "not-a-table"
         assert_eq!(parsed[0].name, "existing");
 
         // Installing preserves the unrelated key and the existing server.
-        edit_json_gateway(&path, "context_servers", true, None, true).unwrap();
+        edit_json_gateway(&path, "context_servers", true, None, true, "zed").unwrap();
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(root["ui_font_size"], 16);
@@ -3087,7 +3145,7 @@ bad = "not-a-table"
         let garbage = "this is not json or json5 at all {{{";
         std::fs::write(&path, garbage).unwrap();
         // A lenient edit must ERROR, never replace the file with an empty object.
-        assert!(edit_json_gateway(&path, "context_servers", true, None, true).is_err());
+        assert!(edit_json_gateway(&path, "context_servers", true, None, true, "zed").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
         std::fs::remove_file(&path).ok();
     }
@@ -3108,7 +3166,7 @@ bad = "not-a-table"
         let path = std::env::temp_dir().join(format!("conduit-claude-{}.json", std::process::id()));
         let garbage = "{ \"projects\": {}, \"oauthAccount\": broken not json";
         std::fs::write(&path, garbage).unwrap();
-        assert!(edit_json_gateway(&path, "mcpServers", true, None, true).is_err());
+        assert!(edit_json_gateway(&path, "mcpServers", true, None, true, "claude-code").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
         std::fs::remove_file(&path).ok();
     }
@@ -3121,7 +3179,7 @@ bad = "not-a-table"
         let path = std::env::temp_dir().join(format!("conduit-bad-{}.toml", std::process::id()));
         let garbage = "model = \"o3\"\n[[[ this is not valid toml";
         std::fs::write(&path, garbage).unwrap();
-        assert!(edit_toml_gateway(&path, true, None).is_err());
+        assert!(edit_toml_gateway(&path, true, None, "codex").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
         std::fs::remove_file(&path).ok();
     }
@@ -3135,7 +3193,7 @@ bad = "not-a-table"
             "model = \"o3\"\napproval_policy = \"on-request\"\n\n[profiles.work]\nmodel = \"gpt-5\"\n",
         )
         .unwrap();
-        edit_toml_gateway(&path, true, None).unwrap();
+        edit_toml_gateway(&path, true, None, "codex").unwrap();
         let v: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v.get("model").and_then(|x| x.as_str()), Some("o3"));
         assert_eq!(
@@ -3200,7 +3258,7 @@ bad = "not-a-table"
         assert_eq!(parsed[0].transport, "stdio");
 
         // Installing the gateway preserves the model key and the existing extension.
-        edit_yaml_gateway(&path, true, None).unwrap();
+        edit_yaml_gateway(&path, true, None, "goose").unwrap();
         let v: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
@@ -3215,7 +3273,7 @@ bad = "not-a-table"
         assert!(conduit.get("cmd").and_then(|x| x.as_str()).is_some());
 
         // Uninstall removes only conduit.
-        edit_yaml_gateway(&path, false, None).unwrap();
+        edit_yaml_gateway(&path, false, None, "goose").unwrap();
         let after: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let exts2 = after
@@ -3233,7 +3291,7 @@ bad = "not-a-table"
         let garbage = "key: value\n  - [unbalanced flow sequence\n:::not valid";
         std::fs::write(&path, garbage).unwrap();
         // A parse failure must error, never replace config.yaml (it holds model config).
-        assert!(edit_yaml_gateway(&path, true, None).is_err());
+        assert!(edit_yaml_gateway(&path, true, None, "goose").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
         std::fs::remove_file(&path).ok();
     }
@@ -3294,7 +3352,7 @@ bad = "not-a-table"
         assert_eq!(parsed[0].env_keys, vec!["Authorization".to_string()]);
 
         // Installing the gateway preserves the model key and the existing server.
-        edit_hermes_yaml_gateway(&path, true, None).unwrap();
+        edit_hermes_yaml_gateway(&path, true, None, "hermes").unwrap();
         let v: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
@@ -3309,7 +3367,7 @@ bad = "not-a-table"
         assert!(conduit.get("command").and_then(|x| x.as_str()).is_some());
 
         // Uninstall removes only conduit.
-        edit_hermes_yaml_gateway(&path, false, None).unwrap();
+        edit_hermes_yaml_gateway(&path, false, None, "hermes").unwrap();
         let after: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let servers2 = after
@@ -3327,7 +3385,7 @@ bad = "not-a-table"
         let garbage = "key: value\n  - [unbalanced flow sequence\n:::not valid";
         std::fs::write(&path, garbage).unwrap();
         // A parse failure must error, never replace config.yaml (it holds model config).
-        assert!(edit_hermes_yaml_gateway(&path, true, None).is_err());
+        assert!(edit_hermes_yaml_gateway(&path, true, None, "hermes").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
         std::fs::remove_file(&path).ok();
     }
