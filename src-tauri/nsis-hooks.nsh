@@ -11,6 +11,20 @@
 ; need to delete the leftover Conduit ones here. On a fresh install these
 ; Deletes are harmless no-ops.
 
+; MCP clients (Cursor, Codex, …) spawn toolport-gateway.exe from the install dir.
+; NSIS must overwrite that file on upgrade; kill orphans before file copy.
+; (In-app updater on 1.6.1+ also calls stop_spawned_gateways, but manual installs
+; and the 1.6.0 -> 1.6.1 hop need this hook.)
+!macro NSIS_HOOK_PREINSTALL
+  nsExec::ExecToLog 'taskkill /F /IM toolport-gateway.exe'
+  Pop $0
+  nsExec::ExecToLog 'taskkill /F /IM conduit-gateway.exe'
+  Pop $0
+  Sleep 1000
+  Delete "$INSTDIR\toolport-gateway.exe"
+  Delete "$INSTDIR\conduit-gateway.exe"
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
   Delete "$SMPROGRAMS\Conduit.lnk"
   Delete "$DESKTOP\Conduit.lnk"

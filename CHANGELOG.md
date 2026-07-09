@@ -6,6 +6,18 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-07-09
+
+**Windows install fix (completes 1.6.1).** Manual installer downloads and the
+1.6.0 → 1.6.1 hop now kill locked gateway processes before NSIS copies files.
+
+### Fixed
+
+- **Windows NSIS install with locked gateway** — `NSIS_HOOK_PREINSTALL` runs
+  `taskkill` on `toolport-gateway.exe` / `conduit-gateway.exe` before file copy.
+  1.6.1 only stopped gateways during in-app update from an already-updated app, so
+  manual installs and upgrades from 1.6.0 still failed when Cursor held the gateway.
+
 ## [1.6.1] - 2026-07-09
 
 **Windows auto-update fix.** If Cursor or another MCP client held `toolport-gateway.exe`
@@ -1201,7 +1213,8 @@ driven by the agent on your terms, and supports two more clients.
 - First public release: local MCP gateway and manager with lazy discovery,
   per-agent profiles, the catalog, the tool playground, and the activity log.
 
-[Unreleased]: https://github.com/tsouth89/toolport/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/tsouth89/toolport/compare/v1.6.2...HEAD
+[1.6.2]: https://github.com/tsouth89/toolport/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/tsouth89/toolport/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/tsouth89/toolport/releases/tag/v1.6.0
 [1.5.3]: https://github.com/tsouth89/toolport/releases/tag/v1.5.3
