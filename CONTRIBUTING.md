@@ -15,6 +15,7 @@ Requires Node 20+ and the Rust toolchain.
 ```bash
 npm install
 npm run build:gateway   # build the gateway binary (clients spawn it; needed when running from source)
+                       # uses --no-default-features to skip Tauri/WebKit for a fast compile
 npm run tauri dev       # run the desktop app
 ```
 
@@ -34,7 +35,7 @@ The gateway is a separate binary that AI clients spawn as a subprocess. Packaged
 releases bundle it, but when running from source you must build it manually:
 
 ```bash
-npm run build:gateway   # one-time, or after gateway code changes
+npm run build:gateway   # one-time, or after gateway code changes (--no-default-features)
 ```
 
 If a client reports the gateway "was not found," you forgot this step.

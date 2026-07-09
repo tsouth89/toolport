@@ -6,18 +6,50 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-09
+
+Headless gateway release: deploy Toolport as a container, speak MCP over HTTP/SSE,
+and ship a prebuilt GHCR image. Plus MCP server-initiated RPC passthrough, Teams
+usage reporting, and a fix for npx cold-start false errors.
+
+### Added
+
+- **Headless / container gateway.** Run `toolport-gateway` without the desktop app:
+  `POST /mcp` streamable-HTTP, env-file secrets (`CONDUIT_SECRET_KEY`), Docker +
+  `docker-compose.example.yml`, and docs in `docs/headless.md`. (#214)
+- **MCP listen stream.** `GET /mcp` opens a long-lived SSE stream for server→client
+  JSON-RPC (keepalive when idle). (#216)
+- **MCP server-initiated RPC passthrough (#167).** When the upstream client declares
+  `roots`, `sampling`, or `elicitation` at `initialize`, downstream servers can call
+  `roots/list`, `sampling/createMessage`, and `elicitation/create`; the gateway
+  forwards to the client over stdio or HTTP MCP. HTTP downstream answers inline
+  during SSE `POST` responses. (#217, #218, #219)
+- **Prebuilt gateway image on GHCR.** `ghcr.io/tsouth89/toolport-gateway:latest`
+  published from `main` (CI-built binary + slim runtime image). (#222, #223)
+- **AnythingLLM client support.** Connect AnythingLLM to Toolport from the Clients
+  view. (#213)
+- **Teams per-server usage rollups.** Members report per-server tool-call counts to
+  the team server for dashboard rollups. (#221)
+
 ### Fixed
 
 - **npx-based servers no longer show a false "Error" on their first connect.** `npx -y`,
-  `uvx`, `pnpm dlx`, and similar download-then-run launchers can take 15-60s to fetch
+  `uvx`, `pnpm dlx`, and similar download-then-run launchers can take 15–60s to fetch
   their package on a cold cache, but the connect handshake only waited 10s, so a
-  freshly added (or cache-wiped) server timed out into an Error badge and then
-  "mysteriously" worked on the next refresh. Launcher commands now get a 120s
-  first-`initialize` budget (everything else keeps the tight 10s so hung servers still
-  fail fast), the app shows "Installing…" instead of an anonymous stall while the
-  download runs, a timeout that does hit explains the package is still downloading,
-  and adding an npx-style server pre-warms the download in the background so the first
-  real connect is instant.
+  freshly added server timed out into an Error badge and then worked on retry. Launcher
+  commands now get a 120s first-`initialize` budget (everything else keeps 10s), the
+  app shows **"Installing…"** while the download runs, and adding an npx-style server
+  pre-warms the download in the background. (#237)
+- **SSE streaming for inline server-initiated RPC.** HTTP downstream no longer buffers
+  the full SSE body before forwarding inline JSON-RPC to the upstream client. (#220)
+- **Registry data preserved on read failure.** A transient or permission error reading
+  `registry.json` no longer wipes the file to an empty default. (#224)
+
+### Changed
+
+- **Gateway-only compile path.** `cargo build --no-default-features --bin toolport-gateway`
+  skips the Tauri desktop shell and WebKit; CI/docker builds use this (~3 min vs ~8 min).
+  Default `desktop` feature unchanged for the app. (#225)
 
 ## [1.5.3] - 2026-07-08
 
@@ -1154,7 +1186,9 @@ driven by the agent on your terms, and supports two more clients.
 - First public release: local MCP gateway and manager with lazy discovery,
   per-agent profiles, the catalog, the tool playground, and the activity log.
 
-[Unreleased]: https://github.com/tsouth89/conduit/compare/v0.3.16...HEAD
+[Unreleased]: https://github.com/tsouth89/toolport/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/tsouth89/toolport/releases/tag/v1.6.0
+[1.5.3]: https://github.com/tsouth89/toolport/releases/tag/v1.5.3
 [0.3.16]: https://github.com/tsouth89/conduit/releases/tag/v0.3.16
 [0.3.15]: https://github.com/tsouth89/conduit/releases/tag/v0.3.15
 [0.3.14]: https://github.com/tsouth89/conduit/releases/tag/v0.3.14

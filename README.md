@@ -315,9 +315,14 @@ The frontend is typechecked with `npx tsc --noEmit`.
   attempt keeps the callback port reserved for a few minutes and can cause a
   "state mismatch" on the next try.
 - **A client reports the gateway "was not found" (running from source).** Build
-  the gateway binary once: `cd src-tauri && cargo build --bin toolport-gateway`.
+  the gateway binary once: `npm run build:gateway` (or
+  `cargo build --no-default-features --bin toolport-gateway --manifest-path src-tauri/Cargo.toml`).
   `npm run tauri dev` builds the app but not this separate binary; packaged
   releases bundle it, so installed users never hit this.
+- **An npx/uvx server shows "Error" then works on retry.** On a cold npm/PyPI cache
+  the first connect can take up to ~2 minutes while the package downloads. v1.6.0+
+  shows **"Installing…"** during that wait and pre-warms downloads when you add the
+  server. If it still fails, check network access and try **Re-check** after a minute.
 - **Repeated macOS keychain prompts / "could not read secret from the keychain"
   in dev.** An unsigned dev build gets an unstable code-signing identity, so the
   keychain re-prompts or denies reads. Signed release builds (v0.9.3+) don't: they
@@ -350,8 +355,9 @@ Toolport is in active development. Working end to end: the
 gateway, lazy discovery, per-agent scoping, OAuth/key auth with live propagation,
 the catalog, client import/migrate, per-tool and destructive-tool governance, the
 human approval queue, a global Settings view, tool-integrity and content-defense
-detection, an audit log with latency/error stats, resources + prompts proxying, and
-a tool playground. See
+detection, an audit log with latency/error stats, resources + prompts proxying, a
+tool playground, and a **headless/container gateway** (MCP over HTTP/SSE, Docker,
+GHCR image — see [docs/headless.md](docs/headless.md)). See
 [docs/ROADMAP.md](docs/ROADMAP.md) for what is done and planned.
 
 ## Known issues

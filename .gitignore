@@ -94,3 +94,7 @@ license-signing.keycd
 /docs/SITE-MESSAGING.md
 /docs/specs/
 /docs/drafts/
+
+# Agent/session scratch (never commit)
+_poll_pr.py
+_cr*.txt
