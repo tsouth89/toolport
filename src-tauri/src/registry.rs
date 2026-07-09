@@ -321,6 +321,15 @@ pub struct Registry {
     /// only the legacy single `CONDUIT_HTTP_TOKEN` (back-compat).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub http_clients: Vec<HttpClient>,
+    /// Top-level fields THIS build doesn't know, preserved verbatim across
+    /// load -> save. The registry is shared by mixed versions of the app and
+    /// long-running gateways (a dev build, the installed release, and gateways
+    /// spawned days ago can all touch one file); serde's default is to silently
+    /// IGNORE unknown fields, which meant an older binary's next save stripped
+    /// every newer-schema field. Capturing them instead makes old binaries
+    /// pass-through-safe.
+    #[serde(flatten)]
+    pub unknown_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A joined Conduit Teams server. Holds only non-secret connection metadata; the
@@ -415,6 +424,7 @@ impl Default for Registry {
             result_budgets: HashMap::new(),
             client_scopes: HashMap::new(),
             http_clients: Vec::new(),
+            unknown_fields: serde_json::Map::new(),
         }
     }
 }
@@ -1002,21 +1012,92 @@ fn restore_from_backup(path: &Path) -> Option<Registry> {
     Some(registry)
 }
 
+/// What a (retried) read of the registry file actually found.
+enum ReadOutcome {
+    Content(String),
+    /// Still missing or empty after retries: genuinely absent, not a race.
+    Absent,
+}
+
+/// Read the registry tolerating the transient states a concurrent `atomic_write`
+/// (or an SMB view of one - packaged gateways reach this file over the
+/// `\\localhost\C$` twin, where rename windows are wider) can expose: a brief
+/// not-found, empty, or sharing-violation moment during the rename. A reader
+/// that mistakes that moment for "the registry is gone" used to fall into
+/// `restore_from_backup`, which REWRITES the primary from a possibly-days-old
+/// .bak - the exact mechanism that destroyed a real user registry (manual
+/// servers added over three days lost to a self-heal from a stale backup).
+/// Retrying a few times before concluding anything makes that race unloseable.
+fn read_registry_file(path: &Path) -> ReadOutcome {
+    const ATTEMPTS: u32 = 4;
+    const BACKOFF_MS: u64 = 75;
+    for attempt in 0..ATTEMPTS {
+        match std::fs::read_to_string(path) {
+            Ok(content) if !content.trim().is_empty() => return ReadOutcome::Content(content),
+            // Empty, missing, locked (sharing violation), or any other error:
+            // all indistinguishable from a rename in flight. Wait and re-look.
+            _ => {}
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS));
+        }
+    }
+    ReadOutcome::Absent
+}
+
+/// Preserve an unreadable registry file next to the original before anything
+/// overwrites it. "Unreadable" does NOT always mean corrupt: on a machine
+/// running mixed builds it can be a NEWER schema this binary can't parse, and
+/// destroying it silently loses whatever the newer build stored. Best-effort;
+/// keeps the most recent few so a repeating failure can't fill the disk.
+fn quarantine_unreadable(path: &Path, content: &str) {
+    const KEEP: usize = 3;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".unreadable-{ts}"));
+    let _ = atomic_write(&PathBuf::from(name), content);
+    // Prune older quarantine files beyond the newest KEEP.
+    let (Some(dir), Some(base)) = (path.parent(), path.file_name().and_then(|f| f.to_str()))
+    else {
+        return;
+    };
+    let prefix = format!("{base}.unreadable-");
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut quarantined: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f.starts_with(&prefix))
+        })
+        .collect();
+    // Timestamps are fixed-width for any realistic epoch, so name order = age order.
+    quarantined.sort();
+    while quarantined.len() > KEEP {
+        let _ = std::fs::remove_file(quarantined.remove(0));
+    }
+}
+
 pub fn load_from(path: &Path) -> Result<Registry, String> {
-    if !path.exists() {
-        // registry.json is gone; recover the last-known-good from the .bak sibling
-        // if one survived (e.g. the primary was deleted but the backup intact).
-        return Ok(restore_from_backup(path).unwrap_or_default());
-    }
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    if content.trim().is_empty() {
-        return Ok(restore_from_backup(path).unwrap_or_default());
-    }
-    match serde_json::from_str(&content) {
-        Ok(reg) => Ok(reg),
-        // Corrupt registry.json: recover from the backup before surfacing the
-        // error, so a bad file doesn't wipe the user's server list.
-        Err(e) => restore_from_backup(path).ok_or_else(|| format!("Corrupt registry: {e}")),
+    match read_registry_file(path) {
+        // Genuinely missing or empty (not a rename race - read_registry_file
+        // already waited that out): recover the last-known-good from the .bak
+        // sibling if one survived, else this is a first run.
+        ReadOutcome::Absent => Ok(restore_from_backup(path).unwrap_or_default()),
+        ReadOutcome::Content(content) => match serde_json::from_str(&content) {
+            Ok(reg) => Ok(reg),
+            // Present but unparseable by THIS build: corrupt, or a newer schema.
+            // Quarantine the evidence BEFORE restore_from_backup self-heals the
+            // primary from .bak, so nothing is ever silently destroyed.
+            Err(e) => {
+                quarantine_unreadable(path, &content);
+                restore_from_backup(path).ok_or_else(|| format!("Corrupt registry: {e}"))
+            }
+        },
     }
 }
 
@@ -1026,10 +1107,17 @@ pub fn save_to(path: &Path, registry: &Registry) -> Result<(), String> {
     }
     // Snapshot the current on-disk registry to a `.bak` sibling before overwriting,
     // but only if it still parses, so a bad write or an accidental deletion of
-    // registry.json has a last-known-good to recover from (see load_from).
+    // registry.json has a last-known-good to recover from (see load_from). An
+    // existing file that does NOT parse is quarantined instead of silently
+    // overwritten: on a mixed-version machine it may be a newer build's registry,
+    // and this save (from an older binary) must not be the thing that destroys it.
     if let Ok(existing) = std::fs::read_to_string(path) {
-        if !existing.trim().is_empty() && serde_json::from_str::<Registry>(&existing).is_ok() {
-            let _ = atomic_write(&backup_path(path), &existing);
+        if !existing.trim().is_empty() {
+            if serde_json::from_str::<Registry>(&existing).is_ok() {
+                let _ = atomic_write(&backup_path(path), &existing);
+            } else {
+                quarantine_unreadable(path, &existing);
+            }
         }
     }
     let json = serde_json::to_string_pretty(registry).map_err(|e| e.to_string())?;
@@ -1432,6 +1520,122 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "overwrite must stay owner-only");
         std::fs::remove_file(&path).ok();
+    }
+
+    fn quarantine_files(path: &Path) -> Vec<PathBuf> {
+        let dir = path.parent().unwrap();
+        let prefix = format!("{}.unreadable-", path.file_name().unwrap().to_str().unwrap());
+        let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|f| f.to_str())
+                    .is_some_and(|f| f.starts_with(&prefix))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn cleanup_quarantine(path: &Path) {
+        for q in quarantine_files(path) {
+            std::fs::remove_file(q).ok();
+        }
+    }
+
+    #[test]
+    fn corrupt_primary_is_quarantined_before_selfheal() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-reg-quar-{}.json", std::process::id()));
+        let bak = backup_path(&path);
+        cleanup_quarantine(&path);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&bak).ok();
+
+        let mut reg = Registry::default();
+        reg.add_server(sample_server("alpha"));
+        save_to(&path, &reg).unwrap();
+        save_to(&path, &reg).unwrap(); // second save rotates .bak
+
+        // A newer build (or corruption) leaves bytes this build can't parse. The
+        // self-heal from .bak must PRESERVE those bytes, not destroy them - they
+        // may be three days of a newer build's data (this happened for real).
+        std::fs::write(&path, r#"{"servers": "future-shape"}"#).unwrap();
+        let recovered = load_from(&path).unwrap();
+        assert_eq!(recovered.servers.len(), 1, "self-healed from .bak");
+        let q = quarantine_files(&path);
+        assert_eq!(q.len(), 1, "unreadable primary must be quarantined");
+        let kept = std::fs::read_to_string(&q[0]).unwrap();
+        assert!(kept.contains("future-shape"), "quarantine holds the exact bytes");
+
+        cleanup_quarantine(&path);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&bak).ok();
+    }
+
+    #[test]
+    fn save_over_unparseable_existing_quarantines_instead_of_clobbering() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-reg-savequar-{}.json", std::process::id()));
+        let bak = backup_path(&path);
+        cleanup_quarantine(&path);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&bak).ok();
+
+        std::fs::write(&path, r#"{"servers": 42}"#).unwrap();
+        save_to(&path, &Registry::default()).unwrap();
+        assert!(!bak.exists(), "unparseable existing must never become the .bak");
+        let q = quarantine_files(&path);
+        assert_eq!(q.len(), 1, "the bytes we overwrote must survive in quarantine");
+        assert!(std::fs::read_to_string(&q[0]).unwrap().contains("42"));
+
+        cleanup_quarantine(&path);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn unknown_top_level_fields_survive_a_round_trip() {
+        // An OLDER binary loading and re-saving a NEWER build's registry must not
+        // strip fields it doesn't understand (mixed versions share this file).
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-reg-fwd-{}.json", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+
+        let mut json = serde_json::to_value(Registry::default()).unwrap();
+        json["someFutureFeature"] = serde_json::json!({ "enabled": true, "level": 3 });
+        std::fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
+
+        let reg = load_from(&path).unwrap();
+        save_to(&path, &reg).unwrap();
+        let round: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            round["someFutureFeature"]["level"], 3,
+            "unknown fields must round-trip, not be stripped"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+    }
+
+    #[test]
+    fn quarantine_prunes_to_the_newest_three() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-reg-prune-{}.json", std::process::id()));
+        cleanup_quarantine(&path);
+        for i in 0..5 {
+            quarantine_unreadable(&path, &format!("junk-{i}"));
+            // Distinct millisecond timestamps so each call gets its own file.
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+        let q = quarantine_files(&path);
+        assert_eq!(q.len(), 3, "quarantine must stay bounded");
+        let newest = std::fs::read_to_string(q.last().unwrap()).unwrap();
+        assert_eq!(newest, "junk-4", "pruning removes the oldest, keeps the newest");
+        cleanup_quarantine(&path);
     }
 
     #[test]
