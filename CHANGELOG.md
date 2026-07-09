@@ -6,6 +6,19 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+### Fixed
+
+- **npx-based servers no longer show a false "Error" on their first connect.** `npx -y`,
+  `uvx`, `pnpm dlx`, and similar download-then-run launchers can take 15-60s to fetch
+  their package on a cold cache, but the connect handshake only waited 10s, so a
+  freshly added (or cache-wiped) server timed out into an Error badge and then
+  "mysteriously" worked on the next refresh. Launcher commands now get a 120s
+  first-`initialize` budget (everything else keeps the tight 10s so hung servers still
+  fail fast), the app shows "Installing…" instead of an anonymous stall while the
+  download runs, a timeout that does hit explains the package is still downloading,
+  and adding an npx-style server pre-warms the download in the background so the first
+  real connect is instant.
+
 ## [1.5.3] - 2026-07-08
 
 Teams reliability and activation batch, ahead of the Teams launch.

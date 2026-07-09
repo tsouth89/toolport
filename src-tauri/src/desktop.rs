@@ -242,7 +242,45 @@ fn add_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Registr
     let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.add_server(entry);
     registry::save(&reg)?;
+    // add_server appends, so the saved entry (with its assigned id) is the last one.
+    if let Some(saved) = reg.servers.last() {
+        prewarm_launcher(saved);
+    }
     Ok(reg.clone())
+}
+
+/// Fire-and-forget spawn of a just-added download-then-run server (npx, uvx, ...)
+/// so the launcher fetches its package now, in the background, instead of on the
+/// first health probe or gateway connect. Lenient about env: missing secrets are
+/// skipped rather than fatal - the child may exit complaining about them, but by
+/// then the package is already in the launcher's cache, which is the whole point.
+/// The connect result is deliberately ignored; the real probe reports health.
+fn prewarm_launcher(server: &ServerEntry) {
+    let Some(command) = server.command.clone() else {
+        return;
+    };
+    if !crate::downstream::is_download_launcher(&command, &server.args) {
+        return;
+    }
+    let server = server.clone();
+    std::thread::spawn(move || {
+        let env: Vec<(String, String)> = server
+            .env
+            .iter()
+            .filter_map(|e| {
+                e.value
+                    .clone()
+                    .or_else(|| secrets::get_secret(&server.id, &e.key))
+                    .map(|v| (e.key.clone(), v))
+            })
+            .collect();
+        if let Ok(t) = StdioTransport::spawn(&command, &server.args, &env) {
+            // Attempting the handshake keeps the child alive until the download
+            // finishes (dropping the transport kills it), and warms it end-to-end
+            // when the server actually comes up.
+            let _ = DownstreamServer::connect(server.id.clone(), Box::new(t));
+        }
+    });
 }
 
 #[tauri::command]
