@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, Copy, KeyRound, LogIn, Pencil, Trash2, Users } from "lucide-react";
 import { isDownloadLauncher } from "@/lib/launcher";
+import { errorHeadline, shortenUrls } from "@/lib/errors";
 import type { ProbeResult, Registry, ServerEntry } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -222,9 +223,18 @@ export function RegistryServerRow({
             </code>
           )}
           {status === "error" && health?.error && (
-            <p className="max-h-32 overflow-y-auto text-xs break-words whitespace-pre-wrap text-warning">
-              {health.error}
-            </p>
+            <div className="flex flex-col gap-1">
+              {/* Lead with a readable headline so the useful signal (exit status,
+                  EADDRINUSE, a 401) isn't buried under a stack trace + a giant
+                  OAuth URL; the full output stays below, bounded and scrollable
+                  with long URLs shortened. */}
+              <p className="text-xs font-medium text-warning">
+                {errorHeadline(health.error)}
+              </p>
+              <p className="max-h-32 overflow-y-auto font-mono text-[11px] break-words whitespace-pre-wrap text-muted-foreground">
+                {shortenUrls(health.error)}
+              </p>
+            </div>
           )}
 
           <div className="flex flex-wrap items-center gap-1">
@@ -319,7 +329,7 @@ function StatusLabel({
       <Tooltip>
         <TooltipTrigger asChild>{text}</TooltipTrigger>
         <TooltipContent side="top" className="max-w-xs">
-          <p className="text-xs text-warning">{error}</p>
+          <p className="text-xs text-warning">{errorHeadline(error)}</p>
         </TooltipContent>
       </Tooltip>
     );
