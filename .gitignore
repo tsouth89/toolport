@@ -68,6 +68,7 @@ dist-ssr
 /benchmark/sweep-summary.md
 /benchmark/ctx*/
 /benchmark/smoke/
+.smoke-test/
 /benchmark/capable/
 /benchmark/local-*/
 /benchmark/groq/
