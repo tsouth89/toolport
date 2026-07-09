@@ -321,6 +321,10 @@ pub struct Registry {
     /// only the legacy single `CONDUIT_HTTP_TOKEN` (back-compat).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub http_clients: Vec<HttpClient>,
+    /// Bumped when vaulted secrets change so running gateways reload even when
+    /// the rest of the registry JSON is unchanged.
+    #[serde(default)]
+    pub secrets_generation: u64,
     /// Top-level fields THIS build doesn't know, preserved verbatim across
     /// load -> save. The registry is shared by mixed versions of the app and
     /// long-running gateways (a dev build, the installed release, and gateways
@@ -424,6 +428,7 @@ impl Default for Registry {
             result_budgets: HashMap::new(),
             client_scopes: HashMap::new(),
             http_clients: Vec::new(),
+            secrets_generation: 0,
             unknown_fields: serde_json::Map::new(),
         }
     }
@@ -842,6 +847,16 @@ impl Registry {
     }
 }
 
+/// Leaf directory name under the OS config root (`Conduit` release, `Conduit-dev`
+/// for debug/`tauri dev` builds). Override the full path with `CONDUIT_DATA_DIR`.
+pub(crate) fn data_dir_leaf_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "Conduit-dev"
+    } else {
+        "Conduit"
+    }
+}
+
 /// How [`conduit_dir`] was resolved, for startup diagnostics. Only Windows has
 /// interesting cases (MSIX app containers); everywhere else it is `Direct`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -904,12 +919,20 @@ fn resolve_conduit_dir() -> (Option<PathBuf>, DirResolution) {
         std::sync::OnceLock::new();
     RESOLVED
         .get_or_init(|| {
+            if let Ok(dir) = std::env::var("CONDUIT_DATA_DIR") {
+                if !dir.trim().is_empty() {
+                    return (Some(PathBuf::from(dir)), DirResolution::Direct);
+                }
+            }
+            let leaf = data_dir_leaf_name();
             #[cfg(windows)]
             {
                 let Some(home) = dirs::home_dir() else {
                     return (None, DirResolution::Direct);
                 };
-                let conduit = |base: &Path| base.join("AppData").join("Roaming").join("Conduit");
+                let conduit = |base: &Path| {
+                    base.join("AppData").join("Roaming").join(leaf)
+                };
                 if !msix::has_package_identity() {
                     return (Some(conduit(&home)), DirResolution::Direct);
                 }
@@ -925,7 +948,7 @@ fn resolve_conduit_dir() -> (Option<PathBuf>, DirResolution) {
             #[cfg(not(windows))]
             {
                 (
-                    dirs::config_dir().map(|d| d.join("Conduit")),
+                    dirs::config_dir().map(|d| d.join(leaf)),
                     DirResolution::Direct,
                 )
             }
@@ -981,6 +1004,56 @@ mod msix {
 /// Default path: `<conduit dir>/registry.json`.
 pub fn registry_path() -> Option<PathBuf> {
     Some(conduit_dir()?.join("registry.json"))
+}
+
+const RECOVERY_NOTICE_FILE: &str = "registry-recovery.json";
+
+/// Written when `load_from` recovers from `registry.json.bak` so the app can
+/// surface a one-time notice. Consumed by [`take_recovery_notice`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryRecoveryNotice {
+    pub recovered_at_ms: u128,
+    /// `"missing"` when the primary was absent; `"corrupt"` when it was unreadable.
+    pub reason: String,
+    pub quarantine_path: Option<String>,
+}
+
+fn recovery_notice_path() -> Option<PathBuf> {
+    Some(conduit_dir()?.join(RECOVERY_NOTICE_FILE))
+}
+
+fn record_registry_recovery(reason: &str, quarantine: Option<PathBuf>) {
+    let Some(path) = recovery_notice_path() else {
+        return;
+    };
+    let recovered_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let notice = RegistryRecoveryNotice {
+        recovered_at_ms,
+        reason: reason.to_string(),
+        quarantine_path: quarantine.as_ref().map(|p| p.to_string_lossy().into_owned()),
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&notice) {
+        let _ = atomic_write(&path, &json);
+    }
+    eprintln!(
+        "toolport: recovered registry from backup ({reason}){}",
+        quarantine
+            .as_ref()
+            .map(|p| format!("; quarantined copy at {}", p.display()))
+            .unwrap_or_default()
+    );
+}
+
+/// Read and delete the pending recovery notice (at most once per recovery).
+pub fn take_recovery_notice() -> Option<RegistryRecoveryNotice> {
+    let path = recovery_notice_path()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    serde_json::from_str(&raw).ok()
 }
 
 /// The always-on gateway log (connection lifecycle: starts, connect successes
@@ -1050,7 +1123,8 @@ fn read_registry_file(path: &Path) -> ReadOutcome {
 /// running mixed builds it can be a NEWER schema this binary can't parse, and
 /// destroying it silently loses whatever the newer build stored. Best-effort;
 /// keeps the most recent few so a repeating failure can't fill the disk.
-fn quarantine_unreadable(path: &Path, content: &str) {
+/// Returns the quarantine file path when a copy was written.
+fn quarantine_unreadable(path: &Path, content: &str) -> Option<PathBuf> {
     const KEEP: usize = 3;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1058,14 +1132,15 @@ fn quarantine_unreadable(path: &Path, content: &str) {
         .unwrap_or(0);
     let mut name = path.as_os_str().to_owned();
     name.push(format!(".unreadable-{ts}"));
-    let _ = atomic_write(&PathBuf::from(name), content);
+    let dest = PathBuf::from(name);
+    atomic_write(&dest, content).ok()?;
     // Prune older quarantine files beyond the newest KEEP.
     let (Some(dir), Some(base)) = (path.parent(), path.file_name().and_then(|f| f.to_str()))
     else {
-        return;
+        return None;
     };
     let prefix = format!("{base}.unreadable-");
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else { return None };
     let mut quarantined: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
@@ -1080,6 +1155,7 @@ fn quarantine_unreadable(path: &Path, content: &str) {
     while quarantined.len() > KEEP {
         let _ = std::fs::remove_file(quarantined.remove(0));
     }
+    Some(dest)
 }
 
 pub fn load_from(path: &Path) -> Result<Registry, String> {
@@ -1087,15 +1163,28 @@ pub fn load_from(path: &Path) -> Result<Registry, String> {
         // Genuinely missing or empty (not a rename race - read_registry_file
         // already waited that out): recover the last-known-good from the .bak
         // sibling if one survived, else this is a first run.
-        ReadOutcome::Absent => Ok(restore_from_backup(path).unwrap_or_default()),
+        ReadOutcome::Absent => {
+            if let Some(reg) = restore_from_backup(path) {
+                record_registry_recovery("missing", None);
+                Ok(reg)
+            } else {
+                Ok(Registry::default())
+            }
+        }
         ReadOutcome::Content(content) => match serde_json::from_str(&content) {
             Ok(reg) => Ok(reg),
             // Present but unparseable by THIS build: corrupt, or a newer schema.
             // Quarantine the evidence BEFORE restore_from_backup self-heals the
             // primary from .bak, so nothing is ever silently destroyed.
             Err(e) => {
-                quarantine_unreadable(path, &content);
-                restore_from_backup(path).ok_or_else(|| format!("Corrupt registry: {e}"))
+                let quarantine = quarantine_unreadable(path, &content);
+                match restore_from_backup(path) {
+                    Some(reg) => {
+                        record_registry_recovery("corrupt", quarantine);
+                        Ok(reg)
+                    }
+                    None => Err(format!("Corrupt registry: {e}")),
+                }
             }
         },
     }
@@ -1526,7 +1615,7 @@ mod tests {
     fn conduit_dir_is_direct_outside_a_container() {
         assert_eq!(conduit_dir_resolution(), DirResolution::Direct);
         let dir = conduit_dir().expect("home dir resolves");
-        assert!(dir.ends_with(r"AppData\Roaming\Conduit"));
+        assert!(dir.ends_with(format!("AppData\\Roaming\\{}", data_dir_leaf_name())));
         assert!(!dir.to_string_lossy().starts_with(r"\\"));
     }
 
@@ -1722,5 +1811,17 @@ mod tests {
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_file(&bak).ok();
+    }
+
+    #[test]
+    fn data_dir_leaf_is_dev_in_debug_builds() {
+        assert_eq!(
+            data_dir_leaf_name(),
+            if cfg!(debug_assertions) {
+                "Conduit-dev"
+            } else {
+                "Conduit"
+            }
+        );
     }
 }

@@ -520,6 +520,17 @@ export function getRegistry(): Promise<Registry> {
   return invoke<Registry>("get_registry");
 }
 
+/** One-time notice after the registry was recovered from `.bak` on launch. */
+export interface RegistryRecoveryNotice {
+  recoveredAtMs: number;
+  reason: string;
+  quarantinePath?: string | null;
+}
+
+export function takeRegistryRecoveryNotice(): Promise<RegistryRecoveryNotice | null> {
+  return invoke<RegistryRecoveryNotice | null>("take_registry_recovery_notice");
+}
+
 /** Pull servers from every detected client into the registry. */
 export function importServers(): Promise<Registry> {
   return invoke<Registry>("import_servers");

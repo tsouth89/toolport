@@ -210,6 +210,10 @@ describe("round-trip", () => {
       label: "Windows path with spaces and trailing backslash",
     },
     {
+      args: ["--header", "Authorization:Bearer ${POSTHOG_AUTH_HEADER}"],
+      label: "PostHog mcp-remote header with env placeholder",
+    },
+    {
       args: ["multiple  spaces", "tab\there"],
       label: "arg with multiple spaces and tab",
     },
