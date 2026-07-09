@@ -174,22 +174,23 @@ pub fn stop_spawned_gateways() -> u32 {
     0
 }
 
+/// Last path segment, regardless of OS path separator (client configs store Windows paths).
+fn path_basename(stored: &str) -> &str {
+    stored.rsplit(['\\', '/']).next().unwrap_or(stored)
+}
+
 /// Whether a stored client config still points at an install-dir (unversioned) gateway.
 pub fn is_unversioned_install_gateway_path(stored: &str) -> bool {
     let lower = stored.to_ascii_lowercase();
     if lower.contains("conduit-gateway") {
         return true;
     }
-    let path = Path::new(stored);
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return false;
-    };
-    let name_lower = name.to_ascii_lowercase();
+    let name_lower = path_basename(stored).to_ascii_lowercase();
     if name_lower != "toolport-gateway.exe" && name_lower != "conduit-gateway.exe" {
         return false;
     }
     // Unversioned basename outside Conduit/bin → install dir or other stale layout.
-    !lower.contains("\\conduit\\bin\\")
+    !(lower.contains("\\conduit\\bin\\") || lower.contains("/conduit/bin/"))
 }
 
 #[cfg(test)]
