@@ -906,9 +906,11 @@ pub fn normalize_invocation(command: &str, args: &[String]) -> (String, Vec<Stri
 /// Windows shims (`npx.cmd`, `npx.exe`) count too.
 pub fn is_download_launcher(command: &str, args: &[String]) -> bool {
     let (command, args) = normalize_invocation(command, args);
-    let base = Path::new(&command)
-        .file_name()
-        .and_then(|n| n.to_str())
+    // Split on both separators so Windows paths (e.g. `C:\...\npx.cmd`) match on
+    // Linux CI and when configs store absolute shim paths cross-platform.
+    let base = command
+        .rsplit(['/', '\\'])
+        .next()
         .unwrap_or(&command)
         .to_ascii_lowercase();
     let base = base
