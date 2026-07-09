@@ -1009,6 +1009,88 @@ pub fn parse_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String> 
     )
 }
 
+/// The base program name of a command: the file name, lowercased, without a
+/// `.exe`/`.cmd`/`.ps1` extension (so `C:\...\npx.cmd` -> `npx`).
+fn launcher_base(command: &str) -> String {
+    let file = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    let lower = file.to_ascii_lowercase();
+    for ext in [".exe", ".cmd", ".ps1"] {
+        if let Some(stripped) = lower.strip_suffix(ext) {
+            return stripped.to_string();
+        }
+    }
+    lower
+}
+
+/// If the command is a package runner (npx, uvx, bunx, pnpm/yarn dlx, npm exec/x,
+/// pipx run), return the package it runs - the meaningful identity - rather than
+/// the runner. Mirrors `isDownloadLauncher` in the frontend. `None` when the
+/// command is a normal program (then the command name itself is the identity).
+fn launcher_package_arg(command: &str, args: &[String]) -> Option<String> {
+    // Tolerate a packed `"npx -y @scope/pkg"` command with empty args.
+    let (base, argv): (String, Vec<String>) = if args.is_empty() {
+        let mut parts = command.split_whitespace();
+        let first = parts.next().unwrap_or("");
+        (launcher_base(first), parts.map(str::to_string).collect())
+    } else {
+        (launcher_base(command), args.to_vec())
+    };
+    let sub = argv.first().map(String::as_str);
+    let pkg_start = match base.as_str() {
+        "npx" | "uvx" | "bunx" => 0,
+        "pnpm" | "yarn" if sub == Some("dlx") => 1,
+        "npm" if matches!(sub, Some("exec") | Some("x")) => 1,
+        "pipx" if sub == Some("run") => 1,
+        _ => return None,
+    };
+    // The package is the first token after the sub-command that isn't a flag.
+    argv.iter()
+        .skip(pkg_start)
+        .find(|t| !t.starts_with('-'))
+        .cloned()
+}
+
+/// Turn a package spec into a friendly server name: drop the `@scope/`, drop a
+/// `@version` suffix, and strip the ubiquitous MCP name affixes, so
+/// `@verygoodplugins/mcp-automem` -> `automem` and
+/// `@modelcontextprotocol/server-github` -> `github`.
+fn package_friendly_name(pkg: &str) -> String {
+    let no_scope = pkg
+        .strip_prefix('@')
+        .and_then(|s| s.split_once('/'))
+        .map(|(_, n)| n)
+        .unwrap_or(pkg);
+    let no_version = no_scope.split('@').next().unwrap_or(no_scope);
+    let mut core = no_version;
+    for p in ["mcp-server-", "mcp-", "server-"] {
+        if let Some(rest) = core.strip_prefix(p) {
+            core = rest;
+            break;
+        }
+    }
+    for s in ["-mcp-server", "-server-mcp", "-mcp", "-server"] {
+        if let Some(rest) = core.strip_suffix(s) {
+            core = rest;
+            break;
+        }
+    }
+    if core.is_empty() { no_version } else { core }.to_string()
+}
+
+/// Derive a display name for a bare (unnamed) pasted server from its invocation:
+/// the package a runner launches (so every `npx ...` server doesn't collapse to
+/// the name "npx"), else the command's own file stem.
+fn name_from_invocation(command: &str, args: &[String]) -> String {
+    if let Some(pkg) = launcher_package_arg(command, args) {
+        return package_friendly_name(&pkg);
+    }
+    std::path::Path::new(command)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(command)
+        .to_string()
+}
+
 /// Parse a JSON snippet, trying each known wrapper key, then a bare server object.
 fn parse_json_snippet(
     content: &str,
@@ -1033,18 +1115,17 @@ fn parse_json_snippet(
     // Bare server object: has `command` or `url` at the top level.
     if value.get("command").is_some() || value.get("url").is_some() {
         let name = if forced_name.is_empty() {
-            // Derive a name from the command path.
-            value
-                .get("command")
-                .and_then(|c| c.as_str())
-                .map(|c| {
-                    std::path::Path::new(c)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(c)
-                        .to_string()
-                })
-                .unwrap_or_default()
+            // Derive a name from the invocation. A package runner (npx, uvx, ...)
+            // is named after the package it runs, not the runner - otherwise every
+            // `npx -y <pkg>` server collapses to the name (and id, and tool prefix)
+            // "npx" and they all collide. See issue #251.
+            let command = value.get("command").and_then(|c| c.as_str()).unwrap_or_default();
+            let args: Vec<String> = value
+                .get("args")
+                .and_then(|a| a.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            name_from_invocation(command, &args)
         } else {
             forced_name.to_string()
         };
@@ -3626,8 +3707,33 @@ OD_DATA_DIR = "/tmp/data"
         let json = r#"{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}"#;
         let servers = parse_snippet(json).unwrap();
         assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].name, "npx");
+        // A package runner is named after the package it runs, not the runner
+        // "npx" - otherwise every bare npx server collides on the id "npx" and its
+        // tools are prefixed npx__ (issue #251).
+        assert_eq!(servers[0].name, "filesystem");
         assert_eq!(servers[0].command.as_deref(), Some("npx"));
+    }
+
+    #[test]
+    fn launcher_named_after_package_not_runner() {
+        let vs = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // The reporter's case and friends: name comes from the package, with the
+        // scope, version, and MCP name affixes stripped (issue #251).
+        assert_eq!(name_from_invocation("npx", &vs(&["-y", "@verygoodplugins/mcp-automem"])), "automem");
+        assert_eq!(name_from_invocation("npx", &vs(&["-y", "@modelcontextprotocol/server-github"])), "github");
+        assert_eq!(name_from_invocation("uvx", &vs(&["mcp-server-fetch"])), "fetch");
+        assert_eq!(name_from_invocation("npx", &vs(&["@upstash/context7-mcp"])), "context7");
+        assert_eq!(name_from_invocation("npx", &vs(&["-y", "mcp-remote@latest"])), "remote");
+        assert_eq!(name_from_invocation("bunx", &vs(&["some-tool"])), "some-tool");
+        // A Windows npx.cmd path is still recognized as the npx launcher.
+        assert_eq!(
+            name_from_invocation("C:\\Program Files\\nodejs\\npx.cmd", &vs(&["-y", "@scope/mcp-thing"])),
+            "thing"
+        );
+        // A packed "npx -y <pkg>" command with empty args is handled.
+        assert_eq!(name_from_invocation("npx -y @verygoodplugins/mcp-automem", &[]), "automem");
+        // A non-runner keeps its own command file stem (unchanged behavior).
+        assert_eq!(name_from_invocation("/usr/local/bin/my-server", &[]), "my-server");
     }
 
     #[test]
