@@ -4,7 +4,7 @@
 # Published to ghcr.io/tsouth89/toolport-gateway on push to main (see
 # .github/workflows/docker-publish.yml).
 
-FROM rust:1-slim AS build
+FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev libdbus-1-dev libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
