@@ -83,7 +83,11 @@ pub struct EnvVar {
     pub secret: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// No `Eq`: the `unknown_fields` flatten map (a serde_json::Map) is only `PartialEq`.
+// Dropping `Eq` is what lets an older binary preserve per-server fields it doesn't
+// recognize on re-save, mirroring the same forward-compat protection already on
+// `Registry`. Nothing keys a set/map by `ServerEntry`, so `Eq` was unused.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerEntry {
     #[serde(default)]
@@ -107,6 +111,11 @@ pub struct ServerEntry {
     /// an empty list means every tool the server advertises is exposed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_tools: Vec<String>,
+    /// Per-server fields written by a newer build that this binary doesn't know
+    /// about. Captured on load and re-emitted on save so a mixed-version binary
+    /// never strips them (same contract as `Registry::unknown_fields`).
+    #[serde(flatten)]
+    pub unknown_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1315,6 +1324,7 @@ mod tests {
             url: None,
             source: Some("manual".to_string()),
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         }
     }
 
@@ -1779,6 +1789,48 @@ mod tests {
         assert_eq!(
             round["someFutureFeature"]["level"], 3,
             "unknown fields must round-trip, not be stripped"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+    }
+
+    #[test]
+    fn unknown_server_fields_survive_a_round_trip() {
+        // Same forward-compat contract as the top-level test, at the per-SERVER
+        // level: an older binary loading and re-saving a newer build's registry
+        // must not strip a `ServerEntry` field it doesn't understand.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-reg-srv-fwd-{}.json", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(backup_path(&path)).ok();
+
+        let mut reg = Registry::default();
+        reg.servers.push(ServerEntry {
+            id: "s1".into(),
+            name: "s1".into(),
+            transport: "stdio".into(),
+            command: Some("x".into()),
+            args: vec![],
+            env: vec![],
+            url: None,
+            source: None,
+            disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
+        });
+        // Inject a per-server field this binary's ServerEntry doesn't define.
+        let mut json = serde_json::to_value(&reg).unwrap();
+        json["servers"][0]["futureServerFlag"] = serde_json::json!({ "enabled": true });
+        std::fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        save_to(&path, &loaded).unwrap();
+        let round: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            round["servers"][0]["futureServerFlag"]["enabled"],
+            true,
+            "unknown per-server fields must round-trip, not be stripped"
         );
 
         std::fs::remove_file(&path).ok();
