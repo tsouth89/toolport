@@ -12,11 +12,11 @@ Reproduce it yourself: [`benchmark/`](benchmark/).
 
 - **Two modes**, same tasks, same model:
   - **flat**, every downstream tool exposed directly (`CONDUIT_DISCOVERY=full`), the normal MCP setup.
-  - **lazy**, Toolport advertises 3 meta-tools (`toolport_status`, `toolport_search_tools`,
-    `toolport_call_tool`) and the agent searches/calls on demand (`CONDUIT_DISCOVERY=lazy`).
-    (The current default advertises a fourth, `toolport_fetch_result`; the default
-    set measures 886 tokens of always-on overhead today. It doesn't change the
-    reduction story below.)
+  - **lazy**, Toolport advertises 4 meta-tools (`toolport_status`, `toolport_search_tools`,
+    `toolport_call_tool`, `toolport_fetch_result`) and the agent searches/calls on demand
+    (`CONDUIT_DISCOVERY=lazy`). (The headline reduction below was originally measured on the
+    earlier 3-meta-tool set; the current 4-tool default measures 886 tokens of always-on
+    overhead, which doesn't change the reduction story.)
 - **Model:** GPT-5.5 (frontier, via the Vercel AI Gateway), so model capability is not the
   variable, both modes can actually complete every task.
 - **Tasks (5 runs each):** list Stripe products; list Neon projects; list Vercel projects
@@ -101,7 +101,7 @@ against an instant mock downstream so the number is purely Toolport's own overhe
 | Operation                                                    | Median        |
 | ------------------------------------------------------------ | ------------- |
 | Handshake (one-time, per gateway start)                      | ~21 ms        |
-| `tools/list` (lazy, 3 tools)                                 | ~0.2 ms       |
+| `tools/list` (lazy, 4 tools)                                 | ~0.2 ms       |
 | `toolport_search_tools`                                      | ~0.1 ms       |
 | A tool call through Toolport vs. calling the server directly | **+~0.75 ms** |
 

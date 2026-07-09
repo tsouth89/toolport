@@ -7,13 +7,13 @@ that exposes 4 meta-tools the agent searches on demand, so context stays flat:
 measured ~90% fewer tokens at the same task success. This document is the working
 spec, capturing the architecture decision and the build order.
 
-**Status (2026-07-03):** v1.1.0 published (renamed Conduit -> Toolport at v1.0.0).
+**Status (2026-07-09):** v1.6.2 published (renamed Conduit -> Toolport at v1.0.0).
 Signed/notarized macOS (Apple Silicon + Intel, data-protection keychain + nested
 gateway, no keychain prompts on update), Windows (Azure Trusted Signing), Linux
-(deb/AppImage) via a tag-triggered pipeline + in-app auto-updater. 20 clients.
+(deb/AppImage) via a tag-triggered pipeline + in-app auto-updater. 22 clients.
 Recently shipped: human-in-the-loop tool approval (with approve-for-session and
 per-tool overrides), tray/menu-bar background running + launch-at-login, desktop
-notifications on held calls, and severity-tiered security notices. Shipping: lazy
+notifications on held calls, and severity-tiered security notices. Shipped: lazy
 discovery, OAuth/key auth
 with live propagation, catalog, import/migrate, per-tool + destructive-tool
 governance, audit log, resources/prompts proxying, tool playground, semantic search,
@@ -55,6 +55,17 @@ the **registry cross-process cache-coherence** problem (the app persists its in-
 toggles, so the two can clobber each other; a file lock alone won't fix it, the correct
 fix is reload-under-lock at every app mutation or a gateway→app cache-refresh signal;
 low real exposure since the gateway only writes when `allow_agent_control` is on).
+
+**Shipped since the 07-03 update (as of 2026-07-09).** The **headless gateway**
+(v1.6.0: Docker image + streamable-HTTP/OpenAPI serving, env-var secrets), so the
+gateway runs server-side, not only as a desktop sidecar. **Teams launched**
+(2026-07-08) with a hosted control plane at teams.toolport.app, join-code onboarding,
+long-poll config + policy sync, and the org approval/defense policy above. **Grouped
+discovery mode** (`CONDUIT_DISCOVERY=grouped`). **AnythingLLM + Antigravity** client
+support (22 clients). A Windows reliability batch: versioned gateway path, NSIS
+gateway-kill on install, dev data dir, registry-recovery notice, gateway secret reload,
+and serialized OAuth callback across clients. With the core feature-complete and Teams
+shipped, near-term focus is distribution and growth over new engineering.
 
 **In flight**
 
@@ -124,17 +135,20 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
 
 ### New-user UX (first 10 minutes; scaffolding is strong, these are the sharp edges)
 
-- [ ] **Backend failures render as innocent empty states.** Gateway down ->
+- [x] **Backend failures render as innocent empty states.** Gateway down ->
       Activity shows "No tool calls yet", not "can't reach backend, retry".
       Distinguish error from empty (CatalogView already does). Top UX fix. (M)
-- [ ] **Add-server form saves broken servers silently** (empty command/URL);
+- [x] **Add-server form saves broken servers silently** (empty command/URL);
       require + inline-validate before enabling Add. (S)
-- [ ] ClientDetail throws Connect / Import / Move at a first-timer before teaching
+- [x] ClientDetail throws Connect / Import / Move at a first-timer before teaching
       that Toolport is the gateway; lead with the mental model. (M)
 - [ ] Jargon + dead ends: rename "Move config in", tooltip "Add to catalog", helper
       text on transports, make the Settings "See docs/openwebui.md" a real link,
       default Activity "Recent calls" filter off, Playground "0 tools" state,
       `vendorFromKey` fallback for unknown keys. (S each)
+      **Partial:** Playground "0 tools" copy, `vendorFromKey` fallback, the Activity
+      default filter, and inline OpenWebUI setup shipped; still open: rename "Move
+      config in", the "Add to catalog" tooltip, and transports helper text.
 
 ### Robustness / tech debt
 
@@ -144,8 +158,10 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
 - [x] **Router lock held across the downstream call SHIPPED (#95, #99):** the live
       router is a `Mutex<Arc<Router>>`; dispatch clones the Arc and releases the lock
       before the (possibly 120s-held) downstream call, and the HTTP loop is multithreaded.
-- [ ] Tests for the new HTTP transport (status mapping, error paths) and
-      `semantic.rs` (blend math, embed cache). (M)
+- [x] Tests for the new HTTP transport (status mapping, error paths) and
+      `semantic.rs` (blend math, embed cache). (M) HTTP round-trip/SSE/scope/preflight
+      tests plus `semantic.rs` cosine + embed-cache-key tests exist; the end-to-end
+      lexical+semantic blend still lacks a dedicated combination test.
 
 ### Strategic / differentiators (what makes it amazing)
 
@@ -153,6 +169,10 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       authenticates to Toolport, shows up in the app, you assign which servers it
       sees. Profiles already do half. This is Sigiz's explicit ask AND the proper
       long-term auth model for the HTTP bridge. The real moat. (L)
+      **Partial:** per-client server scoping shipped (HTTP-bridge bearer tokens
+      scoped to a profile via `resolve_http_scope`/`http_clients`, plus live
+      `client_scopes` resolution); still open: OAuth-based inbound client
+      registration (no authorize/register endpoint; tokens are issued manually).
 - [x] **Block-on-drift / quarantine + re-approval for high-risk tools.** SHIPPED
       2026-06-30 (on main, unreleased): opt-in `quarantine_on_drift` blocks a
       high-risk drift (a poisoned definition, or a destructive tool whose definition
@@ -162,12 +182,13 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
 - [ ] **Local-small-model UX.** 7B models still struggle with the lazy
       search-then-call chain (the multi-step guard helped, didn't solve). This is
       Open WebUI's core audience. (L)
-- [ ] **Live call-inspection in Activity** (real request/response bytes) folds MCP
+- [x] **Live call-inspection in Activity** (real request/response bytes) folds MCP
       Peek's value into Toolport, since we're already on the path. (M)
 - [ ] Result-shaping Tier 2: per-server fidelity policy, projection, code-execution
       handoff; end-to-end "does the model actually page" validation. (M-L)
-- [ ] Showcase server (`conduit-openapi-mcp`: any OpenAPI spec -> an MCP server; npm
-      publish pending) as the funnel + a demo of lazy discovery + result-shaping.
+- [x] Showcase server (`toolport-openapi-mcp`: any OpenAPI spec -> an MCP server;
+      published to npm as `toolport-openapi-mcp@0.2.0`) as the funnel + a demo of
+      lazy discovery + result-shaping.
 
 **Community-requested (2026-07-03, r/LocalLLaMA launch thread):**
 
@@ -180,7 +201,7 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       session logs and doesn't break out MCP tool-schema overhead. Follow-ups still open:
       per-candidate scores (lexical + semantic blend) and the exact returned input
       schema, not just names. (M, core done)
-- [ ] **Pinned / prerequisite tools in search (`tool_prereq`).** Let a tool be marked so
+- [x] **Pinned / prerequisite tools in search (`tool_prereq`).** Let a tool be marked so
       it's always returned (with its schema) regardless of match score - for tools that
       are a hard prerequisite (auth/list-before-act) or whose description doesn't match
       the user's query keywords, so lazy discovery never hides a load-bearing tool.
@@ -202,6 +223,10 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       hiding them. Optionally a `search_tools_deep` meta-tool that returns more candidates +
       full descriptions. No mandatory local model — the client model IS the reasoning layer.
       Ties into the open "per-candidate lexical+semantic scores" search-trace follow-up. (M)
+      **Partial:** the hybrid lexical+semantic ranker (a) shipped (`search_catalog_with`
+      scores every doc, `semantic_rerank` blends cosine with lexical fallback); still
+      open: (b) broadening the candidate set on low-confidence scores and the
+      `search_tools_deep` meta-tool.
 - [ ] **Per-client discovery mode + raw/direct passthrough.** Also from MajMin5: clients that
       already do their own tool-gating/deferral (Claude Desktop, LibreChat, and Claude Code's
       tool-search) pay a wasteful double hop when forced through our meta-tools (load meta-tools
@@ -211,6 +236,11 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       catalog, weak/local models to lazy). This is the client-agnostic story finished: one
       place to configure servers, right discovery surface per client. (His stdio→HTTP + mobile
       asks we already cover — the gateway speaks HTTP/OpenAPI natively.) (M)
+      **Partial:** raw/direct passthrough shipped (discovery modes full/lazy/grouped via
+      `resolve_discovery_mode`), and mode can be set per client through the
+      `CONDUIT_DISCOVERY` env var; still open: a per-client discovery field in the
+      registry (it is still a single global setting) and auto-defaulting self-managing
+      clients to the direct catalog.
 
 ## Robustness sprint (2026-07-04, "nothing fails silently")
 
@@ -252,6 +282,9 @@ background sync so policy reaches every member; deployed server-side).
 - [ ] **Recall escape hatch** for lazy discovery: a `list_server_tools`/`search_tools_deep`
       meta-tool returning more candidates + full descriptions when a search misses, and a
       "no match" lead that names the empty-query-with-server escape. (M, extends hybrid search)
+      **Partial:** the empty-query-with-server escape (list all of a server's tools) exists;
+      still open: the dedicated `list_server_tools`/`search_tools_deep` meta-tool that
+      returns more candidates + full descriptions on a miss.
 - [ ] **Integrity-file cross-process lock.** `tool-pins.json` / `tool-quarantine.json` are
       atomic-write but unlocked; two gateways detecting drift at once can clobber each
       other's quarantine set (a lost entry un-blocks a tool). Reload-under-lock or centralize
@@ -415,14 +448,19 @@ Tier 3 - launch prep
 - [x] In-app auto-updater (Tauri v2 updater plugin + signed `latest.json` from the
       release pipeline). Live from v0.3.3 onward.
 - [x] First-run onboarding wizard (detect clients, add servers, connect a client).
-- [ ] macOS keychain access-group entitlement (app + gateway share secrets with
-      no "Always Allow" prompt)
+- [x] macOS keychain access-group entitlement (app + gateway share secrets with
+      no "Always Allow" prompt) - shipped v0.9.3
 - [x] Launch: Product Hunt, MCP registries (Glama/mcp.so/awesome-mcp listed)
 
 Tier 4 - teams / enterprise (paid)
 
-- [ ] Hosted/remote gateway, shared/synced config, RBAC/SSO
-- [ ] Policy engine (allow/deny tools, approval gates), audit export
+- [x] Hosted control plane + shared/synced config (Teams, launched 2026-07-08:
+      teams.toolport.app, join-code onboarding, long-poll config + policy sync).
+      Remote/self-hosted gateway shipped headless in v1.6.0 (Docker + streamable HTTP).
+- [ ] RBAC / SSO
+- [x] Org policy engine (mandated approval gates; tighten-only content-defense +
+      quarantine-on-drift) and audit export (30-day exportable trail).
+- [ ] Org-level per-tool allow/deny (beyond the local destructive deny-list)
 - [ ] Secret-vault integrations (1Password, Vault, cloud secret managers)
 
 ## Security invariants (do not regress)
