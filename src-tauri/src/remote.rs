@@ -304,6 +304,7 @@ mod tests {
             url: Some(url.into()),
             source: source.map(String::from),
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         }
     }
 

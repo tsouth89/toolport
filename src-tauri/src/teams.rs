@@ -778,6 +778,7 @@ fn classify_team_server(s: &Value, tag: &str) -> TeamClass {
         url: None,
         source: Some(tag.to_string()),
         disabled_tools: str_array("disabledTools"),
+        unknown_fields: serde_json::Map::new(),
     };
 
     // A server that runs a local command (stdio, or any command-bearing entry) is the RCE
@@ -884,6 +885,7 @@ mod tests {
             url: None,
             source: Some("manual".into()),
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         });
         let active = r.active_profile_id.clone().unwrap();
         r.profiles
@@ -1127,6 +1129,7 @@ mod tests {
             url: None,
             source: Some("manual".into()),
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         });
         // A team-sourced server: excluded too (don't echo the team's own set back).
         r.servers.push(ServerEntry {
@@ -1139,6 +1142,7 @@ mod tests {
             url: Some("https://example.com/mcp".into()),
             source: Some("team:abc".into()),
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         });
         let cfg = team_export(&r);
         let ids: Vec<&str> = cfg["servers"]

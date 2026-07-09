@@ -414,6 +414,7 @@ fn server_from_detected(server: &clients::McpServer, client_id: &str) -> ServerE
         url: server.url.clone(),
         source: Some(format!("imported:{client_id}")),
         disabled_tools: vec![],
+        unknown_fields: serde_json::Map::new(),
     }
 }
 
@@ -2658,6 +2659,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         }
     }
 
@@ -2672,6 +2674,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         }
     }
 
@@ -2943,6 +2946,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         });
 
         let doc = build_export(&reg, Some("Team setup"), Some("Our shared servers"), None);
@@ -3004,6 +3008,7 @@ mod tests {
             url: Some("https://user:hunter2@mcp.example.com/mcp".into()),
             source: None,
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         });
         let doc = build_export(&reg, None, None, None);
         let serialized = serde_json::to_string(&doc).unwrap();
@@ -3042,6 +3047,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         });
         let doc = build_export(&reg, None, None, None);
         let serialized = serde_json::to_string(&doc).unwrap();
@@ -3072,6 +3078,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         });
         let json = serde_json::to_string(&build_export(&reg, None, None, None)).unwrap();
         let mut recipient = Registry::default();
@@ -3178,6 +3185,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         });
         reg.add_server(ServerEntry {
             id: "remote".into(),
@@ -3189,6 +3197,7 @@ mod tests {
             url: Some("https://user:hunter2@mcp.example.com/mcp".into()),
             source: None,
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         });
 
         let s = registry_summary(&reg);

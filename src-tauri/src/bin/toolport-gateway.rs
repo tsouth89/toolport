@@ -5824,6 +5824,7 @@ mod tests {
                 url: None,
                 source: None,
                 disabled_tools: vec![],
+                unknown_fields: serde_json::Map::new(),
             });
         }
         // alpha is in the active (default) profile; bravo only in a separate one.
@@ -5858,6 +5859,7 @@ mod tests {
                 url: Some(format!("https://mcp.{id}.example/mcp")),
                 source: None,
                 disabled_tools: vec![],
+                unknown_fields: serde_json::Map::new(),
             });
             reg.set_server_enabled("default", id, true).unwrap();
         }
@@ -5891,6 +5893,7 @@ mod tests {
             url: Some("https://mcp.github.example/mcp".into()),
             source: None,
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         });
         reg.set_server_enabled("default", "github", true).unwrap();
         let out = enabled_summary(&reg, &[], None, None);
@@ -6621,6 +6624,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         });
         reg.set_server_enabled("default", &id, true).unwrap();
 

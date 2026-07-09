@@ -2430,6 +2430,7 @@ fn gateway_entry(profile: Option<&str>, client_id: &str) -> Result<ServerEntry, 
         url: None,
         source: Some("conduit".to_string()),
         disabled_tools: Vec::new(),
+        unknown_fields: serde_json::Map::new(),
     })
 }
 
@@ -2756,6 +2757,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            unknown_fields: serde_json::Map::new(),
         }
     }
 
