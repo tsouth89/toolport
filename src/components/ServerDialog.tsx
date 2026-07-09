@@ -75,6 +75,7 @@ export function ServerDialog({
     command: initial?.command ?? "",
     args: formatArgs(initial?.args ?? []),
     url: initial?.url ?? "",
+    cwd: initial?.cwd ?? "",
   });
   // Env vars (API keys etc.). Values are vaulted in the OS keychain, never stored
   // in the registry, so existing secrets show as declared keys with empty values.
@@ -114,6 +115,7 @@ export function ServerDialog({
         command: initial?.command ?? "",
         args: formatArgs(initial?.args ?? []),
         url: initial?.url ?? "",
+        cwd: initial?.cwd ?? "",
       });
       setEnvRows(initial?.env.map((e) => ({ key: e.key, value: "" })) ?? []);
       setTest({ status: "idle", message: "" });
@@ -157,6 +159,7 @@ export function ServerDialog({
         command: s.command ?? "",
         args: formatArgs(s.args),
         url: s.url ?? "",
+        cwd: "",
       });
       setEnvRows(
         s.env.map((e) => ({
@@ -199,6 +202,7 @@ export function ServerDialog({
       })),
       url: isStdio ? null : form.url.trim() || null,
       source: initial?.source ?? "manual",
+      cwd: isStdio ? form.cwd.trim() || null : null,
     };
   }
 
@@ -370,6 +374,21 @@ export function ServerDialog({
                   value={form.args}
                   onChange={(e) => set("args", e.target.value)}
                 />
+              </div>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="srv-cwd">Working directory (optional)</Label>
+                <Input
+                  id="srv-cwd"
+                  placeholder="~/projects/my-app"
+                  value={form.cwd}
+                  onChange={(e) => set("cwd", e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Where this server runs. Leave blank to inherit Toolport's directory.
+                  Useful for tools that work on a project (a filesystem or code-search
+                  server). <code className="font-mono">~</code> and{" "}
+                  <code className="font-mono">{"${VAR}"}</code> are expanded.
+                </p>
               </div>
             </>
           ) : (

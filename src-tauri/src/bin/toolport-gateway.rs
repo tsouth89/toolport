@@ -2693,7 +2693,13 @@ fn connect_one(
                 }
             }
         }
-        match StdioTransport::spawn_watched(command, &server.args, &env, Arc::clone(dirty)) {
+        match StdioTransport::spawn_watched(
+            command,
+            &server.args,
+            &env,
+            server.cwd.as_deref(),
+            Arc::clone(dirty),
+        ) {
             Ok(mut t) => {
                 t.set_server_request_handler(server_handler);
                 DownstreamServer::connect(server.id.clone(), Box::new(t))
@@ -5824,6 +5830,7 @@ mod tests {
                 url: None,
                 source: None,
                 disabled_tools: vec![],
+                cwd: None,
                 unknown_fields: serde_json::Map::new(),
             });
         }
@@ -5859,6 +5866,7 @@ mod tests {
                 url: Some(format!("https://mcp.{id}.example/mcp")),
                 source: None,
                 disabled_tools: vec![],
+                cwd: None,
                 unknown_fields: serde_json::Map::new(),
             });
             reg.set_server_enabled("default", id, true).unwrap();
@@ -5893,6 +5901,7 @@ mod tests {
             url: Some("https://mcp.github.example/mcp".into()),
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
         reg.set_server_enabled("default", "github", true).unwrap();
@@ -6624,6 +6633,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
         reg.set_server_enabled("default", &id, true).unwrap();

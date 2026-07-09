@@ -2534,6 +2534,7 @@ fn gateway_entry(profile: Option<&str>, client_id: &str) -> Result<ServerEntry, 
         url: None,
         source: Some("conduit".to_string()),
         disabled_tools: Vec::new(),
+        cwd: None,
         unknown_fields: serde_json::Map::new(),
     })
 }
@@ -2861,6 +2862,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         }
     }

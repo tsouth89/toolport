@@ -368,6 +368,37 @@ pub fn resolve_command(command: &str) -> String {
 }
 
 /// A PATH that includes the user's real shell PATH plus common install dirs.
+/// Expand a per-server working directory string (issue #239): a leading `~`
+/// (or `~/`) becomes the home dir, and `${VAR}` is replaced with the environment
+/// value (unset vars expand to empty). Returns the expanded path; the caller sets
+/// it as the child's cwd, and the OS reports a clear error if it doesn't exist.
+pub fn expand_cwd(dir: &str) -> std::path::PathBuf {
+    // Env vars first, so `~` inside an expanded value is still honored below.
+    let mut out = String::with_capacity(dir.len());
+    let bytes = dir.as_bytes();
+    let mut i = 0;
+    while i < dir.len() {
+        if bytes[i] == b'$' && dir[i..].starts_with("${") {
+            if let Some(end) = dir[i + 2..].find('}') {
+                let name = &dir[i + 2..i + 2 + end];
+                out.push_str(&std::env::var(name).unwrap_or_default());
+                i += 2 + end + 1;
+                continue;
+            }
+        }
+        out.push(dir[i..].chars().next().unwrap());
+        i += dir[i..].chars().next().unwrap().len_utf8();
+    }
+    // Leading `~` -> home dir.
+    if out == "~" || out.starts_with("~/") || out.starts_with("~\\") {
+        if let Some(home) = dirs::home_dir() {
+            let rest = out[1..].trim_start_matches(['/', '\\']);
+            return if rest.is_empty() { home } else { home.join(rest) };
+        }
+    }
+    std::path::PathBuf::from(out)
+}
+
 /// macOS GUI apps (and apps they launch, like the client-spawned gateway) inherit
 /// only a minimal PATH, so `npx`/`uvx`/`node` aren't found without this. Computed
 /// once and cached.
@@ -945,8 +976,13 @@ impl StdioTransport {
     /// Spawn a downstream server without watching for its tool-list changes.
     /// Used by one-shot callers (the app's health probe and playground) that
     /// don't keep the connection around to react to live notifications.
-    pub fn spawn(command: &str, args: &[String], env: &[(String, String)]) -> Result<Self, String> {
-        Self::spawn_inner(command, args, env, None)
+    pub fn spawn(
+        command: &str,
+        args: &[String],
+        env: &[(String, String)],
+        cwd: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::spawn_inner(command, args, env, cwd, None)
     }
 
     /// Like [`spawn`], but sets a [`change`] bit in `dirty` whenever the downstream
@@ -958,15 +994,17 @@ impl StdioTransport {
         command: &str,
         args: &[String],
         env: &[(String, String)],
+        cwd: Option<&str>,
         dirty: Arc<AtomicU8>,
     ) -> Result<Self, String> {
-        Self::spawn_inner(command, args, env, Some(dirty))
+        Self::spawn_inner(command, args, env, cwd, Some(dirty))
     }
 
     fn spawn_inner(
         command: &str,
         args: &[String],
         env: &[(String, String)],
+        cwd: Option<&str>,
         dirty: Option<Arc<AtomicU8>>,
     ) -> Result<Self, String> {
         // Split a command that packed its args into the `command` string, so a
@@ -987,6 +1025,13 @@ impl StdioTransport {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Optional per-server working directory (issue #239). Unset (or blank)
+        // means inherit the gateway's cwd, the previous behavior. `~` and `${VAR}`
+        // are expanded so a config can pin a server to a project dir. If the dir
+        // doesn't exist the spawn fails with a clear error, surfaced by the probe.
+        if let Some(dir) = cwd.map(str::trim).filter(|d| !d.is_empty()) {
+            cmd.current_dir(expand_cwd(dir));
+        }
         // Give the child the augmented PATH too, so e.g. `npx` can find `node`.
         #[cfg(not(windows))]
         cmd.env("PATH", augmented_path());
@@ -1790,10 +1835,29 @@ fn extract_array(result: &Value, key: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_command, screen_resolved_addrs, screen_spawn_command, screen_spawn_env,
+        expand_cwd, resolve_command, screen_resolved_addrs, screen_spawn_command, screen_spawn_env,
         CancelRegistry,
     };
     use serde_json::json;
+
+    #[test]
+    fn expand_cwd_handles_tilde_and_env() {
+        use std::path::PathBuf;
+        // A unique var name so the process-wide set_var can't collide with a
+        // parallel test.
+        let var = format!("TP_TEST_CWD_{}", std::process::id());
+        std::env::set_var(&var, "abc");
+        assert_eq!(expand_cwd(&format!("/x/${{{var}}}/y")), PathBuf::from("/x/abc/y"));
+        std::env::remove_var(&var);
+        // An unset var expands to empty; a literal path is unchanged.
+        assert_eq!(expand_cwd("/x/${TP_UNSET_ZZZ}/y"), PathBuf::from("/x//y"));
+        assert_eq!(expand_cwd("/plain/path"), PathBuf::from("/plain/path"));
+        // A leading `~` becomes the home dir.
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(expand_cwd("~"), home);
+            assert_eq!(expand_cwd("~/proj"), home.join("proj"));
+        }
+    }
 
     #[test]
     fn download_launchers_get_the_long_connect_budget() {

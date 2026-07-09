@@ -778,6 +778,7 @@ fn classify_team_server(s: &Value, tag: &str) -> TeamClass {
         url: None,
         source: Some(tag.to_string()),
         disabled_tools: str_array("disabledTools"),
+        cwd: None,
         unknown_fields: serde_json::Map::new(),
     };
 
@@ -885,6 +886,7 @@ mod tests {
             url: None,
             source: Some("manual".into()),
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
         let active = r.active_profile_id.clone().unwrap();
@@ -1129,6 +1131,7 @@ mod tests {
             url: None,
             source: Some("manual".into()),
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
         // A team-sourced server: excluded too (don't echo the team's own set back).
@@ -1142,6 +1145,7 @@ mod tests {
             url: Some("https://example.com/mcp".into()),
             source: Some("team:abc".into()),
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
         let cfg = team_export(&r);

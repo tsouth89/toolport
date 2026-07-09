@@ -17,7 +17,7 @@ use serde_json::json;
 fn circuit_opens_after_a_server_dies_and_fast_fails() {
     let mock = env!("CARGO_BIN_EXE_mock-mcp-server");
     let dirty = Arc::new(AtomicU8::new(0));
-    let transport = StdioTransport::spawn_watched(mock, &[], &[], dirty).expect("spawn mock");
+    let transport = StdioTransport::spawn_watched(mock, &[], &[], None, dirty).expect("spawn mock");
     let server =
         DownstreamServer::connect("mock".to_string(), Box::new(transport)).expect("connect mock");
     let mut router = Router::new();

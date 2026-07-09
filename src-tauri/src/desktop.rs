@@ -336,7 +336,7 @@ fn connect_server(server: &ServerEntry) -> Result<DownstreamServer, String> {
                 }
             }
         }
-        let t = StdioTransport::spawn(command, &server.args, &env)?;
+        let t = StdioTransport::spawn(command, &server.args, &env, server.cwd.as_deref())?;
         DownstreamServer::connect(server.id.clone(), Box::new(t))
     } else if server.url.is_some() {
         remote::connect_remote(server)
@@ -414,6 +414,7 @@ fn server_from_detected(server: &clients::McpServer, client_id: &str) -> ServerE
         url: server.url.clone(),
         source: Some(format!("imported:{client_id}")),
         disabled_tools: vec![],
+        cwd: None,
         unknown_fields: serde_json::Map::new(),
     }
 }
@@ -521,7 +522,7 @@ fn prewarm_launcher(server: &ServerEntry) {
                     .map(|v| (e.key.clone(), v))
             })
             .collect();
-        if let Ok(t) = StdioTransport::spawn(&command, &server.args, &env) {
+        if let Ok(t) = StdioTransport::spawn(&command, &server.args, &env, server.cwd.as_deref()) {
             // Attempting the handshake keeps the child alive until the download
             // finishes (dropping the transport kills it), and warms it end-to-end
             // when the server actually comes up.
@@ -2659,6 +2660,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         }
     }
@@ -2674,6 +2676,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         }
     }
@@ -2946,6 +2949,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
 
@@ -3008,6 +3012,7 @@ mod tests {
             url: Some("https://user:hunter2@mcp.example.com/mcp".into()),
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
         let doc = build_export(&reg, None, None, None);
@@ -3047,6 +3052,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
         let doc = build_export(&reg, None, None, None);
@@ -3078,6 +3084,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
         let json = serde_json::to_string(&build_export(&reg, None, None, None)).unwrap();
@@ -3185,6 +3192,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
         reg.add_server(ServerEntry {
@@ -3197,6 +3205,7 @@ mod tests {
             url: Some("https://user:hunter2@mcp.example.com/mcp".into()),
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
 

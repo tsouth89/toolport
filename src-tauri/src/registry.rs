@@ -103,6 +103,13 @@ pub struct ServerEntry {
     pub env: Vec<EnvVar>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Working directory for a stdio server. Unset means inherit the gateway's
+    /// cwd (the previous behavior). A leading `~` expands to the home dir and
+    /// `${VAR}` expands from the environment, so a server that operates on the
+    /// project (e.g. a grep/filesystem tool) can be pinned to it. Only applies to
+    /// stdio servers. See issue #239.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     /// Where this entry came from, e.g. "imported:cursor" or "manual".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -1406,6 +1413,7 @@ mod tests {
             url: None,
             source: Some("manual".to_string()),
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         }
     }
@@ -1919,6 +1927,7 @@ mod tests {
             url: None,
             source: None,
             disabled_tools: vec![],
+            cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
         // Inject a per-server field this binary's ServerEntry doesn't define.

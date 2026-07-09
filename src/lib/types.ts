@@ -338,6 +338,9 @@ export interface ServerEntry {
   source: string | null;
   /** Original tool names switched off; hidden from clients by the gateway. */
   disabledTools?: string[];
+  /** Working directory for a stdio server. Unset = inherit the gateway's cwd.
+   * `~` and `${VAR}` are expanded. Lets a server run in a project dir (#239). */
+  cwd?: string | null;
 }
 
 export interface Profile {

@@ -45,7 +45,7 @@ fn live_tool_change_surfaces_via_refresh_without_respawn() {
     let mock = env!("CARGO_BIN_EXE_mock-mcp-server");
     let dirty = Arc::new(AtomicU8::new(0));
     let transport =
-        StdioTransport::spawn_watched(mock, &[], &[], Arc::clone(&dirty)).expect("spawn mock");
+        StdioTransport::spawn_watched(mock, &[], &[], None, Arc::clone(&dirty)).expect("spawn mock");
     let mut server =
         DownstreamServer::connect("mock".to_string(), Box::new(transport)).expect("connect mock");
     // connect() only loads tools; pull the baseline resources/prompts so the
