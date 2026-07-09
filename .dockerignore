@@ -25,6 +25,6 @@ benchmark/
 *.md
 !src-tauri/**/*.md
 
-toolport-gateway-bin
+# OS / IDE
 .DS_Store
 Thumbs.db
