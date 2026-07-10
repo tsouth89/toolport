@@ -22,6 +22,7 @@ import {
   importServers,
   installGateway,
   listStacks,
+  previewImportServers,
   teamConnect,
 } from "@/lib/api";
 import { teamUrlError } from "@/lib/teamUrl";
@@ -30,6 +31,7 @@ import {
   importableServers,
   isGatewayServer,
   type DetectedClient,
+  type ImportItem,
   type ProbeResult,
   type Registry,
   type Stack,
@@ -37,6 +39,7 @@ import {
 import { openExternal } from "@/lib/openUrl";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { ImportReviewDialog } from "@/components/ImportReviewDialog";
 
 interface Props {
   /** Step to open at (0 = Welcome). Used to resume mid-flow. */
@@ -420,6 +423,7 @@ function AddServers({
   onNext: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [importPreview, setImportPreview] = useState<ImportItem[] | null>(null);
   const [imported, setImported] = useState<number | null>(null);
   const [stacks, setStacks] = useState<Stack[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -439,11 +443,28 @@ function AddServers({
   async function doImport() {
     setBusy(true);
     try {
-      const next = await importServers();
+      const preview = await previewImportServers();
+      if (preview.length === 0) {
+        toast.success("No new servers found in your clients");
+        return;
+      }
+      setImportPreview(preview);
+    } catch (e) {
+      toastError(`Couldn't prepare import: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmImport(selected: string[]) {
+    setBusy(true);
+    try {
+      const next = await importServers(selected);
       onImport(next);
       setImported(next.servers.filter((s) => !isGatewayServer(s)).length);
       setTouched(true);
       toast.success("Imported servers from your clients");
+      setImportPreview(null);
     } catch (e) {
       toastError(`Import failed: ${e}`);
     } finally {
@@ -583,6 +604,15 @@ function AddServers({
         {touched ? "Next" : "I'll add servers later"}
         <ArrowRight className="size-4" />
       </Button>
+      <ImportReviewDialog
+        open={importPreview !== null}
+        items={importPreview ?? []}
+        busy={busy}
+        onOpenChange={(open) => {
+          if (!open && !busy) setImportPreview(null);
+        }}
+        onConfirm={confirmImport}
+      />
     </>
   );
 }

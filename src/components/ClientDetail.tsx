@@ -18,6 +18,7 @@ import {
   importableServers,
   isGatewayServer,
   type DetectedClient,
+  type ImportItem,
   type McpServer,
   type Registry,
   type ServerEntry,
@@ -40,6 +41,7 @@ import {
 } from "@/components/ui/select";
 import { TransportPill } from "@/components/TransportPill";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ImportReviewDialog } from "@/components/ImportReviewDialog";
 
 interface Props {
   client: DetectedClient;
@@ -50,6 +52,7 @@ interface Props {
 
 export function ClientDetail({ client, registry, onChanged, onRegistryChange }: Props) {
   const [busy, setBusy] = useState(false);
+  const [bulkImportPreview, setBulkImportPreview] = useState<ImportItem[] | null>(null);
   // "" = expose all enabled servers (follow active profile); else scope to one.
   const [profile, setProfile] = useState("");
   const [migrateOpen, setMigrateOpen] = useState(false);
@@ -151,6 +154,15 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
   }
   const allServers = [...byName.values()];
   const toImport = importableServers(client, registry);
+  const bulkImportCandidates = toImport.map((server, index) => ({
+    key: String(index),
+    name: server.name,
+    transport: server.transport,
+    command: server.command,
+    args: server.args,
+    url: server.url,
+    isNew: true,
+  }));
 
   async function importOne(server: McpServer) {
     const isPlugin = pluginNames.has(server.name.toLowerCase());
@@ -184,10 +196,16 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
   }
 
   async function handleImportAll() {
+    setBulkImportPreview(bulkImportCandidates);
+  }
+
+  async function confirmImportAll(selected: string[]) {
     setBusy(true);
     let ok = 0;
     const failed: string[] = [];
-    for (const s of toImport) {
+    for (const key of selected) {
+      const s = toImport[Number(key)];
+      if (!s) continue;
       try {
         await importOne(s);
         ok += 1;
@@ -198,6 +216,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
     setBusy(false);
     if (failed.length === 0) {
       toast.success(`Imported ${ok} server${ok === 1 ? "" : "s"} into Toolport`);
+      setBulkImportPreview(null);
     } else if (ok > 0) {
       toast.warning(`Imported ${ok}, couldn't import ${failed.join(", ")}`);
     } else {
@@ -550,6 +569,16 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ImportReviewDialog
+        open={bulkImportPreview !== null}
+        items={bulkImportPreview ?? []}
+        busy={busy}
+        title={`Review ${client.name} servers`}
+        onOpenChange={(open) => {
+          if (!open && !busy) setBulkImportPreview(null);
+        }}
+        onConfirm={confirmImportAll}
+      />
     </div>
   );
 }

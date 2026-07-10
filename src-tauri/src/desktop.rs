@@ -460,15 +460,40 @@ fn servers_to_import(detected: &[clients::DetectedClient], existing: &Registry) 
     picked
 }
 
-/// Pull servers from every detected client into the registry, skipping any whose
-/// name already exists.
+fn selected_servers_to_import(
+    detected: &[clients::DetectedClient],
+    existing: &Registry,
+    selected: Option<&std::collections::HashSet<String>>,
+) -> Vec<ServerEntry> {
+    servers_to_import(detected, existing)
+        .into_iter()
+        .filter(|server| {
+            selected.map_or(true, |keys| {
+                keys.contains(&clients::import_dedupe_key(
+                    &server.name,
+                    server.command.as_deref(),
+                    &server.args,
+                ))
+            })
+        })
+        .collect()
+}
+
+/// Pull selected servers from every detected client into the registry. Omitting
+/// `selected` preserves the legacy import-all behavior; callers that preview
+/// first pass the opaque import keys they explicitly confirmed.
 #[tauri::command]
-async fn import_servers(state: State<'_, RegistryState>) -> Result<Registry, String> {
+async fn import_servers(
+    state: State<'_, RegistryState>,
+    selected: Option<Vec<String>>,
+) -> Result<Registry, String> {
     let detected = tauri::async_runtime::spawn_blocking(clients::detect_clients)
         .await
         .map_err(|e| e.to_string())?;
     let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    for server in servers_to_import(&detected, &reg) {
+    let selected: Option<std::collections::HashSet<String>> =
+        selected.map(|keys| keys.into_iter().collect());
+    for server in selected_servers_to_import(&detected, &reg, selected.as_ref()) {
         reg.add_server(server);
     }
     registry::save(&reg)?;
@@ -2000,6 +2025,10 @@ fn read_setup_file(path: String) -> Result<String, String> {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImportItem {
+    /// Stable only for the current detected-import preview. Shared setup previews
+    /// have no key because they are confirmed as one complete document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
     name: String,
     transport: String,
     command: Option<String>,
@@ -2007,6 +2036,32 @@ struct ImportItem {
     url: Option<String>,
     /// False if a server with this name already exists (the import would skip it).
     is_new: bool,
+}
+
+/// Show exactly what the bulk client import would add without changing the
+/// registry. The same import key is accepted by `import_servers` after review.
+#[tauri::command]
+async fn preview_import_servers(state: State<'_, RegistryState>) -> Result<Vec<ImportItem>, String> {
+    let detected = tauri::async_runtime::spawn_blocking(clients::detect_clients)
+        .await
+        .map_err(|e| e.to_string())?;
+    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(servers_to_import(&detected, &reg)
+        .into_iter()
+        .map(|server| ImportItem {
+            key: Some(clients::import_dedupe_key(
+                &server.name,
+                server.command.as_deref(),
+                &server.args,
+            )),
+            name: server.name,
+            transport: server.transport,
+            command: server.command,
+            args: server.args,
+            url: server.url,
+            is_new: true,
+        })
+        .collect())
 }
 
 /// Parse a shared setup and report what it WOULD add, without importing anything.
@@ -2028,6 +2083,7 @@ fn preview_import(state: State<RegistryState>, json: String) -> Result<Vec<Impor
                 .iter()
                 .any(|e| e.name.eq_ignore_ascii_case(&s.name));
             ImportItem {
+                key: None,
                 name: s.name,
                 transport: s.transport,
                 command: s.command,
@@ -2471,6 +2527,7 @@ pub fn run() {
             get_registry,
             take_registry_recovery_notice,
             import_servers,
+            preview_import_servers,
             parse_server_snippet,
             add_server,
             update_server,
@@ -2820,6 +2877,19 @@ mod tests {
         let picked = servers_to_import(&detected, &reg);
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].name.to_lowercase(), "linear");
+    }
+
+    #[test]
+    fn selected_servers_to_import_respects_the_reviewed_keys() {
+        let detected = vec![detected_client(
+            "cursor",
+            vec!["linear", "github"],
+            vec![],
+        )];
+        let selected = std::collections::HashSet::from(["name:github".to_string()]);
+        let picked = selected_servers_to_import(&detected, &Registry::default(), Some(&selected));
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].name, "github");
     }
 
     #[test]

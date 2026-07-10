@@ -27,6 +27,7 @@ import {
   getRegistry,
   takeRegistryRecoveryNotice,
   importServers,
+  previewImportServers,
   probeServers,
   removeServer,
   setAllEnabled,
@@ -38,6 +39,7 @@ import {
   isEnabled,
   isGatewayServer,
   type DetectedClient,
+  type ImportItem,
   type ProbeResult,
   type Registry,
   type ServerEntry,
@@ -53,6 +55,7 @@ import { AppSidebar } from "@/components/AppSidebar";
 import { PendingApprovals } from "@/components/PendingApprovals";
 import { RegistryServerRow } from "@/components/RegistryServerRow";
 import { ServerDialog } from "@/components/ServerDialog";
+import { ImportReviewDialog } from "@/components/ImportReviewDialog";
 
 // Secondary destinations are code-split so the initial bundle only carries the
 // default Servers view and the app chrome. Each mounts behind a Suspense
@@ -93,6 +96,8 @@ const BULK_DISABLE_CONFIRM_MIN = 3;
 function App() {
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [clients, setClients] = useState<DetectedClient[]>([]);
+  const [importPreview, setImportPreview] = useState<ImportItem[] | null>(null);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -464,9 +469,26 @@ function App() {
   }
 
   async function handleImport() {
+    setImporting(true);
+    try {
+      const preview = await previewImportServers();
+      if (preview.length === 0) {
+        toast.success("Nothing new to import");
+        return;
+      }
+      setImportPreview(preview);
+    } catch (e) {
+      toastError(`Couldn't prepare import: ${e}`);
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function confirmImport(selected: string[]) {
+    setImporting(true);
     try {
       const before = registry?.servers.length ?? 0;
-      const next = await importServers();
+      const next = await importServers(selected);
       setRegistry(next);
       const added = next.servers.length - before;
       toast.success(
@@ -474,8 +496,11 @@ function App() {
           ? `Imported ${added} server${added === 1 ? "" : "s"}`
           : "Nothing new to import",
       );
+      setImportPreview(null);
     } catch (e) {
       toastError(`Import failed: ${e}`);
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -739,6 +764,15 @@ function App() {
           </ScrollArea>
         </main>
       </div>
+      <ImportReviewDialog
+        open={importPreview !== null}
+        items={importPreview ?? []}
+        busy={importing}
+        onOpenChange={(open) => {
+          if (!open && !importing) setImportPreview(null);
+        }}
+        onConfirm={confirmImport}
+      />
       {showOnboarding && registry && (
         <Suspense fallback={null}>
           <Onboarding

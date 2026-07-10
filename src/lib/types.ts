@@ -238,6 +238,8 @@ export interface AuthInfo {
 
 /** One server a shared setup would add, shown for review before importing. */
 export interface ImportItem {
+  /** Opaque key used to confirm a detected-client import. Absent for shared setups. */
+  key?: string;
   name: string;
   transport: Transport;
   command: string | null;

@@ -531,9 +531,14 @@ export function takeRegistryRecoveryNotice(): Promise<RegistryRecoveryNotice | n
   return invoke<RegistryRecoveryNotice | null>("take_registry_recovery_notice");
 }
 
-/** Pull servers from every detected client into the registry. */
-export function importServers(): Promise<Registry> {
-  return invoke<Registry>("import_servers");
+/** Pull reviewed servers from every detected client into the registry. */
+export function importServers(selected?: string[]): Promise<Registry> {
+  return invoke<Registry>("import_servers", { selected });
+}
+
+/** Preview every detected-client server the bulk import would add. */
+export function previewImportServers(): Promise<ImportItem[]> {
+  return invoke<ImportItem[]>("preview_import_servers");
 }
 
 /** Parse a pasted config snippet (JSON/TOML/YAML/CLI), auto-detecting format. */
