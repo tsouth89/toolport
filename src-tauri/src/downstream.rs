@@ -680,8 +680,12 @@ pub fn screen_spawn_command(command: &str, args: &[String]) -> Result<(), String
             first_flag(args, &["-e", "--eval", "--eval-string"])
         }
         // Shells: `-c <string>` (or `/c` / `/k` on Windows shells) runs an arbitrary line.
-        "sh" | "bash" | "zsh" | "dash" | "ash" | "fish" | "ksh" | "cmd" | "pwsh"
-        | "powershell" => first_flag(args, &["-c", "-command", "/c", "/k", "/command"]),
+        "sh" | "bash" | "zsh" | "dash" | "ash" | "fish" | "ksh" | "cmd" => {
+            first_flag(args, &["-c", "-command", "/c", "/k", "/command"])
+        }
+        // PowerShell also runs code via `-EncodedCommand` (base64) and any unambiguous
+        // abbreviation of `-Command`, none of which an exact-match list catches.
+        "pwsh" | "powershell" => pwsh_dangerous(args),
         // Container runtimes: privileged mode, capability/device passthrough, and
         // host-namespace sharing escalate past a normal host process (a plain `-v`
         // mount does not, and stays allowed; see container_escape_flag).
@@ -831,6 +835,10 @@ pub fn screen_spawn_env(env: &[(String, String)]) -> Result<(), String> {
         ("RUBYOPT", &["-r"]),
         ("JAVA_TOOL_OPTIONS", &["-javaagent", "-agentlib", "-agentpath"]),
         ("_JAVA_OPTIONS", &["-javaagent", "-agentlib", "-agentpath"]),
+        // PERL5OPT applies to EVERY perl invocation (even `perl script.pl`): -M/-m
+        // preload a module (running its code) and -d loads the debugger. Benign tuning
+        // like -w stays allowed. Tokens are lowercased before compare, so -M -> -m.
+        ("PERL5OPT", &["-m", "-d"]),
     ];
     for (k, v) in env {
         let ku = k.trim().to_ascii_uppercase();
@@ -881,6 +889,26 @@ fn command_basename(command: &str) -> String {
 /// A plain equality check misses the attached form because the token is a single
 /// unsplit string, letting inline eval smuggle straight past the guard — the same
 /// hole `node_dangerous` already closes for `-r<module>`.
+/// PowerShell runs arbitrary code via `-Command` and `-EncodedCommand` (base64), and
+/// accepts any unambiguous abbreviation of a parameter name, so `-c`/`-co`/.../-command
+/// and `-e`/`-en`/`-enc`/.../-encodedcommand (plus the documented `-ec` alias) all run
+/// code while an exact-match list catches none of them. Match any switch whose name is
+/// a prefix of `command` or `encodedcommand`; `-File`/`-NoProfile`/`-ExecutionPolicy`
+/// and a bare script path stay allowed.
+fn pwsh_dangerous(args: &[String]) -> Option<&str> {
+    args.iter()
+        .find(|a| {
+            if !a.starts_with('-') && !a.starts_with('/') {
+                return false;
+            }
+            let al = a.to_ascii_lowercase();
+            let name = al.trim_start_matches(['-', '/']).split([':', '=']).next().unwrap_or("");
+            !name.is_empty()
+                && ("command".starts_with(name) || "encodedcommand".starts_with(name) || name == "ec")
+        })
+        .map(|a| a.as_str())
+}
+
 fn first_flag<'a>(args: &'a [String], flags: &[&str]) -> Option<&'a str> {
     args.iter().find(|a| {
         let al = a.to_ascii_lowercase();
@@ -2351,6 +2379,27 @@ mod tests {
     }
 
     #[test]
+    fn spawn_guard_blocks_powershell_encoded_and_abbreviated() {
+        // -EncodedCommand (base64) and its -e/-ec/-enc aliases run arbitrary code.
+        assert!(screen_spawn_command("pwsh", &argv(&["-EncodedCommand", "ZWNobyBw"])).is_err());
+        assert!(screen_spawn_command("powershell", &argv(&["-enc", "ZWNobyBw"])).is_err());
+        assert!(screen_spawn_command("pwsh", &argv(&["-e", "ZWNobyBw"])).is_err());
+        assert!(screen_spawn_command("pwsh", &argv(&["-ec", "ZWNobyBw"])).is_err());
+        assert!(screen_spawn_command("pwsh", &argv(&["-EncodedCommand:ZWNobw"])).is_err());
+        // Any abbreviation of -Command runs a command line.
+        assert!(screen_spawn_command("pwsh", &argv(&["-com", "iex (irm evil)"])).is_err());
+        assert!(screen_spawn_command("pwsh.exe", &argv(&["-c", "iex (irm evil)"])).is_err());
+        // A real script and benign switches are allowed (no over-blocking).
+        assert!(screen_spawn_command("pwsh", &argv(&["-File", "server.ps1"])).is_ok());
+        assert!(screen_spawn_command("pwsh", &argv(&["-NoProfile", "-File", "server.ps1"])).is_ok());
+        assert!(screen_spawn_command(
+            "pwsh",
+            &argv(&["-ExecutionPolicy", "Bypass", "-File", "s.ps1"])
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn spawn_guard_blocks_deno_eval_and_remote_run() {
         // Deno's lethal invocations are SUBCOMMANDS, not flags.
         assert!(screen_spawn_command("deno", &argv(&["eval", "Deno.exit()"])).is_err());
@@ -2389,7 +2438,11 @@ mod tests {
         assert!(screen_spawn_env(&e("JAVA_TOOL_OPTIONS", "-Xmx512m")).is_ok());
         // Ordinary server config env is fine.
         assert!(screen_spawn_env(&e("API_TOKEN", "sk-123")).is_ok());
-        assert!(screen_spawn_env(&e("PERL5OPT", "-Mstrict")).is_ok());
+        // PERL5OPT: -M/-m module preload and -d debugger run code (refused); benign
+        // tuning like -w is allowed.
+        assert!(screen_spawn_env(&e("PERL5OPT", "-Mstrict")).is_err());
+        assert!(screen_spawn_env(&e("PERL5OPT", "-d:Trace=x")).is_err());
+        assert!(screen_spawn_env(&e("PERL5OPT", "-w")).is_ok());
         assert!(screen_spawn_env(&[]).is_ok());
     }
 
