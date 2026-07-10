@@ -26,6 +26,8 @@ fn tool_list(grown: bool) -> Value {
                 "inputSchema": { "type": "object", "properties": {} } }),
         json!({ "name": "die", "description": "Exit the process to simulate a mid-session crash.",
                 "inputSchema": { "type": "object", "properties": {} } }),
+        json!({ "name": "pwd", "description": "Return the process working directory.",
+                "inputSchema": { "type": "object", "properties": {} } }),
     ];
     if grown {
         tools.push(json!({ "name": "greet", "description": "Greet someone by name.",
@@ -103,6 +105,9 @@ fn handle(req: &Value, grown: &mut bool) -> Option<Value> {
                     let who = args.get("name").and_then(|t| t.as_str()).unwrap_or("there");
                     format!("hello {who}")
                 }
+                "pwd" => std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
                 other => format!("unknown tool {other}"),
             };
             Some(success(
