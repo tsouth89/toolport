@@ -4,6 +4,8 @@ import { fmtTokens } from "./utils";
 describe("fmtTokens", () => {
   it("renders small numbers as-is", () => {
     expect(fmtTokens(0)).toBe("0");
+    expect(fmtTokens(-1)).toBe("-1");
+    expect(fmtTokens(-5)).toBe("-5");
     expect(fmtTokens(42)).toBe("42");
     expect(fmtTokens(999)).toBe("999");
   });

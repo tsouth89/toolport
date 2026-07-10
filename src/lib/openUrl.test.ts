@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const openUrl = vi.fn(async () => {});
+const openUrl = vi.fn(async (..._args: unknown[]) => {});
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openUrl: (...args: unknown[]) => openUrl(...args),
@@ -26,8 +26,10 @@ describe("openExternal", () => {
     await openExternal("file:///etc/passwd");
     await openExternal("javascript:alert(1)");
     await openExternal("not a url");
+    await openExternal("");
     await openExternal(null);
     await openExternal(undefined);
+    await openExternal(42 as unknown as string);
     expect(openUrl).not.toHaveBeenCalled();
   });
 });
