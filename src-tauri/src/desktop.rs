@@ -15,7 +15,7 @@ use crate::approval;
 use crate::audit;
 use crate::catalog;
 use crate::clients;
-use crate::downstream::{DownstreamServer, StdioTransport};
+use crate::downstream::{resolve_root_token, DownstreamServer, StdioTransport};
 use crate::inspect;
 use crate::integrity;
 use crate::oauth;
@@ -336,7 +336,10 @@ fn connect_server(server: &ServerEntry) -> Result<DownstreamServer, String> {
                 }
             }
         }
-        let t = StdioTransport::spawn(command, &server.args, &env, server.cwd.as_deref())?;
+        // The probe/playground has no upstream client, so ${ROOT} has no root to
+        // resolve against and falls back to the default cwd (issue #239).
+        let cwd = server.cwd.as_deref().and_then(|c| resolve_root_token(c, None));
+        let t = StdioTransport::spawn(command, &server.args, &env, cwd.as_deref())?;
         DownstreamServer::connect(server.id.clone(), Box::new(t))
     } else if server.url.is_some() {
         remote::connect_remote(server)
@@ -522,7 +525,8 @@ fn prewarm_launcher(server: &ServerEntry) {
                     .map(|v| (e.key.clone(), v))
             })
             .collect();
-        if let Ok(t) = StdioTransport::spawn(&command, &server.args, &env, server.cwd.as_deref()) {
+        let cwd = server.cwd.as_deref().and_then(|c| resolve_root_token(c, None));
+        if let Ok(t) = StdioTransport::spawn(&command, &server.args, &env, cwd.as_deref()) {
             // Attempting the handshake keeps the child alive until the download
             // finishes (dropping the transport kills it), and warms it end-to-end
             // when the server actually comes up.

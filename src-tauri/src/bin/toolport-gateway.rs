@@ -2592,6 +2592,10 @@ fn build_router(
     http_mode: bool,
     dirty: &Arc<AtomicU8>,
     server_handler: ServerRequestHandler,
+    // The upstream client's project root for the ${ROOT} cwd token (issue #239),
+    // already decoded to a filesystem path. `None` in HTTP mode and before the
+    // client's roots are known; `${ROOT}` servers then fall back to the gateway cwd.
+    root: Option<&str>,
 ) -> Router {
     // In HTTP mode one process serves every registered client, so connect the
     // union of all their profiles (per-request filtering scopes each one down).
@@ -2634,13 +2638,17 @@ fn build_router(
     // Connect concurrently so total time is the slowest server, not the sum. Each
     // thread hands back the server spec + dirty flag alongside the connection so we can
     // build a reconnect factory (used to re-spawn it if it dies mid-session).
+    // Owned copy so each connect thread and each reconnect factory (both 'static)
+    // can carry the root without borrowing.
+    let root_owned = root.map(str::to_owned);
     let handles: Vec<_> = servers
         .into_iter()
         .map(|server| {
             let dirty = Arc::clone(dirty);
             let handler = Arc::clone(&server_handler);
+            let root_t = root_owned.clone();
             std::thread::spawn(move || {
-                let ds = connect_one(&server, &dirty, handler);
+                let ds = connect_one(&server, &dirty, handler, root_t.as_deref());
                 (server, dirty, ds)
             })
         })
@@ -2656,7 +2664,9 @@ fn build_router(
             // factory, so a re-spawn re-injects keychain secrets and re-handshakes
             // exactly like a fresh connect.
             let handler = Arc::clone(&server_handler);
-            let reconnect: Reconnect = Box::new(move || connect_one(&server, &dirty, Arc::clone(&handler)));
+            let root_c = root_owned.clone();
+            let reconnect: Reconnect =
+                Box::new(move || connect_one(&server, &dirty, Arc::clone(&handler), root_c.as_deref()));
             router.add_with_reconnect(ds, Some(reconnect));
         }
     }
@@ -2669,6 +2679,7 @@ fn connect_one(
     server: &ServerEntry,
     dirty: &Arc<AtomicU8>,
     server_handler: ServerRequestHandler,
+    root: Option<&str>,
 ) -> Option<DownstreamServer> {
     let result = if let Some(command) = &server.command {
         let mut env: Vec<(String, String)> = Vec::new();
@@ -2693,11 +2704,18 @@ fn connect_one(
                 }
             }
         }
+        // Resolve the ${ROOT} token against the client's project root (issue #239)
+        // before spawning. `None` (no ${ROOT}, or ${ROOT} with no known root) means
+        // inherit the gateway cwd - the pre-#239 fallback.
+        let resolved_cwd = server
+            .cwd
+            .as_deref()
+            .and_then(|c| downstream::resolve_root_token(c, root));
         match StdioTransport::spawn_watched(
             command,
             &server.args,
             &env,
-            server.cwd.as_deref(),
+            resolved_cwd.as_deref(),
             Arc::clone(dirty),
         ) {
             Ok(mut t) => {
@@ -3025,6 +3043,7 @@ fn watch_registry(
                 http_mode,
                 &downstream_dirty,
                 Arc::clone(&server_handler),
+                None,
             );
             let server_count = new_router.server_count();
             let tools = new_router.aggregated_tools();
@@ -3768,6 +3787,7 @@ fn process_request(
                 state.http,
                 &state.downstream_dirty,
                 Arc::clone(&state.server_handler),
+                None,
             );
             if built.server_count() > 0 {
                 let tools = built.aggregated_tools();
@@ -5080,7 +5100,8 @@ fn main() {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            let built = build_router(&reg, p.as_deref(), http_mode, &downstream_dirty, server_handler);
+            let built =
+                build_router(&reg, p.as_deref(), http_mode, &downstream_dirty, server_handler, None);
             let tools = built.aggregated_tools();
             glog(&format!(
                 "background build: {} tools from {} servers",
