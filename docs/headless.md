@@ -279,7 +279,7 @@ Toolport reads the following environment variables. This is the complete referen
 | `CONDUIT_HTTP_HOST` | Host IP to bind for the HTTP endpoint. | `127.0.0.1` | Gateway |
 | `CONDUIT_HTTP_PORT` | Port for the HTTP endpoint (when `CONDUIT_HTTP` is a boolean). | `8765` | Gateway |
 | `CONDUIT_HTTP_TOKEN` | Bearer token for HTTP authentication. | None | Gateway |
-| `CONDUIT_PROFILE` | The client's effective scope or profile. | None | Clients |
+| `CONDUIT_PROFILE` | Initial profile value for a scoped client install; live scope is resolved via `CONDUIT_CLIENT_ID`. | None | Clients |
 | `CONDUIT_REGISTRY` | Override the path to `registry.json`. | Config root | Everywhere |
 | `CONDUIT_RESULT_BUDGET` | Byte budget before large tool results get shaped/truncated (0 to disable). | `49152` | Everywhere |
 | `CONDUIT_SECRET_<KEY>` | Process env override for a specific scoped secret. | None | Headless |
