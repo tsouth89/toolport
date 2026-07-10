@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ChevronDown, Copy, KeyRound, LogIn, Pencil, Trash2, Users } from "lucide-react";
 import { isDownloadLauncher } from "@/lib/launcher";
 import { errorHeadline, shortenUrls } from "@/lib/errors";
+import { toast } from "sonner";
 import type { ProbeResult, Registry, ServerEntry } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -228,9 +229,24 @@ export function RegistryServerRow({
                   EADDRINUSE, a 401) isn't buried under a stack trace + a giant
                   OAuth URL; the full output stays below, bounded and scrollable
                   with long URLs shortened. */}
-              <p className="text-xs font-medium text-warning">
-                {errorHeadline(health.error)}
-              </p>
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-xs font-medium text-warning">
+                  {errorHeadline(health.error)}
+                </p>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void navigator.clipboard.writeText(health?.error ?? "");
+                    toast.success("Error copied");
+                  }}
+                  title="Copy the full error"
+                  className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <Copy className="size-3" />
+                  Copy
+                </button>
+              </div>
               <p className="max-h-32 overflow-y-auto font-mono text-[11px] break-words whitespace-pre-wrap text-muted-foreground">
                 {shortenUrls(health.error)}
               </p>

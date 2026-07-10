@@ -788,6 +788,12 @@ function InspectRow({ e }: { e: InspectEntry }) {
       <div
         className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/30"
         onClick={() => setOpen((o) => !o)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
         role="button"
         aria-expanded={open}
         tabIndex={0}
@@ -850,6 +856,12 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
       <div
         className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/30"
         onClick={() => setOpen((o) => !o)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
         role="button"
         aria-expanded={open}
         tabIndex={0}
@@ -1032,6 +1044,12 @@ function ToolIdentityRow({ t }: { t: ToolIdentity }) {
       <div
         className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/30"
         onClick={() => setOpen((o) => !o)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
         role="button"
         aria-expanded={open}
         tabIndex={0}
