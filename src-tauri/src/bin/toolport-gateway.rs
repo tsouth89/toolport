@@ -5216,6 +5216,9 @@ fn main() {
     let mcp_sessions = Arc::new(Mutex::new(HashMap::new()));
     let client_upstream = Arc::new(Mutex::new(ClientUpstreamCaps::default()));
     let client_root = Arc::new(Mutex::new(None::<String>));
+    // Single-flight for every router build/swap (startup, watcher self-heal, and
+    // ${ROOT} rebuilds). Created up front so the startup build can share it.
+    let rebuild_lock = Arc::new(Mutex::new(()));
     let stdio_upstream = Arc::new(StdioUpstream::new(Arc::clone(&stdout)));
     let server_handler = make_server_request_handler(
         Arc::clone(&client_upstream),
@@ -5240,6 +5243,8 @@ fn main() {
         let downstream_dirty = Arc::clone(&downstream_dirty);
         let server_handler = Arc::clone(&server_handler);
         let profile = Arc::clone(&profile);
+        let client_root = Arc::clone(&client_root);
+        let rebuild_lock = Arc::clone(&rebuild_lock);
         std::thread::spawn(move || {
             let reg = registry
                 .lock()
@@ -5249,8 +5254,24 @@ fn main() {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            let built =
-                build_router(&reg, p.as_deref(), http_mode, &downstream_dirty, server_handler, None);
+            // Single-flight with the ${ROOT} / self-heal rebuilds, and read the
+            // shared root inside the lock so a late startup swap can't overwrite an
+            // already-resolved ${ROOT} rebuild back to the fallback cwd (issue #239).
+            let _rebuild = rebuild_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = client_root
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let built = build_router(
+                &reg,
+                p.as_deref(),
+                http_mode,
+                &downstream_dirty,
+                server_handler,
+                root.as_deref(),
+            );
             let tools = built.aggregated_tools();
             glog(&format!(
                 "background build: {} tools from {} servers",
@@ -5312,7 +5333,7 @@ fn main() {
         stdout: Arc::clone(&stdout),
         ready: Arc::clone(&ready),
         downstream_dirty: Arc::clone(&downstream_dirty),
-        rebuild_lock: Arc::new(Mutex::new(())),
+        rebuild_lock,
         lazy,
         profile: Arc::clone(&profile),
         http: http_mode,
