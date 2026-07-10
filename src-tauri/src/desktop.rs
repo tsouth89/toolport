@@ -947,9 +947,39 @@ fn last_lines(text: &str, n: usize) -> String {
     tail
 }
 
-/// Connect to each enabled server in the active profile and report health + tool count.
+/// How long to wait for one server's probe before giving up on it. Generous
+/// enough for an `npx` first-run package install, but bounded so a single hung
+/// server can't leave its row "checking" forever. Issue #252.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Probe one server, never blocking longer than `PROBE_TIMEOUT`. On timeout the
+/// underlying probe thread is left to finish or die on its own; we return a
+/// timed-out result so the row resolves instead of spinning indefinitely.
+fn probe_one_bounded(server: &ServerEntry) -> ProbeResult {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let s = server.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(probe_one(&s));
+    });
+    rx.recv_timeout(PROBE_TIMEOUT).unwrap_or_else(|_| ProbeResult {
+        server_id: server.id.clone(),
+        ok: false,
+        tool_count: 0,
+        error: Some(format!("timed out after {}s", PROBE_TIMEOUT.as_secs())),
+        auth_required: false,
+    })
+}
+
+/// Connect to each enabled server in the active profile and report health + tool
+/// count. Emits a `server-probed` event per server the moment it finishes, so the
+/// UI resolves each row independently instead of waiting for the slowest - a cold
+/// `npx` install used to leave the whole grid "checking" for 30-60s. Still returns
+/// the full batch for callers that want it. Issue #252.
 #[tauri::command]
-async fn probe_servers(state: State<'_, RegistryState>) -> Result<Vec<ProbeResult>, String> {
+async fn probe_servers(
+    app: tauri::AppHandle,
+    state: State<'_, RegistryState>,
+) -> Result<Vec<ProbeResult>, String> {
     // Snapshot which servers to probe, then drop the lock before any I/O.
     let servers: Vec<ServerEntry> = {
         let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -959,11 +989,19 @@ async fn probe_servers(state: State<'_, RegistryState>) -> Result<Vec<ProbeResul
             .cloned()
             .collect()
     };
-    // Probe concurrently on worker threads so the UI thread never blocks.
+    // One worker thread per server. Each emits its result as soon as it's ready
+    // (the UI listens for `server-probed`), then contributes to the returned batch.
     tauri::async_runtime::spawn_blocking(move || {
         let handles: Vec<_> = servers
             .into_iter()
-            .map(|s| std::thread::spawn(move || probe_one(&s)))
+            .map(|s| {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let result = probe_one_bounded(&s);
+                    let _ = app.emit("server-probed", &result);
+                    result
+                })
+            })
             .collect();
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
     })
@@ -2663,6 +2701,23 @@ mod tests {
             cwd: None,
             unknown_fields: serde_json::Map::new(),
         }
+    }
+
+    #[test]
+    fn probe_one_bounded_passes_through_a_fast_failure_well_under_the_timeout() {
+        // A bogus command fails to spawn immediately, so the bounded wrapper must
+        // return that result promptly (nowhere near PROBE_TIMEOUT) and carry the
+        // server id - it only times out for a genuinely hung probe.
+        let mut server = plain_server("bogus", "Bogus");
+        server.command = Some("toolport-no-such-binary-xyz".into());
+        let start = std::time::Instant::now();
+        let r = probe_one_bounded(&server);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "a fast failure must not wait on the timeout"
+        );
+        assert!(!r.ok);
+        assert_eq!(r.server_id, "bogus");
     }
 
     fn plain_server(id: &str, name: &str) -> ServerEntry {

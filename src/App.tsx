@@ -264,6 +264,20 @@ function App() {
     };
   }, []);
 
+  // A refresh emits one `server-probed` event per server as its probe finishes, so
+  // each row resolves the moment its own result is in - a slow npx cold-start no
+  // longer holds the whole grid in "checking" until the slowest server returns
+  // (issue #252). The batched probeServers() return still reconciles at the end.
+  useEffect(() => {
+    const unlisten = listen<ProbeResult>("server-probed", (e) => {
+      setHealth((h) => ({ ...h, [e.payload.serverId]: e.payload }));
+      setBackendReachable(true);
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
+
   // Keep a team member's shared server set AND security policy current even if they never
   // open the Teams tab: an admin tightening a force-quarantine / approval policy must reach
   // every member near-instantly, not just those who happen to click "Sync now". This runs a
