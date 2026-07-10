@@ -1114,15 +1114,19 @@ fn name_from_invocation(command: &str, args: &[String]) -> String {
     command_stem(command)
 }
 
-/// Key an imported server by its full package spec when it is launched through
-/// a package runner. The display name intentionally drops a package scope, so
-/// using it alone would collapse `@acme/mcp-weather` and
-/// `@other/mcp-weather` during bulk import. Other servers retain the existing
-/// case-insensitive name-based dedupe behavior.
+/// Key an imported server for bulk-import dedupe. The friendly display name
+/// intentionally drops a package scope, so keying on it alone collapses
+/// `@acme/mcp-weather` and `@other/mcp-weather` (both name "weather") during
+/// import (#257). Fold the launched package spec into the key so those stay
+/// distinct, but keep the name as a tiebreaker so two entries for the SAME
+/// package under different names (e.g. `github-personal` and `github-work`,
+/// one token each) both survive instead of silently collapsing to one. Servers
+/// without a recognizable runner package key on name alone, as before.
 pub fn import_dedupe_key(name: &str, command: Option<&str>, args: &[String]) -> String {
+    let name = name.to_ascii_lowercase();
     match command.and_then(|command| launcher_package_arg(command, args)) {
-        Some(package) => format!("package:{}", package.to_ascii_lowercase()),
-        None => format!("name:{}", name.to_ascii_lowercase()),
+        Some(package) => format!("package:{}|name:{}", package.to_ascii_lowercase(), name),
+        None => format!("name:{}", name),
     }
 }
 
