@@ -2993,6 +2993,9 @@ fn watch_registry(
     http_mode: bool,
     downstream_dirty: Arc<AtomicU8>,
     server_handler: ServerRequestHandler,
+    // Shared ${ROOT} path (issue #239) so a registry-change rebuild keeps placing
+    // ${ROOT} servers in the client's project root instead of resetting to fallback.
+    client_root: Arc<Mutex<Option<String>>>,
 ) {
     eprintln!("toolport: watching registry at {}", path.display());
     let mut last = mtime(&path);
@@ -3037,13 +3040,17 @@ fn watch_registry(
                 prev
             };
             // Build the new router (spawns processes) before taking locks.
+            let root = client_root
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let new_router = build_router(
                 &new_reg,
                 resolved.as_deref(),
                 http_mode,
                 &downstream_dirty,
                 Arc::clone(&server_handler),
-                None,
+                root.as_deref(),
             );
             let server_count = new_router.server_count();
             let tools = new_router.aggregated_tools();
@@ -3181,6 +3188,11 @@ struct GatewayState {
     /// Client-declared upstream capabilities (stdio gateway). Per-session copy on
     /// [`McpSession`] for HTTP MCP clients.
     client_upstream: Arc<Mutex<ClientUpstreamCaps>>,
+    /// The upstream client's project root path for the `${ROOT}` cwd token
+    /// (issue #239), decoded from its first declared root via `file_uri_to_path`.
+    /// `None` until roots are fetched, or if the client declares none; `${ROOT}`
+    /// servers fall back to the gateway cwd until it is set. stdio-only.
+    client_root: Arc<Mutex<Option<String>>>,
     /// Forward server-initiated JSON-RPC to the stdio upstream client.
     stdio_upstream: Arc<StdioUpstream>,
     /// Answers downstream server-initiated RPC (roots, sampling, elicitation).
@@ -3684,9 +3696,140 @@ fn make_server_request_handler(
     })
 }
 
+/// Read the current resolved client project root for the `${ROOT}` cwd token.
+fn current_client_root(state: &GatewayState) -> Option<String> {
+    state
+        .client_root
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// True when the active profile has any enabled server whose cwd uses `${ROOT}`,
+/// so we only rebuild for a roots change when it can actually matter (issue #239).
+fn profile_has_root_server(state: &GatewayState) -> bool {
+    let profile = state
+        .profile
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let reg = state
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let enabled = match profile.as_deref() {
+        Some(p) => reg.enabled_servers_for(p),
+        None => reg.enabled_servers(),
+    };
+    enabled
+        .into_iter()
+        .any(|s| s.cwd.as_deref().is_some_and(|c| c.contains("${ROOT}")))
+}
+
+/// Rebuild the router with the current `${ROOT}` value and swap it in, mirroring
+/// the registry-watcher rebuild. Guarded by `rebuild_lock` so it single-flights
+/// against the self-heal path. stdio-only (issue #239).
+fn rebuild_router_for_root(state: &GatewayState) {
+    let _rebuild = state
+        .rebuild_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let reg = state
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let profile = state
+        .profile
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let root = current_client_root(state);
+    let new_router = build_router(
+        &reg,
+        profile.as_deref(),
+        state.http,
+        &state.downstream_dirty,
+        Arc::clone(&state.server_handler),
+        root.as_deref(),
+    );
+    let tools = new_router.aggregated_tools();
+    *state
+        .router
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(new_router);
+    let tools = requarantine_if_needed(&state.registry, &state.router, tools, profile.as_deref());
+    persist_and_emit(&tools, &state.cached_tools, &state.stdout, profile.as_deref());
+    glog(&format!("toolport: ${{ROOT}} rebuild (root={root:?}, {} tools)", tools.len()));
+}
+
+/// Fetch the upstream client's roots over stdio, update the shared `${ROOT}` path,
+/// and rebuild the router when it changed and a `${ROOT}` server exists. Runs on
+/// its own thread so it never blocks the initialize response or the request loop.
+/// No-op in HTTP mode (issue #239 is stdio-only). Called after `initialize` and on
+/// `notifications/roots/list_changed`.
+fn refresh_client_root(state: &GatewayState) {
+    if state.http {
+        return;
+    }
+    let supported = state
+        .client_upstream
+        .lock()
+        .map(|c| c.roots.supported)
+        .unwrap_or(false);
+    let new_root = if supported {
+        match state.stdio_upstream.call("roots/list", json!({})) {
+            Ok(result) => {
+                let roots: Vec<Value> = result
+                    .get("roots")
+                    .and_then(|r| r.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                // Keep the init-captured field in sync for any downstream consumer.
+                if let Ok(mut caps) = state.client_upstream.lock() {
+                    caps.roots.roots = roots.clone();
+                }
+                roots
+                    .first()
+                    .and_then(|r| r.get("uri"))
+                    .and_then(|u| u.as_str())
+                    .and_then(downstream::file_uri_to_path)
+            }
+            Err(e) => {
+                glog(&format!("toolport: roots/list failed: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let changed = {
+        let mut cur = state
+            .client_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *cur != new_root {
+            *cur = new_root.clone();
+            true
+        } else {
+            false
+        }
+    };
+    // Only respawn when the resolved root actually changed and a ${ROOT} server is
+    // present, so a client that has no root (or no ${ROOT} server) never churns.
+    if changed && profile_has_root_server(state) {
+        rebuild_router_for_root(state);
+    }
+}
+
 fn handle_client_notification(state: &GatewayState, req: &Value) -> bool {
     match req.get("method").and_then(|m| m.as_str()) {
         Some("notifications/roots/list_changed") => {
+            // Re-place ${ROOT} servers if the client's project root changed. Off the
+            // request thread so the roots/list round-trip + rebuild don't block it.
+            let st = state.clone();
+            std::thread::spawn(move || refresh_client_root(&st));
+            // Still tell downstream servers, for ones that consume roots themselves.
             let router = state
                 .router
                 .lock()
@@ -3723,6 +3866,10 @@ fn process_request(
         if let Ok(mut caps) = state.client_upstream.lock() {
             capture_client_upstream_from_init(&mut caps, req.get("params"));
         }
+        // Fetch the client's roots off-thread and place ${ROOT} servers once known,
+        // so the initialize response is never blocked on the round-trip (issue #239).
+        let st = state.clone();
+        std::thread::spawn(move || refresh_client_root(&st));
     }
 
     let wait = match method {
@@ -3781,13 +3928,14 @@ fn process_request(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
+            let root = current_client_root(state);
             let built = build_router(
                 &reg,
                 profile_snapshot.as_deref(),
                 state.http,
                 &state.downstream_dirty,
                 Arc::clone(&state.server_handler),
-                None,
+                root.as_deref(),
             );
             if built.server_count() > 0 {
                 let tools = built.aggregated_tools();
@@ -5067,6 +5215,7 @@ fn main() {
     let downstream_dirty = Arc::new(AtomicU8::new(0));
     let mcp_sessions = Arc::new(Mutex::new(HashMap::new()));
     let client_upstream = Arc::new(Mutex::new(ClientUpstreamCaps::default()));
+    let client_root = Arc::new(Mutex::new(None::<String>));
     let stdio_upstream = Arc::new(StdioUpstream::new(Arc::clone(&stdout)));
     let server_handler = make_server_request_handler(
         Arc::clone(&client_upstream),
@@ -5137,6 +5286,7 @@ fn main() {
         let profile = Arc::clone(&profile);
         let client_id = client_id.clone();
         let env_profile = env_profile.clone();
+        let client_root = Arc::clone(&client_root);
         std::thread::spawn(move || {
             watch_registry(
                 path,
@@ -5150,6 +5300,7 @@ fn main() {
                 http_mode,
                 downstream_dirty,
                 server_handler,
+                client_root,
             )
         });
     }
@@ -5167,6 +5318,7 @@ fn main() {
         http: http_mode,
         mcp_sessions,
         client_upstream,
+        client_root,
         stdio_upstream,
         server_handler,
     };
@@ -5494,6 +5646,7 @@ mod tests {
             http: true,
             mcp_sessions,
             client_upstream,
+            client_root: Arc::new(Mutex::new(None)),
             stdio_upstream,
             server_handler,
         }
