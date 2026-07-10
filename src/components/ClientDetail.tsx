@@ -52,7 +52,9 @@ interface Props {
 
 export function ClientDetail({ client, registry, onChanged, onRegistryChange }: Props) {
   const [busy, setBusy] = useState(false);
-  const [bulkImportPreview, setBulkImportPreview] = useState<ImportItem[] | null>(null);
+  // Snapshotted at dialog-open time so a registry-changed event mid-review can't
+  // reshuffle `toImport` out from under the indices the user already confirmed.
+  const [bulkImportServers, setBulkImportServers] = useState<McpServer[] | null>(null);
   // "" = expose all enabled servers (follow active profile); else scope to one.
   const [profile, setProfile] = useState("");
   const [migrateOpen, setMigrateOpen] = useState(false);
@@ -154,15 +156,16 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
   }
   const allServers = [...byName.values()];
   const toImport = importableServers(client, registry);
-  const bulkImportCandidates = toImport.map((server, index) => ({
-    key: String(index),
-    name: server.name,
-    transport: server.transport,
-    command: server.command,
-    args: server.args,
-    url: server.url,
-    isNew: true,
-  }));
+  const bulkImportPreview: ImportItem[] | null =
+    bulkImportServers?.map((server, index) => ({
+      key: String(index),
+      name: server.name,
+      transport: server.transport,
+      command: server.command,
+      args: server.args,
+      url: server.url,
+      isNew: true,
+    })) ?? null;
 
   async function importOne(server: McpServer) {
     const isPlugin = pluginNames.has(server.name.toLowerCase());
@@ -196,15 +199,16 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
   }
 
   async function handleImportAll() {
-    setBulkImportPreview(bulkImportCandidates);
+    setBulkImportServers(toImport);
   }
 
   async function confirmImportAll(selected: string[]) {
+    const servers = bulkImportServers ?? [];
     setBusy(true);
     let ok = 0;
     const failed: string[] = [];
     for (const key of selected) {
-      const s = toImport[Number(key)];
+      const s = servers[Number(key)];
       if (!s) continue;
       try {
         await importOne(s);
@@ -216,7 +220,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
     setBusy(false);
     if (failed.length === 0) {
       toast.success(`Imported ${ok} server${ok === 1 ? "" : "s"} into Toolport`);
-      setBulkImportPreview(null);
+      setBulkImportServers(null);
     } else if (ok > 0) {
       toast.warning(`Imported ${ok}, couldn't import ${failed.join(", ")}`);
     } else {
@@ -575,7 +579,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
         busy={busy}
         title={`Review ${client.name} servers`}
         onOpenChange={(open) => {
-          if (!open && !busy) setBulkImportPreview(null);
+          if (!open && !busy) setBulkImportServers(null);
         }}
         onConfirm={confirmImportAll}
       />
