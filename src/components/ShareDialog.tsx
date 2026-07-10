@@ -7,7 +7,6 @@ import {
   FileUp,
   Link2,
   Loader2,
-  ShieldAlert,
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -36,8 +35,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { TransportPill } from "@/components/TransportPill";
 import { Label } from "@/components/ui/label";
+import { ImportRow } from "@/components/ImportReviewDialog";
 
 interface Props {
   trigger: ReactNode;
@@ -487,79 +486,6 @@ export function ShareDialog({ trigger, onImported }: Props) {
       </DialogContent>
     </Dialog>
   );
-}
-
-/** One reviewable server: name, what it runs, and a flag if it spawns a shell. */
-function ImportRow({ item }: { item: ImportItem }) {
-  const runs =
-    item.command != null ? [item.command, ...item.args].join(" ") : (item.url ?? "");
-  const shell = runsShell(item.command);
-  const privateHost = isPrivateHostUrl(item.url);
-  return (
-    <div className="rounded-md border px-3 py-2">
-      <div className="flex items-center gap-2">
-        <span className="truncate text-sm font-medium">{item.name}</span>
-        <TransportPill transport={item.transport} />
-        {!item.isNew && (
-          <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-            already added
-          </span>
-        )}
-      </div>
-      {runs && (
-        <p className="mt-1 font-mono text-xs break-all text-muted-foreground">{runs}</p>
-      )}
-      {shell && (
-        <p className="mt-1.5 flex items-center gap-1.5 text-xs text-warning">
-          <ShieldAlert className="size-3.5 shrink-0" />
-          Runs a shell command. Only import setups you trust.
-        </p>
-      )}
-      {privateHost && (
-        <p className="mt-1.5 flex items-center gap-1.5 text-xs text-warning">
-          <ShieldAlert className="size-3.5 shrink-0" />
-          Connects to a private or internal address. Only import setups you trust.
-        </p>
-      )}
-    </div>
-  );
-}
-
-/** True if the command spawns a shell interpreter (extra scrutiny on import). */
-function runsShell(command: string | null): boolean {
-  if (!command) return false;
-  const base = command
-    .replace(/\\/g, "/")
-    .split("/")
-    .pop()!
-    .toLowerCase()
-    .replace(/\.exe$/, "");
-  return ["cmd", "sh", "bash", "zsh", "powershell", "pwsh"].includes(base);
-}
-
-/** True if the URL targets a loopback, private-network, or cloud-metadata host -
- * a server that would read from inside your own machine or LAN. Mirrors the
- * backend host-privacy guard so an imported setup pointing inward is flagged. */
-function isPrivateHostUrl(url: string | null | undefined): boolean {
-  if (!url) return false;
-  let host: string;
-  try {
-    host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  } catch {
-    return false;
-  }
-  if (host === "localhost" || host.endsWith(".localhost")) return true;
-  if (host === "::1") return true; // IPv6 loopback
-  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
-  if (m) {
-    const a = Number(m[1]);
-    const b = Number(m[2]);
-    if (a === 127 || a === 10 || a === 0) return true; // loopback, private, this-host
-    if (a === 192 && b === 168) return true; // private
-    if (a === 172 && b >= 16 && b <= 31) return true; // private
-    if (a === 169 && b === 254) return true; // link-local + cloud metadata (169.254.169.254)
-  }
-  return false;
 }
 
 /** A filesystem-safe slug for the default filename. */
