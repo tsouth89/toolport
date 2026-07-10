@@ -54,6 +54,9 @@ regex = "1"
 getrandom = "0.2"
 chacha20poly1305 = "0.10"
 urlencoding = "2"
+# file:// URI -> path decoding for the ${ROOT} cwd token (issue #239); already in
+# the tree transitively, promoted to a direct dep for url::Url::to_file_path.
+url = "2"
 # Minimal synchronous HTTP server for the gateway's native HTTP/OpenAPI mode
 # (first-class Open WebUI and any OpenAPI tool client, no external bridge).
 tiny_http = "0.12"

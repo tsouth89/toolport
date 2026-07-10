@@ -106,8 +106,11 @@ pub struct ServerEntry {
     /// Working directory for a stdio server. Unset means inherit the gateway's
     /// cwd (the previous behavior). A leading `~` expands to the home dir and
     /// `${VAR}` expands from the environment, so a server that operates on the
-    /// project (e.g. a grep/filesystem tool) can be pinned to it. Only applies to
-    /// stdio servers. See issue #239.
+    /// project (e.g. a grep/filesystem tool) can be pinned to it. The reserved
+    /// token `${ROOT}` expands to the upstream MCP client's current project
+    /// directory (its first declared root); it is resolved only in stdio-gateway
+    /// mode, and falls back to the gateway cwd when no client root is known.
+    /// Only applies to stdio servers. See issue #239.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     /// Where this entry came from, e.g. "imported:cursor" or "manual".

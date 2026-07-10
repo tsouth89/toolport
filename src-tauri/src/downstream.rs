@@ -399,6 +399,46 @@ pub fn expand_cwd(dir: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(out)
 }
 
+/// Resolve the reserved `${ROOT}` token in a per-server working directory
+/// (issue #239). `${ROOT}` stands for the upstream MCP client's current project
+/// directory (its first declared root), resolved here *before* [`expand_cwd`]
+/// runs so `${VAR}` expansion can't mistake it for an env var named `ROOT`.
+///
+/// Returns the cwd string to spawn with, or `None` to inherit the gateway's cwd:
+/// - blank config -> `None` (unset)
+/// - contains `${ROOT}` with a known `root` -> substituted string
+/// - contains `${ROOT}` with no known root (the client declared none, or a
+///   context without one such as the desktop probe) -> `None`, so the server
+///   falls back to the gateway cwd instead of spawning in the wrong place or
+///   being handed a literal `${ROOT}` that would guarantee a spawn failure
+/// - no `${ROOT}` -> the (trimmed) config unchanged
+pub fn resolve_root_token(cwd: &str, root: Option<&str>) -> Option<String> {
+    let trimmed = cwd.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.contains("${ROOT}") {
+        root.map(|r| trimmed.replace("${ROOT}", r))
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Decode a `file://` URI (the form MCP roots report) to a filesystem path
+/// string (issue #239). Uses `url::Url::to_file_path`, which handles the local
+/// platform's conventions: POSIX (`file:///home/x`), Windows drive letters
+/// (`file:///C:/x`), UNC hosts (`file://server/share`), and percent-decoding.
+/// Returns `None` for a non-`file` URI or one that can't be converted to a path.
+/// A stdio gateway and its client run on the same machine (this feature is
+/// stdio-only), so decoding on the local platform is always correct.
+pub fn file_uri_to_path(uri: &str) -> Option<String> {
+    let parsed = url::Url::parse(uri).ok()?;
+    if parsed.scheme() != "file" {
+        return None;
+    }
+    parsed.to_file_path().ok().map(|p| p.to_string_lossy().into_owned())
+}
+
 /// macOS GUI apps (and apps they launch, like the client-spawned gateway) inherit
 /// only a minimal PATH, so `npx`/`uvx`/`node` aren't found without this. Computed
 /// once and cached.
@@ -1835,8 +1875,8 @@ fn extract_array(result: &Value, key: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        expand_cwd, resolve_command, screen_resolved_addrs, screen_spawn_command, screen_spawn_env,
-        CancelRegistry,
+        expand_cwd, file_uri_to_path, resolve_command, resolve_root_token, screen_resolved_addrs,
+        screen_spawn_command, screen_spawn_env, CancelRegistry,
     };
     use serde_json::json;
 
@@ -1856,6 +1896,49 @@ mod tests {
         if let Some(home) = dirs::home_dir() {
             assert_eq!(expand_cwd("~"), home);
             assert_eq!(expand_cwd("~/proj"), home.join("proj"));
+        }
+    }
+
+    #[test]
+    fn resolve_root_token_substitutes_and_falls_back() {
+        // Blank -> None (inherit the gateway cwd).
+        assert_eq!(resolve_root_token("", Some("/proj")), None);
+        assert_eq!(resolve_root_token("   ", Some("/proj")), None);
+        // ${ROOT} with a known root -> substituted.
+        assert_eq!(resolve_root_token("${ROOT}", Some("/home/u/proj")), Some("/home/u/proj".into()));
+        assert_eq!(
+            resolve_root_token("${ROOT}/sub", Some("/home/u/proj")),
+            Some("/home/u/proj/sub".into())
+        );
+        // ${ROOT} with no known root -> None (fall back, never a literal ${ROOT}).
+        assert_eq!(resolve_root_token("${ROOT}/sub", None), None);
+        // No ${ROOT} -> the trimmed config, regardless of root.
+        assert_eq!(resolve_root_token("/plain", None), Some("/plain".into()));
+        assert_eq!(resolve_root_token("  /plain  ", Some("/proj")), Some("/plain".into()));
+        // Composes with expand_cwd: an un-touched ${VAR} survives for expand_cwd.
+        assert_eq!(resolve_root_token("${ROOT}/${SUB}", Some("/proj")), Some("/proj/${SUB}".into()));
+    }
+
+    #[test]
+    fn file_uri_to_path_decodes_platform_paths() {
+        use std::path::PathBuf;
+        // Non-file / unparseable -> None.
+        assert_eq!(file_uri_to_path("https://example.com/x"), None);
+        assert_eq!(file_uri_to_path("not a uri"), None);
+        // Compare as PathBuf so `/` vs `\` separators don't make the test brittle.
+        let as_path = |u: &str| file_uri_to_path(u).map(PathBuf::from);
+        #[cfg(not(windows))]
+        {
+            assert_eq!(as_path("file:///home/u/proj"), Some(PathBuf::from("/home/u/proj")));
+            assert_eq!(as_path("file:///home/u/my%20proj"), Some(PathBuf::from("/home/u/my proj")));
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(as_path("file:///C:/Users/u/proj"), Some(PathBuf::from(r"C:\Users\u\proj")));
+            assert_eq!(
+                as_path("file:///C:/Users/u/my%20proj"),
+                Some(PathBuf::from(r"C:\Users\u\my proj"))
+            );
         }
     }
 
