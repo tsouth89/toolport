@@ -271,10 +271,10 @@ Toolport reads the following environment variables. This is the complete referen
 | `CONDUIT_DATA_DIR` | Override the full path to the Toolport config directory. | OS config root | Everywhere |
 | `CONDUIT_DEBUG` | Enable trace and debug logging. | None | Everywhere |
 | `CONDUIT_DISCOVERY` | Override discovery mode (`lazy`, `grouped`, `full`). | Registry setting | Everywhere |
-| `CONDUIT_EMBED_BLEND` | Semantic search embedding blend weight (float). | Registry setting | Everywhere |
-| `CONDUIT_EMBED_ENDPOINT` | Semantic search embedding endpoint URL. | Registry setting | Everywhere |
-| `CONDUIT_EMBED_KEY` | API key for the semantic search embedding endpoint. | None | Everywhere |
-| `CONDUIT_EMBED_MODEL` | Semantic search embedding model name. | Registry setting | Everywhere |
+| `CONDUIT_EMBED_BLEND` | Semantic search embedding blend weight (float). | Registry setting | Gateway / semantic search |
+| `CONDUIT_EMBED_ENDPOINT` | Semantic search embedding endpoint URL. | Registry setting | Gateway / semantic search |
+| `CONDUIT_EMBED_KEY` | API key for the semantic search embedding endpoint. | None | Gateway / semantic search |
+| `CONDUIT_EMBED_MODEL` | Semantic search embedding model name. | Registry setting | Gateway / semantic search |
 | `CONDUIT_HTTP` | Direct port override or boolean flag to enable HTTP. | None | Gateway |
 | `CONDUIT_HTTP_HOST` | Host IP to bind for the HTTP endpoint. | `127.0.0.1` | Gateway |
 | `CONDUIT_HTTP_PORT` | Port for the HTTP endpoint (when `CONDUIT_HTTP` is a boolean). | `8765` | Gateway |
@@ -284,7 +284,7 @@ Toolport reads the following environment variables. This is the complete referen
 | `CONDUIT_RESULT_BUDGET` | Byte budget before large tool results get shaped/truncated (0 to disable). | `49152` | Everywhere |
 | `CONDUIT_SECRET_<KEY>` | Process env override for a specific scoped secret. | None | Headless |
 | `CONDUIT_SECRET_KEY` | Passphrase to activate the `secrets.enc` file backend. | None | Headless |
-| `CONDUIT_SEMANTIC` | Toggle semantic search (`on` or `off`). | Registry setting | Everywhere |
+| `CONDUIT_SEMANTIC` | Toggle semantic search (`on` or `off`). | Registry setting | Gateway / semantic search |
 | `CONDUIT_TARGET_TRIPLE` | Packaged fallback target architecture (internal use). | None | Desktop |
 
 ## Notes
