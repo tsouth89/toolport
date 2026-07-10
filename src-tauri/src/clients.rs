@@ -1114,6 +1114,18 @@ fn name_from_invocation(command: &str, args: &[String]) -> String {
     command_stem(command)
 }
 
+/// Key an imported server by its full package spec when it is launched through
+/// a package runner. The display name intentionally drops a package scope, so
+/// using it alone would collapse `@acme/mcp-weather` and
+/// `@other/mcp-weather` during bulk import. Other servers retain the existing
+/// case-insensitive name-based dedupe behavior.
+pub fn import_dedupe_key(name: &str, command: Option<&str>, args: &[String]) -> String {
+    match command.and_then(|command| launcher_package_arg(command, args)) {
+        Some(package) => format!("package:{}", package.to_ascii_lowercase()),
+        None => format!("name:{}", name.to_ascii_lowercase()),
+    }
+}
+
 /// Parse a JSON snippet, trying each known wrapper key, then a bare server object.
 fn parse_json_snippet(
     content: &str,

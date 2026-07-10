@@ -424,18 +424,20 @@ fn server_from_detected(server: &clients::McpServer, client_id: &str) -> ServerE
 
 /// Servers to add to the registry from a set of detected clients: both a
 /// client's main config servers and its plugin-detected ones (e.g. Cursor/Roo
-/// project-level scans), skipping the gateway's own entry and anything whose
-/// name already exists (checked against `existing` plus whatever this same
-/// call has already picked, so duplicate names across clients collapse to one).
+/// project-level scans), skipping the gateway's own entry and anything with the
+/// same import key (checked against `existing` plus whatever this same call has
+/// already picked). Package runners use their full package spec as that key, so
+/// distinct scoped packages that share a friendly display name are retained and
+/// given unique registry ids by `Registry::add_server`.
 /// The onboarding banner promises a count across both server sources (see
 /// `importableServers` in `src/lib/types.ts`), so this must actually cover
 /// both or it silently under-imports relative to what was promised.
 fn servers_to_import(detected: &[clients::DetectedClient], existing: &Registry) -> Vec<ServerEntry> {
     let mut picked: Vec<ServerEntry> = Vec::new();
-    let mut names: std::collections::HashSet<String> = existing
+    let mut import_keys: std::collections::HashSet<String> = existing
         .servers
         .iter()
-        .map(|s| s.name.to_lowercase())
+        .map(|server| clients::import_dedupe_key(&server.name, server.command.as_deref(), &server.args))
         .collect();
     for client in detected {
         for server in client.servers.iter().chain(client.plugin_servers.iter()) {
@@ -449,8 +451,8 @@ fn servers_to_import(detected: &[clients::DetectedClient], existing: &Registry) 
             if clients::is_gateway_server(&entry) {
                 continue;
             }
-            let key = entry.name.to_lowercase();
-            if names.insert(key) {
+            let key = clients::import_dedupe_key(&entry.name, entry.command.as_deref(), &entry.args);
+            if import_keys.insert(key) {
                 picked.push(entry);
             }
         }
@@ -2758,6 +2760,18 @@ mod tests {
         }
     }
 
+    fn detected_mcp_server_with_args(
+        name: &str,
+        command: &str,
+        args: &[&str],
+    ) -> clients::McpServer {
+        clients::McpServer {
+            command: Some(command.into()),
+            args: args.iter().map(|arg| (*arg).into()).collect(),
+            ..detected_mcp_server(name)
+        }
+    }
+
     fn detected_client(id: &str, servers: Vec<&str>, plugin_servers: Vec<&str>) -> clients::DetectedClient {
         clients::DetectedClient {
             id: id.into(),
@@ -2806,6 +2820,29 @@ mod tests {
         let picked = servers_to_import(&detected, &reg);
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].name.to_lowercase(), "linear");
+    }
+
+    #[test]
+    fn servers_to_import_keeps_distinct_packages_with_the_same_friendly_name() {
+        // Bare package-runner entries use the package-derived friendly name. The
+        // scopes below both become "weather", but the runner invocations target
+        // different packages and must survive bulk import as separate entries.
+        let mut client = detected_client("cursor", vec![], vec![]);
+        client.servers = vec![
+            detected_mcp_server_with_args("weather", "npx", &["-y", "@acme/mcp-weather"]),
+            detected_mcp_server_with_args("weather", "npx", &["-y", "@other/mcp-weather"]),
+        ];
+        let mut reg = Registry::default();
+        let picked = servers_to_import(&[client], &reg);
+        assert_eq!(picked.len(), 2);
+        assert!(picked.iter().all(|server| server.name == "weather"));
+
+        for server in picked {
+            reg.add_server(server);
+        }
+        let ids: std::collections::HashSet<_> =
+            reg.servers.iter().map(|server| server.id.as_str()).collect();
+        assert_eq!(ids, std::collections::HashSet::from(["weather", "weather-2"]));
     }
 
     #[test]
