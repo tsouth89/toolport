@@ -342,7 +342,7 @@ export function ServerDialog({
               value={form.transport}
               onValueChange={(v) => set("transport", v as Transport)}
             >
-              <SelectTrigger>
+              <SelectTrigger aria-label="Transport">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
