@@ -1605,15 +1605,22 @@ fn reload_into_state(state: &RegistryState) -> Result<Registry, String> {
 /// keychain, pulls the team's server set, and merges it into the local registry
 /// non-destructively (team servers are tagged and enabled in the active profile).
 #[tauri::command]
-fn team_connect(
+async fn team_connect(
     app: tauri::AppHandle,
-    state: State<RegistryState>,
+    state: State<'_, RegistryState>,
     server_url: String,
     invite_code: String,
     member_name: Option<String>,
 ) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    let outcome = teams::connect(&server_url, &invite_code, member_name.as_deref())?;
+    // Same reason as team_sync: a synchronous command runs on Tauri's main (UI) thread, and
+    // teams::connect does a blocking network join + first config pull. Run it off-thread so
+    // clicking "Connect" to join a team doesn't freeze the whole app until the join returns.
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        teams::connect(&server_url, &invite_code, member_name.as_deref())
+    })
+    .await
+    .map_err(|e| format!("connect task join failed: {e}"))??;
     let fresh = reload_into_state(state.inner())?;
     nudge_gateway(state.inner());
     // Team config adds local/stdio + LAN servers OFF (the member reviews + enables them)
@@ -1710,9 +1717,12 @@ fn team_disconnect(state: State<RegistryState>) -> Result<Registry, String> {
 /// Admin: push the current local server set as the team's shared config (own servers
 /// only, secret values never sent). Returns the new config version.
 #[tauri::command]
-fn team_push(state: State<RegistryState>) -> Result<i64, String> {
+async fn team_push(state: State<'_, RegistryState>) -> Result<i64, String> {
     flush_to_disk(state.inner())?;
-    teams::push_current()
+    // push_current does a blocking PUT to the team server; keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(teams::push_current)
+        .await
+        .map_err(|e| format!("push task join failed: {e}"))?
 }
 
 /// Re-save the registry to bump its mtime. The running gateway watches that file
