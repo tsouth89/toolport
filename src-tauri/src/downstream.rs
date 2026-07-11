@@ -1040,6 +1040,23 @@ pub fn stdio_connect_timeout(command: &str, args: &[String]) -> Duration {
     }
 }
 
+/// Strip the gateway's own `CONDUIT_*` control-plane environment from a spawned
+/// downstream server. A downstream MCP server is untrusted code, and a compromised
+/// package can read its own process environment; in the file-backend and `--http`
+/// bridge deployments that inherited env carries the vault master key
+/// (`CONDUIT_SECRET_KEY`) or the local tool-bridge token (`CONDUIT_HTTP_TOKEN`).
+/// Neither is meant for a downstream server, so remove the whole inherited
+/// `CONDUIT_*` namespace (covers both, plus any future control var). A var the
+/// server set for itself via its own `env` is exempt and left untouched.
+fn strip_gateway_control_env(cmd: &mut Command, configured: &std::collections::HashSet<&str>) {
+    for (key, _) in std::env::vars_os() {
+        let Some(k) = key.to_str() else { continue };
+        if k.starts_with("CONDUIT_") && !configured.contains(k) {
+            cmd.env_remove(&key);
+        }
+    }
+}
+
 impl StdioTransport {
     /// Spawn a downstream server without watching for its tool-list changes.
     /// Used by one-shot callers (the app's health probe and playground) that
@@ -1093,6 +1110,12 @@ impl StdioTransport {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Never hand the gateway's own control-plane env (vault master key /
+        // HTTP-bridge token) to an untrusted downstream server. Anything the server
+        // configured for itself in `env` is exempt. See strip_gateway_control_env.
+        let configured: std::collections::HashSet<&str> =
+            env.iter().map(|(k, _)| k.as_str()).collect();
+        strip_gateway_control_env(&mut cmd, &configured);
         // Optional per-server working directory (issue #239). Unset (or blank)
         // means inherit the gateway's cwd, the previous behavior. `~` and `${VAR}`
         // are expanded so a config can pin a server to a project dir. If the dir
@@ -1925,6 +1948,45 @@ mod tests {
             assert_eq!(expand_cwd("~"), home);
             assert_eq!(expand_cwd("~/proj"), home.join("proj"));
         }
+    }
+
+    #[test]
+    fn strips_gateway_control_env_from_children() {
+        use std::collections::HashSet;
+        use std::ffi::OsStr;
+        // pid-unique names so a parallel test's process-wide env set can't collide.
+        let secret = format!("CONDUIT_TEST_SECRET_{}", std::process::id());
+        let keep = format!("TP_KEEP_{}", std::process::id());
+        std::env::set_var(&secret, "leak-me");
+        std::env::set_var(&keep, "ok");
+
+        // Nothing configured: the inherited CONDUIT_* var is marked for removal from
+        // the child (get_envs records a removal as value None), and an unrelated var
+        // is left untouched.
+        let empty: HashSet<&str> = HashSet::new();
+        let mut cmd = std::process::Command::new("true");
+        super::strip_gateway_control_env(&mut cmd, &empty);
+        let overrides: Vec<_> = cmd.get_envs().collect();
+        assert!(
+            overrides.iter().any(|(k, v)| *k == OsStr::new(&secret) && v.is_none()),
+            "a CONDUIT_* var must be stripped from the child"
+        );
+        assert!(
+            !overrides.iter().any(|(k, _)| *k == OsStr::new(&keep)),
+            "an unrelated var must not be touched by the strip"
+        );
+
+        // A server that sets a CONDUIT_ var for itself keeps it (exempt from the strip).
+        let configured: HashSet<&str> = [secret.as_str()].into_iter().collect();
+        let mut cmd2 = std::process::Command::new("true");
+        super::strip_gateway_control_env(&mut cmd2, &configured);
+        assert!(
+            !cmd2.get_envs().any(|(k, _)| k == OsStr::new(&secret)),
+            "a server-configured CONDUIT_ var must be exempt from the strip"
+        );
+
+        std::env::remove_var(&secret);
+        std::env::remove_var(&keep);
     }
 
     #[test]
