@@ -162,6 +162,14 @@ pub fn pull_config(
             Ok(Some((version, config, new_etag)))
         }
         Err(ureq::Error::Status(304, _)) => Ok(None),
+        // A team that has never had a config pushed yet returns 404 (no config row on the
+        // server). That is "nothing to sync," not a failure: without this, the first
+        // pull_config in `connect` errors out and rolls the just-saved member token back, so
+        // joining any brand-new team fails outright. The current server serves an empty
+        // `{servers:[]}` 200 for this case; this keeps a new client working against an older
+        // self-hosted server that still 404s. Mirrors `fetch_me`/`post_usage_day` below,
+        // which likewise treat a 404 as "resource/endpoint absent, degrade gracefully."
+        Err(ureq::Error::Status(404, _)) => Ok(None),
         Err(e) => Err(stringify(e)),
     }
 }
