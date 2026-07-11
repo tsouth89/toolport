@@ -1306,13 +1306,30 @@ pub fn save_to(path: &Path, registry: &Registry) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    let json = serde_json::to_string_pretty(registry).map_err(|e| e.to_string())?;
+    let existing = std::fs::read_to_string(path).ok();
+    // No-op guard: if the on-disk registry is already semantically identical to what we
+    // would write, skip the whole save so we never bump the file's mtime. This is NOT just
+    // an IO optimization. The gateway watches this file's mtime and, on ANY change, does a
+    // full rebuild that re-spawns every stdio MCP server. The team sync loop calls save()
+    // every ~25s even on a no-op (304) pull, so without this guard each cycle bumped the
+    // mtime and made every gateway respawn every server; the orphaned npx/node children
+    // piled up until the machine ran out of RAM. Compare as PARSED JSON, not raw bytes, so
+    // HashMap key-order jitter across a load->save round-trip can't masquerade as a change.
+    if let Some(cur) = existing.as_deref() {
+        if let Ok(cur_val) = serde_json::from_str::<serde_json::Value>(cur) {
+            if serde_json::to_value(registry).map(|v| v == cur_val).unwrap_or(false) {
+                return Ok(());
+            }
+        }
+    }
     // Snapshot the current on-disk registry to a `.bak` sibling before overwriting,
     // but only if it still parses, so a bad write or an accidental deletion of
     // registry.json has a last-known-good to recover from (see load_from). An
     // existing file that does NOT parse is quarantined instead of silently
     // overwritten: on a mixed-version machine it may be a newer build's registry,
     // and this save (from an older binary) must not be the thing that destroys it.
-    if let Ok(existing) = std::fs::read_to_string(path) {
+    if let Some(existing) = existing {
         if !existing.trim().is_empty() {
             if serde_json::from_str::<Registry>(&existing).is_ok() {
                 // Single last-known-good (compat + the load_from fast path)...
@@ -1326,7 +1343,6 @@ pub fn save_to(path: &Path, registry: &Registry) -> Result<(), String> {
             }
         }
     }
-    let json = serde_json::to_string_pretty(registry).map_err(|e| e.to_string())?;
     // The registry is the single source of truth for every server, so a crash,
     // power loss, or full disk mid-write must not be able to truncate it.
     atomic_write(path, &json)
@@ -1845,7 +1861,10 @@ mod tests {
         let mut reg = Registry::default();
         reg.add_server(sample_server("alpha"));
         save_to(&path, &reg).unwrap();
-        save_to(&path, &reg).unwrap(); // second save rotates .bak
+        // A second, DIFFERENT save snapshots the prior {alpha} state into .bak before
+        // overwriting. (An identical re-save is now a no-op and writes no backup.)
+        reg.add_server(sample_server("beta"));
+        save_to(&path, &reg).unwrap();
 
         // A newer build (or corruption) leaves bytes this build can't parse. The
         // self-heal from .bak must PRESERVE those bytes, not destroy them - they
@@ -1861,6 +1880,57 @@ mod tests {
         cleanup_quarantine(&path);
         std::fs::remove_file(&path).ok();
         std::fs::remove_file(&bak).ok();
+    }
+
+    #[test]
+    fn identical_save_is_a_noop_leaving_the_file_untouched() {
+        // The gateway rebuilds (re-spawning every stdio MCP server) on any registry
+        // mtime change, and the team sync loop save()s every cycle even when the pull was
+        // a 304. A save whose content already matches disk must therefore be a complete
+        // no-op: no rewrite, no mtime bump, no backup. Without this, each idle sync cycle
+        // triggered every gateway to respawn every server, orphaning npx/node children
+        // until the machine ran out of RAM.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-reg-noop-{}.json", std::process::id()));
+        let bak = backup_path(&path);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&bak).ok();
+        for g in backup_generations(&path) {
+            std::fs::remove_file(g).ok();
+        }
+
+        let mut reg = Registry::default();
+        reg.add_server(sample_server("alpha"));
+        save_to(&path, &reg).unwrap();
+        let mtime1 = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        // Re-save the SAME registry (freshly re-serialized, exactly as the sync loop does
+        // after a load): a complete no-op.
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        save_to(&path, &reg).unwrap();
+        let mtime2 = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(mtime1, mtime2, "an identical save must not rewrite the file");
+        assert!(!bak.exists(), "an identical save must not create a backup");
+        assert!(
+            backup_generations(&path).is_empty(),
+            "an identical save must not add a journal generation"
+        );
+
+        // A genuine change still writes (and snapshots the prior state).
+        reg.add_server(sample_server("beta"));
+        save_to(&path, &reg).unwrap();
+        assert!(bak.exists(), "a real change snapshots the prior state to .bak");
+        assert_eq!(
+            load_from(&path).unwrap().servers.len(),
+            2,
+            "a real change is persisted"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&bak).ok();
+        for g in backup_generations(&path) {
+            std::fs::remove_file(g).ok();
+        }
     }
 
     #[test]
