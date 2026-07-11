@@ -17,6 +17,7 @@ import { TransportPill } from "@/components/TransportPill";
 import { Input } from "@/components/ui/input";
 import {
   teamConnect,
+  teamJoinPoll,
   teamSync,
   teamDisconnect,
   teamPush,
@@ -56,6 +57,13 @@ export function TeamsView({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [skipNote, setSkipNote] = useState<string | null>(null);
+  // Set while an approval-gated join waits for an admin. Holds the connect inputs so a poll
+  // uses the values from when the request was made, not whatever the fields say later.
+  const [pending, setPending] = useState<{
+    serverUrl: string;
+    requestToken: string;
+    memberName?: string;
+  } | null>(null);
 
   // Team servers that run a local command or hit a LAN address arrive OFF (the member
   // reviews + enables them below); link-local/metadata URLs are blocked outright. The
@@ -102,15 +110,63 @@ export function TeamsView({
       if (!inviteCode.trim()) {
         throw new Error("An invite or connect code is required.");
       }
-      const r = await teamConnect(
-        serverUrl.trim(),
-        inviteCode.trim(),
-        memberName.trim() || undefined,
-      );
-      onRegistryChange(r);
-      setInviteCode("");
-      setNotice("Connected. The team's servers were added to your active profile.");
+      const su = serverUrl.trim();
+      const mn = memberName.trim() || undefined;
+      const r = await teamConnect(su, inviteCode.trim(), mn);
+      if (r.status === "pending" && r.requestToken) {
+        // An approval-gated link: nothing is joined yet. Hold here and poll (below) until an
+        // admin approves or denies; the fields stay as-is so the request context is preserved.
+        setPending({ serverUrl: su, requestToken: r.requestToken, memberName: mn });
+        setNotice("Request sent. Waiting for an admin to approve you.");
+        return;
+      }
+      if (r.status === "connected" && r.registry) {
+        onRegistryChange(r.registry);
+        setInviteCode("");
+        setNotice("Connected. The team's servers were added to your active profile.");
+        return;
+      }
+      throw new Error("The server returned an unexpected connect response.");
     });
+
+  // While a join is pending admin approval, poll for the verdict. A transient network error
+  // keeps the wait alive (a blip shouldn't cancel it); an explicit deny/expiry ends it.
+  useEffect(() => {
+    if (!pending) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await teamJoinPoll(
+          pending.serverUrl,
+          pending.requestToken,
+          pending.memberName,
+        );
+        if (cancelled) return;
+        if (r.status === "connected" && r.registry) {
+          setPending(null);
+          onRegistryChange(r.registry);
+          setInviteCode("");
+          setNotice("Approved. The team's servers were added to your active profile.");
+        } else if (r.status === "denied") {
+          setPending(null);
+          setError("An admin declined your request to join this team.");
+        } else if (r.status === "unknown") {
+          setPending(null);
+          setError("This join request expired. Ask for the link again and reconnect.");
+        }
+        // "pending" → keep waiting.
+      } catch {
+        // Transient: leave `pending` set so the next tick retries.
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending]);
 
   const onSync = () =>
     run("sync", async () => {
@@ -299,9 +355,30 @@ export function TeamsView({
               />
             </label>
             <div>
-              <Button onClick={onConnect} disabled={busy !== null}>
-                {busy === "connect" ? "Connecting…" : "Connect"}
-              </Button>
+              {pending ? (
+                <div className="flex items-center gap-3 rounded-lg border border-primary/40 bg-primary/5 p-3 text-sm">
+                  <RefreshCw className="size-4 shrink-0 animate-spin text-primary" />
+                  <span className="text-muted-foreground">
+                    Waiting for an admin to approve your request. Leave this open, it
+                    finishes on its own once they approve.
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="ml-auto shrink-0"
+                    onClick={() => {
+                      setPending(null);
+                      setNotice(null);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              ) : (
+                <Button onClick={onConnect} disabled={busy !== null}>
+                  {busy === "connect" ? "Connecting…" : "Connect"}
+                </Button>
+              )}
             </div>
           </div>
         </div>
