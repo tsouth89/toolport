@@ -1623,24 +1623,39 @@ fn team_connect(
 }
 
 /// Pull the latest team config and re-merge it. A no-op when nothing changed.
+///
+/// `async` + `spawn_blocking` is load-bearing, not stylistic: a synchronous Tauri command
+/// runs on the main (UI) thread, and the config pull is a blocking network call. The
+/// long-poll variant below blocks for up to 30s per cycle, and the member's background loop
+/// re-invokes it continuously, so as a sync command it froze the whole app ("Not Responding")
+/// for anyone connected to a team and starved every other command (probe_servers, etc.).
+/// Running the blocking pull on a worker thread keeps the event loop free.
 #[tauri::command]
-fn team_sync(app: tauri::AppHandle, state: State<RegistryState>) -> Result<Registry, String> {
+async fn team_sync(app: tauri::AppHandle, state: State<'_, RegistryState>) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    finish_sync(&app, state.inner(), teams::sync_now()?)
+    let result = tauri::async_runtime::spawn_blocking(teams::sync_now)
+        .await
+        .map_err(|e| format!("sync task join failed: {e}"))??;
+    finish_sync(&app, state.inner(), result)
 }
 
 /// Long-polling sync for the member's background loop: the config pull parks on the server
 /// for up to `wait_secs` (clamped) and returns the instant the team config view changes, so
 /// a dashboard policy edit enforces in ~1s instead of at the next interval. Otherwise
-/// identical to [`team_sync`]; the frontend re-invokes it in a loop.
+/// identical to [`team_sync`]; the frontend re-invokes it in a loop. See [`team_sync`] for
+/// why the blocking pull must run off the main thread.
 #[tauri::command]
-fn team_sync_wait(
+async fn team_sync_wait(
     app: tauri::AppHandle,
-    state: State<RegistryState>,
+    state: State<'_, RegistryState>,
     wait_secs: u64,
 ) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    finish_sync(&app, state.inner(), teams::sync_wait(wait_secs.min(30))?)
+    let wait = wait_secs.min(30);
+    let result = tauri::async_runtime::spawn_blocking(move || teams::sync_wait(wait))
+        .await
+        .map_err(|e| format!("sync task join failed: {e}"))??;
+    finish_sync(&app, state.inner(), result)
 }
 
 /// Apply a sync result to the shared registry state and tell the UI what happened. Shared by
