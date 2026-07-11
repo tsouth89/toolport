@@ -6,7 +6,20 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
-## [1.7.0] - 2026-07-09
+## [1.7.1] - 2026-07-10
+
+A focused patch that makes Toolport Teams safe to use: joining a team no longer
+destabilizes the app.
+
+### Fixed
+
+**Joining a team could exhaust system memory and hang the app.** Once connected to a team,
+the background sync rewrote the local registry every cycle even when nothing had changed, and
+each rewrite made every running gateway rebuild and re-spawn every configured MCP server. The
+orphaned server processes piled up until the machine ran out of RAM and the app stopped
+opening. Two changes fix it: a no-op sync no longer rewrites the registry at all, and the
+gateway no longer rebuilds when only team-sync metadata (usage stats, sync version) changed.
+A routine sync now costs nothing and never re-spawns your servers. (#286)
 
 This release leads with a security fix and clears a batch of rough edges around running
 servers and living in the app day to day.

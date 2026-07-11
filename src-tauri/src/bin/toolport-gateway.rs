@@ -2978,6 +2978,22 @@ fn resolve_live_profile(
     }
 }
 
+/// The registry as a JSON value with the `team` block removed. The gateway builds the
+/// router ONLY from servers/profiles/policy flags and never reads the `team` block (its
+/// sync version/etag, role, member name, and per-day usage watermarks). The desktop team
+/// sync loop rewrites those fields on a timer, so keying a rebuild off the raw file made
+/// every routine sync re-spawn every stdio server — the process leak that exhausted a
+/// user's RAM. Comparing this slice lets the watcher rebuild only when something the router
+/// actually depends on changed. Returned as a serde_json::Value and compared with `==`
+/// (order-independent) so HashMap key-order jitter across a load can't look like a change.
+fn router_relevant(reg: &Registry) -> Value {
+    let mut v = serde_json::to_value(reg).unwrap_or(Value::Null);
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("team");
+    }
+    v
+}
+
 /// Poll the registry file; on change, reload, rebuild the router, and tell the
 /// client its tool list changed. This is what makes a toggle apply live.
 #[allow(clippy::too_many_arguments)]
@@ -2999,6 +3015,13 @@ fn watch_registry(
 ) {
     eprintln!("toolport: watching registry at {}", path.display());
     let mut last = mtime(&path);
+    // Router-relevant slice (everything except the `team` block) as of the initial build,
+    // so a team-metadata-only rewrite from the desktop sync loop doesn't force a rebuild.
+    let mut last_relevant = router_relevant(
+        &registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
     loop {
         std::thread::sleep(Duration::from_millis(1000));
         // A live downstream server that changed its own tool set (sent
@@ -3026,6 +3049,20 @@ fn watch_registry(
                 }
             };
             last = current;
+            // A team-metadata-only rewrite (usage watermark, sync version/etag, role) from
+            // the desktop sync loop changes nothing the router depends on. Update the stored
+            // copy but skip the rebuild, so a routine sync never re-spawns every stdio server
+            // (the leak that exhausted a user's RAM). Still rebuild when a downstream server
+            // also signaled a change, so that path is never dropped.
+            let new_relevant = router_relevant(&new_reg);
+            if downstream_changed == 0 && new_relevant == last_relevant {
+                *registry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = new_reg;
+                eprintln!("toolport: registry changed (team metadata only); skipped rebuild");
+                continue;
+            }
+            last_relevant = new_relevant;
             let resolved = resolve_live_profile(&new_reg, client_id.as_deref(), &env_profile);
             // Capture the profile we were serving before this reload so the log can
             // show the transition - the single most useful line when diagnosing
@@ -5437,6 +5474,43 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_relevant_ignores_team_metadata_but_tracks_real_changes() {
+        // A team-metadata-only rewrite (what the desktop sync loop does every ~25s, even on
+        // a no-op 304 or a usage-watermark bump) must NOT register as a change, or the
+        // gateway respawns every stdio server on every sync - the process leak that
+        // exhausted a user's RAM. A change OUTSIDE the team block must still be detected.
+        let mut reg = Registry::default();
+        let base = router_relevant(&reg);
+
+        // Connecting to a team + bumping usage/version/etag/role lives entirely in the
+        // `team` block, which the gateway never reads.
+        let mut usage = std::collections::HashMap::new();
+        usage.insert("2026-07-10".to_string(), std::collections::HashMap::new());
+        reg.team = Some(registry::TeamConnection {
+            server_url: "https://teams.toolport.app".into(),
+            team_id: "t1".into(),
+            role: "admin".into(),
+            member_name: Some("Tyler".into()),
+            last_version: 42,
+            last_etag: Some("\"v42\"".into()),
+            usage_reported: usage,
+        });
+        assert_eq!(
+            router_relevant(&reg),
+            base,
+            "team-block churn (usage/version/etag/role) must not count as a router change"
+        );
+
+        // A policy flag lives OUTSIDE the team block: a real change the router must rebuild for.
+        reg.deny_destructive = !reg.deny_destructive;
+        assert_ne!(
+            router_relevant(&reg),
+            base,
+            "a non-team change must still be detected so a real toggle rebuilds"
+        );
+    }
 
     #[test]
     fn resolve_live_profile_prefers_client_scope_over_frozen_env_var() {
