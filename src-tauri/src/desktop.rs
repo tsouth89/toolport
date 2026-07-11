@@ -1601,9 +1601,23 @@ fn reload_into_state(state: &RegistryState) -> Result<Registry, String> {
     Ok(fresh)
 }
 
-/// Join a Toolport Teams server with an invite code. Vaults the member token in the OS
-/// keychain, pulls the team's server set, and merges it into the local registry
-/// non-destructively (team servers are tagged and enabled in the active profile).
+/// Result of a connect (or a pending-join poll). `status` is "connected" (joined; `registry`
+/// is the fresh merged state), "pending" (an approval-gated link — poll `request_token` via
+/// `team_join_poll`), "denied", or "unknown". The frontend switches on `status`.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamConnectResult {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry: Option<Registry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_token: Option<String>,
+}
+
+/// Join a Toolport Teams server with an invite or join-link code. A normal code vaults the
+/// member token in the OS keychain, pulls the team's server set, and merges it into the local
+/// registry non-destructively. An approval-gated link instead returns `status: "pending"` with
+/// a `request_token` the frontend polls (nothing is stored locally until an admin approves).
 #[tauri::command]
 async fn team_connect(
     app: tauri::AppHandle,
@@ -1611,7 +1625,7 @@ async fn team_connect(
     server_url: String,
     invite_code: String,
     member_name: Option<String>,
-) -> Result<Registry, String> {
+) -> Result<TeamConnectResult, String> {
     flush_to_disk(state.inner())?;
     // Same reason as team_sync: a synchronous command runs on Tauri's main (UI) thread, and
     // teams::connect does a blocking network join + first config pull. Run it off-thread so
@@ -1621,12 +1635,57 @@ async fn team_connect(
     })
     .await
     .map_err(|e| format!("connect task join failed: {e}"))??;
-    let fresh = reload_into_state(state.inner())?;
-    nudge_gateway(state.inner());
-    // Team config adds local/stdio + LAN servers OFF (the member reviews + enables them)
-    // and refuses link-local/metadata URLs. Surface both so the state is never a mystery.
-    emit_team_review(&app, outcome);
-    Ok(fresh)
+    match outcome {
+        teams::ConnectOutcome::Connected(review) => {
+            let fresh = reload_into_state(state.inner())?;
+            nudge_gateway(state.inner());
+            // Team config adds local/stdio + LAN servers OFF (the member reviews + enables them)
+            // and refuses link-local/metadata URLs. Surface both so the state is never a mystery.
+            emit_team_review(&app, review);
+            Ok(TeamConnectResult { status: "connected", registry: Some(fresh), request_token: None })
+        }
+        teams::ConnectOutcome::Pending { request_token } => Ok(TeamConnectResult {
+            status: "pending",
+            registry: None,
+            request_token: Some(request_token),
+        }),
+    }
+}
+
+/// Poll a pending, approval-gated join. The frontend calls this on an interval after
+/// `team_connect` returned `status: "pending"`, handing back the `request_token` (and the same
+/// `member_name`). On approval it finalizes exactly like a direct connect and returns the fresh
+/// registry; otherwise it reports still-pending, denied, or unknown (expired/invalid).
+#[tauri::command]
+async fn team_join_poll(
+    app: tauri::AppHandle,
+    state: State<'_, RegistryState>,
+    server_url: String,
+    request_token: String,
+    member_name: Option<String>,
+) -> Result<TeamConnectResult, String> {
+    let poll = tauri::async_runtime::spawn_blocking(move || {
+        teams::poll_join(&server_url, &request_token, member_name.as_deref())
+    })
+    .await
+    .map_err(|e| format!("poll task join failed: {e}"))??;
+    match poll {
+        teams::JoinPoll::Connected(review) => {
+            let fresh = reload_into_state(state.inner())?;
+            nudge_gateway(state.inner());
+            emit_team_review(&app, review);
+            Ok(TeamConnectResult { status: "connected", registry: Some(fresh), request_token: None })
+        }
+        teams::JoinPoll::Pending => {
+            Ok(TeamConnectResult { status: "pending", registry: None, request_token: None })
+        }
+        teams::JoinPoll::Denied => {
+            Ok(TeamConnectResult { status: "denied", registry: None, request_token: None })
+        }
+        teams::JoinPoll::Unknown => {
+            Ok(TeamConnectResult { status: "unknown", registry: None, request_token: None })
+        }
+    }
 }
 
 /// Pull the latest team config and re-merge it. A no-op when nothing changed.
@@ -2606,6 +2665,7 @@ pub fn run() {
             set_lazy_discovery,
             set_allow_agent_control,
             team_connect,
+            team_join_poll,
             team_sync,
             team_sync_wait,
             team_disconnect,

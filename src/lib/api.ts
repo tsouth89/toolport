@@ -325,15 +325,45 @@ export function httpBridgeStatus(): Promise<HttpBridgeStatus> {
   return invoke<HttpBridgeStatus>("http_bridge_status");
 }
 
-/** Join a Toolport Teams server with an invite code; merges the team's servers in. */
+/**
+ * Result of {@link teamConnect} / {@link teamJoinPoll}. `status` is:
+ * - `connected` — joined; `registry` is the fresh merged state.
+ * - `pending` — the link requires admin approval; poll `requestToken` via {@link teamJoinPoll}.
+ * - `denied` — an admin declined the request.
+ * - `unknown` — the request expired or is invalid; start over.
+ */
+export interface TeamConnectResult {
+  status: "connected" | "pending" | "denied" | "unknown";
+  registry?: Registry;
+  requestToken?: string;
+}
+
+/** Join a Toolport Teams server with an invite or join-link code; merges the team's servers in. */
 export function teamConnect(
   serverUrl: string,
   inviteCode: string,
   memberName?: string,
-): Promise<Registry> {
-  return invoke<Registry>("team_connect", {
+): Promise<TeamConnectResult> {
+  return invoke<TeamConnectResult>("team_connect", {
     serverUrl,
     inviteCode,
+    memberName: memberName ?? null,
+  });
+}
+
+/**
+ * Poll a pending, approval-gated join. Call on an interval after {@link teamConnect} returns
+ * `status: "pending"`, passing back the `requestToken` and the same `memberName`. Resolves to
+ * `connected` once an admin approves, or `pending` / `denied` / `unknown`.
+ */
+export function teamJoinPoll(
+  serverUrl: string,
+  requestToken: string,
+  memberName?: string,
+): Promise<TeamConnectResult> {
+  return invoke<TeamConnectResult>("team_join_poll", {
+    serverUrl,
+    requestToken,
     memberName: memberName ?? null,
   });
 }

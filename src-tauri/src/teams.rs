@@ -89,13 +89,18 @@ pub struct Joined {
     pub role: String,
 }
 
-/// Redeem an invite code, returning the member token, team id, and role.
-pub fn join(server_url: &str, invite_code: &str, member_name: Option<&str>) -> Result<Joined, String> {
-    require_secure_team_url(server_url)?;
-    let url = format!("{}/join", base(server_url));
-    let body = serde_json::json!({ "invite_code": invite_code, "member_name": member_name });
-    let resp = agent().post(&url).send_json(body).map_err(stringify)?;
-    let v: Value = resp.into_json().map_err(|e| e.to_string())?;
+/// Outcome of redeeming a code at `/join`.
+pub enum JoinResult {
+    /// Joined immediately: the token/role are ready to finalize.
+    Joined(Joined),
+    /// The link requires admin approval. No member/token exists yet; poll `request_token` via
+    /// [`poll_join`] until an admin approves or denies.
+    Pending { request_token: String },
+}
+
+/// Parse a `Joined` from a `/join` (or `/join/status`) response body. Both endpoints return the
+/// same `team_id` / `member_token` / `role` shape on success.
+fn joined_from(v: &Value) -> Result<Joined, String> {
     let token = v["member_token"].as_str().unwrap_or_default().to_string();
     if token.is_empty() {
         return Err("server did not return a member token".into());
@@ -105,6 +110,57 @@ pub fn join(server_url: &str, invite_code: &str, member_name: Option<&str>) -> R
         member_token: token,
         role: v["role"].as_str().unwrap_or("member").to_string(),
     })
+}
+
+/// Redeem an invite or join-link code. A normal code joins immediately; an approval-gated link
+/// returns `Pending` with a token to poll.
+pub fn join(server_url: &str, invite_code: &str, member_name: Option<&str>) -> Result<JoinResult, String> {
+    require_secure_team_url(server_url)?;
+    let url = format!("{}/join", base(server_url));
+    let body = serde_json::json!({ "invite_code": invite_code, "member_name": member_name });
+    let resp = agent().post(&url).send_json(body).map_err(stringify)?;
+    let v: Value = resp.into_json().map_err(|e| e.to_string())?;
+    // An approval-gated link hands back a request token instead of a member token.
+    if v["pending"].as_bool().unwrap_or(false) {
+        let request_token = v["request_token"].as_str().unwrap_or_default().to_string();
+        if request_token.is_empty() {
+            return Err("the server marked the join pending but returned no request token".into());
+        }
+        return Ok(JoinResult::Pending { request_token });
+    }
+    Ok(JoinResult::Joined(joined_from(&v)?))
+}
+
+/// Result of polling a pending join request at `/join/status`.
+pub enum JoinPoll {
+    /// Still waiting on an admin.
+    Pending,
+    /// Approved and fully finalized locally (token vaulted, config pulled + merged).
+    Connected(MergeOutcome),
+    /// An admin denied the request.
+    Denied,
+    /// The request is gone (expired or the token is wrong); the user should start over.
+    Unknown,
+}
+
+/// Poll a pending join request. On approval, finalizes the join exactly like a direct connect
+/// (vaults the fresh token, pulls + merges the team config) and returns `Connected`.
+pub fn poll_join(
+    server_url: &str,
+    request_token: &str,
+    member_name: Option<&str>,
+) -> Result<JoinPoll, String> {
+    require_secure_team_url(server_url)?;
+    let url = format!("{}/join/status", base(server_url));
+    let body = serde_json::json!({ "request_token": request_token });
+    let resp = agent().post(&url).send_json(body).map_err(stringify)?;
+    let v: Value = resp.into_json().map_err(|e| e.to_string())?;
+    match v["status"].as_str().unwrap_or("") {
+        "approved" => complete_join(server_url, member_name, joined_from(&v)?).map(JoinPoll::Connected),
+        "denied" => Ok(JoinPoll::Denied),
+        "pending" => Ok(JoinPoll::Pending),
+        _ => Ok(JoinPoll::Unknown),
+    }
 }
 
 /// Pull the team's current config. `Ok(None)` means unchanged since `last_version`
@@ -258,10 +314,29 @@ fn stringify(e: ureq::Error) -> String {
 
 // --- orchestration (HTTP + merge + persist) ---
 
-/// Join a team: redeem the invite, vault the token, record the connection, and do the
-/// first pull + merge. Returns the stored connection.
-pub fn connect(server_url: &str, invite_code: &str, member_name: Option<&str>) -> Result<MergeOutcome, String> {
-    let joined = join(server_url, invite_code, member_name)?;
+/// Outcome of a connect attempt: either fully joined, or held pending admin approval.
+pub enum ConnectOutcome {
+    /// Joined and merged; carries the config-merge result for the review prompt.
+    Connected(MergeOutcome),
+    /// The link requires approval. Nothing was stored locally (no token, no connection); the
+    /// caller polls `request_token` via [`poll_join`] until an admin acts.
+    Pending { request_token: String },
+}
+
+/// Join a team: redeem the code, and for a normal join vault the token, record the connection,
+/// and do the first pull + merge. An approval-gated link returns `Pending` and stores nothing.
+pub fn connect(server_url: &str, invite_code: &str, member_name: Option<&str>) -> Result<ConnectOutcome, String> {
+    match join(server_url, invite_code, member_name)? {
+        JoinResult::Joined(joined) => {
+            complete_join(server_url, member_name, joined).map(ConnectOutcome::Connected)
+        }
+        JoinResult::Pending { request_token } => Ok(ConnectOutcome::Pending { request_token }),
+    }
+}
+
+/// Finalize an approved join: vault the token, record the connection, and do the first
+/// pull + merge. Shared by the direct-connect and approval-poll paths.
+fn complete_join(server_url: &str, member_name: Option<&str>, joined: Joined) -> Result<MergeOutcome, String> {
     save_token(&joined.member_token)?;
     // The token is now in the keychain. Any failure past this point must clear it,
     // or we'd orphan a live bearer token with no local record of the connection.

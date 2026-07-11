@@ -24,6 +24,7 @@ import {
   listStacks,
   previewImportServers,
   teamConnect,
+  teamJoinPoll,
 } from "@/lib/api";
 import { teamUrlError } from "@/lib/teamUrl";
 import { Input } from "@/components/ui/input";
@@ -290,6 +291,50 @@ function JoinTeam({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [joined, setJoined] = useState(false);
+  // Set while an approval-gated join waits for an admin; holds the values used to request it.
+  const [pending, setPending] = useState<{
+    serverUrl: string;
+    requestToken: string;
+    name?: string;
+  } | null>(null);
+
+  // Poll a pending, approval-gated join until an admin acts. A transient network error keeps
+  // the wait alive; an explicit deny/expiry ends it with a message.
+  useEffect(() => {
+    if (!pending) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await teamJoinPoll(
+          pending.serverUrl,
+          pending.requestToken,
+          pending.name,
+        );
+        if (cancelled) return;
+        if (r.status === "connected" && r.registry) {
+          setPending(null);
+          onRegistryChange(r.registry);
+          onClientsRefresh();
+          setJoined(true);
+        } else if (r.status === "denied") {
+          setPending(null);
+          setError("An admin declined your request to join this team.");
+        } else if (r.status === "unknown") {
+          setPending(null);
+          setError("This join request expired. Ask for the link again and reconnect.");
+        }
+      } catch {
+        // Transient: the next tick retries.
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending]);
 
   const join = async () => {
     setError(null);
@@ -304,14 +349,19 @@ function JoinTeam({
     }
     setBusy(true);
     try {
-      const r = await teamConnect(
-        serverUrl.trim(),
-        code.trim(),
-        name.trim() || undefined,
-      );
-      onRegistryChange(r);
-      onClientsRefresh();
-      setJoined(true);
+      const su = serverUrl.trim();
+      const mn = name.trim() || undefined;
+      const r = await teamConnect(su, code.trim(), mn);
+      if (r.status === "pending" && r.requestToken) {
+        // Approval-gated link: hold and poll (effect above) until an admin approves.
+        setPending({ serverUrl: su, requestToken: r.requestToken, name: mn });
+      } else if (r.status === "connected" && r.registry) {
+        onRegistryChange(r.registry);
+        onClientsRefresh();
+        setJoined(true);
+      } else {
+        setError("The server returned an unexpected connect response.");
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -396,14 +446,30 @@ function JoinTeam({
           <ArrowLeft className="size-3.5" />
           Back
         </button>
-        <Button onClick={join} disabled={busy}>
-          {busy ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <Users className="size-4" />
-          )}
-          Join team
-        </Button>
+        {pending ? (
+          <div className="flex items-center gap-2.5 rounded-lg border border-primary/40 bg-primary/5 px-3 py-2 text-sm">
+            <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
+            <span className="text-muted-foreground">
+              Waiting for an admin to approve you…
+            </span>
+            <button
+              type="button"
+              onClick={() => setPending(null)}
+              className="ml-1 text-xs text-muted-foreground underline transition hover:text-foreground"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <Button onClick={join} disabled={busy}>
+            {busy ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Users className="size-4" />
+            )}
+            Join team
+          </Button>
+        )}
       </div>
     </>
   );
