@@ -151,12 +151,19 @@ pub fn client_gateway_path() -> Option<PathBuf> {
     publish_bundled_gateway()
 }
 
-/// Terminate client-spawned gateway processes so the installer can replace locked binaries.
-/// Does not touch parent apps (Cursor, Codex, etc.). Returns how many images were targeted.
+/// Terminate client-spawned gateway processes so the installer can replace locked binaries
+/// and so clients respawn the just-installed version instead of keeping the old one until the
+/// user relaunches them. Does not touch parent apps (Cursor, Codex, etc.). Returns how many
+/// image patterns `taskkill` reported killing.
+///
+/// The `*` globs are load-bearing: the published gateway clients actually run is VERSIONED
+/// (`toolport-gateway-1.7.2.exe`), so matching only the bare `toolport-gateway.exe` (the old
+/// behavior) killed nothing on a real update. `taskkill /IM` accepts a wildcard on the image
+/// name; nothing else on the system is named `*-gateway*`, so the match stays scoped to ours.
 #[cfg(windows)]
 pub fn stop_spawned_gateways() -> u32 {
     let mut stopped = 0u32;
-    for image in ["toolport-gateway.exe", "conduit-gateway.exe"] {
+    for image in ["toolport-gateway*.exe", "conduit-gateway*.exe"] {
         let status = std::process::Command::new("taskkill")
             .args(["/F", "/IM", image])
             .stdout(std::process::Stdio::null())
