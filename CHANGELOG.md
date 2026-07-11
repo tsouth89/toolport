@@ -8,29 +8,46 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [1.7.2] - 2026-07-11
 
-### Fixed
-
-**Joining a team no longer freezes the app.** The commands that talk to the team server -
-joining, the background config sync, and the admin config push - were synchronous, so their
-blocking network calls ran on the app's UI thread. Joining kicked off a background sync that
-holds a ~30-second long-poll open continuously, so the moment you connected to a team the UI
-thread was blocked and the window went "Not Responding" (the app hung, though the machine was
-otherwise fine). Without a team those commands never run, which is why the app was flawless
-until you joined one. They now run off the main thread, so joining, syncing, and pushing stay
-responsive. Separate from the 1.7.1 memory-storm fix; this was a pure UI-thread hang. (#288)
-
-A focused patch that makes Toolport Teams safe to use: joining a team no longer
-destabilizes the app.
+The Teams stability release: two separate freezes when joining a team, plus import,
+security, and gateway improvements. (Supersedes the never-published 1.7.1 draft.)
 
 ### Fixed
 
-**Joining a team could exhaust system memory and hang the app.** Once connected to a team,
-the background sync rewrote the local registry every cycle even when nothing had changed, and
-each rewrite made every running gateway rebuild and re-spawn every configured MCP server. The
-orphaned server processes piled up until the machine ran out of RAM and the app stopped
-opening. Two changes fix it: a no-op sync no longer rewrites the registry at all, and the
-gateway no longer rebuilds when only team-sync metadata (usage stats, sync version) changed.
-A routine sync now costs nothing and never re-spawns your servers. (#286)
+**Joining a team no longer hangs the app.** The team network commands (join, background
+config sync, admin push) were synchronous and ran on the app's UI thread; the sync holds a
+roughly 30-second long-poll open continuously, so being connected to a team blocked the
+interface and the window went "Not Responding." They now run off the main thread. (#288)
+
+**Joining a team no longer exhausts memory.** The background sync rewrote the local registry
+on a timer, and every gateway rebuilt and re-spawned each server on the change, leaking
+processes until the machine ran out of RAM. A registry save is now a no-op when nothing
+changed, and the gateway only rebuilds when the resolved server set actually changes.
+(#286, #287)
+
+**Bulk import handles scoped and duplicate packages.** Scoped package identity is preserved,
+same-package servers with distinct names no longer collide on one id, and the import review
+no longer acts on stale rows. (#280, #283, #284)
+
+### Added
+
+**Review bulk imports before applying.** Detect or paste a batch of servers and confirm the
+full set before it lands, instead of importing blind. (#282)
+
+**Project-root working directory for `${ROOT}` servers.** A `${ROOT}` server runs in the
+client's actual project root, resolved live from its MCP roots, instead of wherever Toolport
+sits. (#275)
+
+### Security
+
+**Tighter spawn screening.** Destructive-command screening now catches PowerShell
+`-EncodedCommand` and `PERL5OPT`. (#279)
+
+### Thanks
+
+First-time contributors: @glasses-and-hat (unit tests for the token-savings formatter, #277)
+and @SK-Sathyavada-008 (a consolidated CONDUIT environment variable reference, #278).
+
+## [1.7.0] - 2026-07-09
 
 This release leads with a security fix and clears a batch of rough edges around running
 servers and living in the app day to day.
