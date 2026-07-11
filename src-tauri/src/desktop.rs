@@ -2755,6 +2755,15 @@ pub fn run() {
                         repointed.len(),
                         repointed.join(", ")
                     );
+                    // A repoint means the gateway binary path changed (a version bump), so the
+                    // clients' currently-running gateways are the OLD version. Stop them so each
+                    // client respawns the freshly-installed gateway on its next request, instead
+                    // of the user having to relaunch the client to pick it up. Covers MANUAL
+                    // updates (running the installer), which never go through the in-app updater
+                    // that already calls stop_spawned_gateways. Only fires when something was
+                    // actually repointed, so a normal launch never kills a healthy gateway.
+                    let stopped = crate::gateway_publish::stop_spawned_gateways();
+                    eprintln!("toolport: stopped {stopped} stale gateway image(s) after re-point");
                 }
             });
 
