@@ -6,6 +6,38 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-07-11
+
+Security hardening for the spawn supply-chain guard, plus update and team-join fixes.
+
+### Security
+
+**Spawned servers no longer inherit Toolport's own control secrets.** A downstream MCP
+server ran with the gateway's full environment, which in the self-host and `--http` bridge
+deployments carries the vault master key (`CONDUIT_SECRET_KEY`) and the local tool-bridge
+token (`CONDUIT_HTTP_TOKEN`). The gateway now strips its `CONDUIT_*` control vars from every
+spawned server, so an untrusted server package can't read them. (#298)
+
+**Closed several spawn-screener bypasses.** The supply-chain guard now catches getopt
+flag-clustering (`sh -ec`, `python -Ec`, `ruby`/`perl -we`, `node -pe`), deno/bun remote
+subcommands hidden behind a value flag, `data:` source URLs, versioned interpreter names
+(`python3.10`), and more launcher wrappers (nsenter, strace, bwrap, and friends). (#299)
+
+### Fixed
+
+**Clients pick up an updated gateway without a relaunch.** After an update (auto or manual)
+the old client-spawned gateway kept running, so the client kept talking to the previous
+binary; versioned gateway images are now matched and stopped so each client respawns the
+freshly-installed one on its next request. (#289)
+
+**Joining a brand-new team works against an older self-hosted server.** A `404` from the
+first config pull is treated as "no config yet" rather than a hard error. (#285)
+
+### Thanks
+
+Test coverage from first-time contributors: @glasses-and-hat (`fmtTokens`) and @tapheret2
+(`openExternal` URL guard). (#277, #300)
+
 ## [1.7.2] - 2026-07-11
 
 The Teams stability release: two separate freezes when joining a team, plus import,
