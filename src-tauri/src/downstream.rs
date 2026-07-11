@@ -678,7 +678,9 @@ pub fn screen_spawn_command(command: &str, args: &[String]) -> Result<(), String
         "node" | "nodejs" => node_dangerous(args),
         "bun" => bun_dangerous(args),
         "deno" => deno_dangerous(args),
-        "python" | "python2" | "python3" | "pypy" | "pypy3" => {
+        // py/pyw are the Windows Python launchers; they forward `-c` (and version
+        // selectors like `-3.11`) to the selected interpreter, so screen them as Python.
+        "python" | "python2" | "python3" | "pypy" | "pypy3" | "py" | "pyw" => {
             first_flag(args, &["-c"]).or_else(|| clustered_eval(args, &['c'], PYTHON_BOOL))
         }
         "ruby" => first_flag(args, &["-e"]).or_else(|| clustered_eval(args, &['e'], RUBY_BOOL)),
@@ -752,24 +754,49 @@ fn remote_specifier(arg: &str) -> bool {
         || a.starts_with("data:")
 }
 
-/// Deno's lethal invocations are SUBCOMMANDS, not flags: `eval <code>` runs inline
-/// code, and `run`/`serve <remote>` executes code fetched from the network or a
-/// registry. (A `deno run` of a LOCAL script is the normal case and stays allowed.)
-fn deno_dangerous(args: &[String]) -> Option<&str> {
-    // Fetch-and-exec of remote / registry / `data:` code is lethal wherever it sits. A
-    // value-taking flag before the subcommand (`deno --config foo.json run npm:evil`)
-    // hid `run` from the old first-bare-token scan, so screen every arg for a remote
-    // specifier directly rather than inferring the subcommand positionally.
-    if let Some(r) = args.iter().find(|a| remote_specifier(a)) {
-        return Some(r.as_str());
-    }
-    // `eval <code>` runs inline code with no file (the leading subcommand).
-    if let Some(sub) = args.iter().find(|a| !a.starts_with('-')) {
-        if sub.eq_ignore_ascii_case("eval") {
-            return Some(sub.as_str());
+/// Walk deno/bun-style args to the operand at or after `from`, skipping option tokens and
+/// the value of a known space-separated value option (`--config x`) so the subcommand and
+/// its executable target aren't mistaken for an option's value. Returns the operand and its
+/// index.
+fn next_operand<'a>(args: &'a [String], from: usize, value_opts: &[&str]) -> (Option<&'a str>, usize) {
+    let mut j = from;
+    while let Some(a) = args.get(j) {
+        if a.starts_with('-') {
+            if value_opts.contains(&a.as_str()) {
+                j += 1; // this option consumes the next token as its value
+            }
+            j += 1;
+        } else {
+            return (Some(a.as_str()), j);
         }
     }
-    first_flag(args, &["-e", "--eval", "-p", "--print"])
+    (None, j)
+}
+
+/// Deno's lethal invocations are SUBCOMMANDS, not flags: `eval <code>` runs inline code,
+/// and `run`/`serve <remote>` executes code fetched from the network or a registry. A
+/// `deno run` of a LOCAL script is the normal case and stays allowed. Global value options
+/// are skipped so `deno --config x eval …` / `deno --config x run npm:…` can't hide the
+/// subcommand, and only the executable TARGET is remote-checked — a URL passed as an
+/// application argument (`deno run ./s.ts --url https://api`) is not fetched code.
+fn deno_dangerous(args: &[String]) -> Option<&str> {
+    const VALUE_OPTS: &[&str] = &[
+        "--config", "-c", "--import-map", "--lock", "--cert", "--v8-flags", "--seed",
+        "--log-level", "-L",
+    ];
+    let (sub, si) = next_operand(args, 0, VALUE_OPTS);
+    let Some(sub) = sub else { return None };
+    if sub.eq_ignore_ascii_case("eval") {
+        return Some(sub);
+    }
+    if sub.eq_ignore_ascii_case("run") || sub.eq_ignore_ascii_case("serve") {
+        if let (Some(target), _) = next_operand(args, si + 1, VALUE_OPTS) {
+            if remote_specifier(target) {
+                return Some(target);
+            }
+        }
+    }
+    None
 }
 
 /// Bun shares node's eval/preload flags, and additionally executes a remote specifier
@@ -779,10 +806,23 @@ fn bun_dangerous(args: &[String]) -> Option<&str> {
     if let Some(f) = node_dangerous(args) {
         return Some(f);
     }
-    // Like deno: a value-taking flag before `run` (`bun --cwd x run https://evil`) hid
-    // the subcommand from a positional scan, so screen every arg for a remote specifier.
-    if let Some(r) = args.iter().find(|a| remote_specifier(a)) {
-        return Some(r.as_str());
+    // Like deno: skip global value options and remote-check only the executable target, so
+    // `bun --cwd x run https://evil` is caught while a URL passed as an app arg is ignored.
+    const VALUE_OPTS: &[&str] = &["--cwd", "--config", "-c"];
+    let (sub, si) = next_operand(args, 0, VALUE_OPTS);
+    let Some(sub) = sub else { return None };
+    let (target, _) = if sub.eq_ignore_ascii_case("run")
+        || sub.eq_ignore_ascii_case("x")
+        || sub.eq_ignore_ascii_case("exec")
+    {
+        next_operand(args, si + 1, VALUE_OPTS)
+    } else {
+        (Some(sub), si) // implicit run: the first operand is the target itself
+    };
+    if let Some(target) = target {
+        if remote_specifier(target) {
+            return Some(target);
+        }
     }
     None
 }
@@ -983,23 +1023,29 @@ const PERL_BOOL: &[char] = &['U', 'W', 'X', 'T', 'a', 'c', 'h', 'l', 'n', 'p', '
 /// `-E`/`-W`/`-C` isn't read as a lowercase eval. `-c`/`-e` alone and `--long` forms are
 /// already handled by `first_flag`.
 fn clustered_eval<'a>(args: &'a [String], eval: &[char], boolean: &[char]) -> Option<&'a str> {
-    args.iter()
-        .find(|a| {
-            let s = a.as_str();
-            if !s.starts_with('-') || s.starts_with("--") || s.len() <= 2 {
-                return false;
+    for a in args {
+        let s = a.as_str();
+        // `--` ends the interpreter's own options; tokens after it are the script and its
+        // arguments, not interpreter flags, so a cluster-shaped app arg past `--` is not a
+        // real eval. (Bare operands without `--` are still scanned, matching first_flag's
+        // long-standing behavior; stopping there safely would need per-interpreter value-
+        // option tables, and a naive stop reintroduces bypasses via `-W x -Ec` / `-o v -ec`.)
+        if s == "--" {
+            break;
+        }
+        if !s.starts_with('-') || s.starts_with("--") || s.len() <= 2 {
+            continue;
+        }
+        for c in s[1..].chars() {
+            if eval.contains(&c) {
+                return Some(s);
             }
-            for c in s[1..].chars() {
-                if eval.contains(&c) {
-                    return true;
-                }
-                if !boolean.contains(&c) {
-                    return false;
-                }
+            if !boolean.contains(&c) {
+                break;
             }
-            false
-        })
-        .map(|a| a.as_str())
+        }
+    }
+    None
 }
 
 /// Docker/Podman args that ESCALATE beyond what a normal host process already has:
@@ -2453,6 +2499,23 @@ mod tests {
         assert!(screen_spawn_env(&[("ZDOTDIR".into(), "/tmp/evil".into())]).is_err());
         assert!(screen_spawn_env(&[("GCONV_PATH".into(), "/tmp/evil".into())]).is_err());
         assert!(screen_spawn_env(&[("NODE_ENV".into(), "production".into())]).is_ok());
+    }
+
+    #[test]
+    fn spawn_guard_review_followups() {
+        // Windows py/pyw launchers forward -c and version selectors to python.
+        assert!(screen_spawn_command("py", &argv(&["-c", "import os"])).is_err());
+        assert!(screen_spawn_command("pyw", &argv(&["-c", "x"])).is_err());
+        assert!(screen_spawn_command("py", &argv(&["-3.11", "-c", "x"])).is_err());
+        assert!(screen_spawn_command("py", &argv(&["-3.11", "script.py"])).is_ok());
+        // A global value option can't hide the deno eval subcommand.
+        assert!(screen_spawn_command("deno", &argv(&["--config", "d.json", "eval", "Deno.exit()"])).is_err());
+        assert!(screen_spawn_command("deno", &argv(&["--config", "d.json", "run", "npm:evil"])).is_err());
+        // Only the executable target is remote-checked; a URL passed as an app arg is fine.
+        assert!(screen_spawn_command("deno", &argv(&["run", "./server.ts", "--url", "https://api.example.com"])).is_ok());
+        assert!(screen_spawn_command("bun", &argv(&["run", "server.ts", "--url", "https://api.example.com"])).is_ok());
+        // `--` ends interpreter options, so a cluster-shaped APP arg after it isn't screened.
+        assert!(screen_spawn_command("python", &argv(&["server.py", "--", "-Ec"])).is_ok());
     }
 
     #[test]
