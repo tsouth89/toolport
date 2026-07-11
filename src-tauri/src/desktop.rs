@@ -1605,15 +1605,22 @@ fn reload_into_state(state: &RegistryState) -> Result<Registry, String> {
 /// keychain, pulls the team's server set, and merges it into the local registry
 /// non-destructively (team servers are tagged and enabled in the active profile).
 #[tauri::command]
-fn team_connect(
+async fn team_connect(
     app: tauri::AppHandle,
-    state: State<RegistryState>,
+    state: State<'_, RegistryState>,
     server_url: String,
     invite_code: String,
     member_name: Option<String>,
 ) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    let outcome = teams::connect(&server_url, &invite_code, member_name.as_deref())?;
+    // Same reason as team_sync: a synchronous command runs on Tauri's main (UI) thread, and
+    // teams::connect does a blocking network join + first config pull. Run it off-thread so
+    // clicking "Connect" to join a team doesn't freeze the whole app until the join returns.
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        teams::connect(&server_url, &invite_code, member_name.as_deref())
+    })
+    .await
+    .map_err(|e| format!("connect task join failed: {e}"))??;
     let fresh = reload_into_state(state.inner())?;
     nudge_gateway(state.inner());
     // Team config adds local/stdio + LAN servers OFF (the member reviews + enables them)
@@ -1623,24 +1630,39 @@ fn team_connect(
 }
 
 /// Pull the latest team config and re-merge it. A no-op when nothing changed.
+///
+/// `async` + `spawn_blocking` is load-bearing, not stylistic: a synchronous Tauri command
+/// runs on the main (UI) thread, and the config pull is a blocking network call. The
+/// long-poll variant below blocks for up to 30s per cycle, and the member's background loop
+/// re-invokes it continuously, so as a sync command it froze the whole app ("Not Responding")
+/// for anyone connected to a team and starved every other command (probe_servers, etc.).
+/// Running the blocking pull on a worker thread keeps the event loop free.
 #[tauri::command]
-fn team_sync(app: tauri::AppHandle, state: State<RegistryState>) -> Result<Registry, String> {
+async fn team_sync(app: tauri::AppHandle, state: State<'_, RegistryState>) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    finish_sync(&app, state.inner(), teams::sync_now()?)
+    let result = tauri::async_runtime::spawn_blocking(teams::sync_now)
+        .await
+        .map_err(|e| format!("sync task join failed: {e}"))??;
+    finish_sync(&app, state.inner(), result)
 }
 
 /// Long-polling sync for the member's background loop: the config pull parks on the server
 /// for up to `wait_secs` (clamped) and returns the instant the team config view changes, so
 /// a dashboard policy edit enforces in ~1s instead of at the next interval. Otherwise
-/// identical to [`team_sync`]; the frontend re-invokes it in a loop.
+/// identical to [`team_sync`]; the frontend re-invokes it in a loop. See [`team_sync`] for
+/// why the blocking pull must run off the main thread.
 #[tauri::command]
-fn team_sync_wait(
+async fn team_sync_wait(
     app: tauri::AppHandle,
-    state: State<RegistryState>,
+    state: State<'_, RegistryState>,
     wait_secs: u64,
 ) -> Result<Registry, String> {
     flush_to_disk(state.inner())?;
-    finish_sync(&app, state.inner(), teams::sync_wait(wait_secs.min(30))?)
+    let wait = wait_secs.min(30);
+    let result = tauri::async_runtime::spawn_blocking(move || teams::sync_wait(wait))
+        .await
+        .map_err(|e| format!("sync task join failed: {e}"))??;
+    finish_sync(&app, state.inner(), result)
 }
 
 /// Apply a sync result to the shared registry state and tell the UI what happened. Shared by
@@ -1695,9 +1717,12 @@ fn team_disconnect(state: State<RegistryState>) -> Result<Registry, String> {
 /// Admin: push the current local server set as the team's shared config (own servers
 /// only, secret values never sent). Returns the new config version.
 #[tauri::command]
-fn team_push(state: State<RegistryState>) -> Result<i64, String> {
+async fn team_push(state: State<'_, RegistryState>) -> Result<i64, String> {
     flush_to_disk(state.inner())?;
-    teams::push_current()
+    // push_current does a blocking PUT to the team server; keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(teams::push_current)
+        .await
+        .map_err(|e| format!("push task join failed: {e}"))?
 }
 
 /// Re-save the registry to bump its mtime. The running gateway watches that file

@@ -6,7 +6,18 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
-## [1.7.1] - 2026-07-10
+## [1.7.2] - 2026-07-11
+
+### Fixed
+
+**Joining a team no longer freezes the app.** The commands that talk to the team server -
+joining, the background config sync, and the admin config push - were synchronous, so their
+blocking network calls ran on the app's UI thread. Joining kicked off a background sync that
+holds a ~30-second long-poll open continuously, so the moment you connected to a team the UI
+thread was blocked and the window went "Not Responding" (the app hung, though the machine was
+otherwise fine). Without a team those commands never run, which is why the app was flawless
+until you joined one. They now run off the main thread, so joining, syncing, and pushing stay
+responsive. Separate from the 1.7.1 memory-storm fix; this was a pure UI-thread hang. (#288)
 
 A focused patch that makes Toolport Teams safe to use: joining a team no longer
 destabilizes the app.
