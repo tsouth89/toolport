@@ -56,16 +56,17 @@ pub struct CatalogEntry {
 /// entry list itself untouched; the UI orders the sections, not the arm order here.
 fn category_for(name: &str) -> &'static str {
     match name {
-        "GitHub" | "Vercel" | "Sentry" | "Cloudflare Docs" | "AWS" | "Kubernetes" | "Linode" => {
+        "GitHub" | "Vercel" | "Sentry" | "Cloudflare Docs" | "AWS" | "Kubernetes" | "Linode"
+        | "Vercel (Full API)" | "Cloudflare (Full API)" | "Clerk (Full API)" => {
             "Code & infrastructure"
         }
         "Supabase" | "Neon" | "PostgreSQL" | "MongoDB" | "Elasticsearch" | "Qdrant" => "Databases",
         "Context7" | "DeepWiki" | "Hugging Face" | "OpenRouter" | "Brave Search" | "Exa"
         | "Tavily" | "Perplexity" | "DataForSEO" => "Search & knowledge",
         "Firecrawl" | "Apify" | "Browserbase" => "Web & automation",
-        "Stripe" | "Notion" | "Composio" | "Linear" | "Atlassian" | "Asana" | "Airtable"
-        | "Todoist" | "Slack" | "Resend" | "Figma" | "Postiz" | "Twilio" | "n8n"
-        | "Langfuse" => "Apps & productivity",
+        "Stripe" | "Stripe (Full API)" | "Notion" | "Composio" | "Linear" | "Atlassian"
+        | "Asana" | "Airtable" | "Todoist" | "Slack" | "Resend" | "Figma" | "Postiz"
+        | "Twilio" | "n8n" | "Langfuse" => "Apps & productivity",
         "Filesystem" | "Fetch" | "Git" | "Playwright" | "Sequential Thinking" | "Memory"
         | "Time" | "Chrome DevTools" => "Local tools",
         _ => "",
@@ -78,6 +79,23 @@ fn category_for(name: &str) -> &'static str {
 /// no auth) so only the hint shows. `None` = unknown / no guidance.
 fn credentials_for(name: &str) -> Option<(&'static str, &'static str)> {
     Some(match name {
+        // Toolport Full-API overlays: a provider API key the overlay uses locally.
+        "Stripe (Full API)" => (
+            "https://dashboard.stripe.com/apikeys",
+            "Create a secret or restricted API key with the access the agent needs.",
+        ),
+        "Vercel (Full API)" => (
+            "https://vercel.com/account/tokens",
+            "Create an access token (Account Settings > Tokens).",
+        ),
+        "Cloudflare (Full API)" => (
+            "https://dash.cloudflare.com/profile/api-tokens",
+            "Create an API token scoped to the zones and services the agent should touch.",
+        ),
+        "Clerk (Full API)" => (
+            "https://dashboard.clerk.com/last-active?path=api-keys",
+            "Copy your Secret Key (Clerk Dashboard > API Keys).",
+        ),
         // Token-based: the agent gets an API key Toolport vaults.
         "Linode" => (
             "https://cloud.linode.com/profile/tokens",
@@ -212,11 +230,15 @@ pub fn curated() -> Vec<CatalogEntry> {
     let mut list = vec![
         // --- Payments & commerce ---
         http("Stripe", "Payments, customers, charges, and balances.", "https://mcp.stripe.com", "https://docs.stripe.com/mcp"),
+        cmd("Stripe (Full API)", "Toolport overlay: all 587 Stripe endpoints as intent-named tools, with the full write coverage the official MCP lacks (your API key, runs locally).", "npx", &["-y", "toolport-mcp-servers", "stripe"], &["STRIPE_API_KEY"], "https://github.com/tsouth89/toolport-mcp-servers"),
         // --- Code, deploy & infra ---
         http("GitHub", "Repos, issues, PRs, and code search.", "https://api.githubcopilot.com/mcp/", "https://github.com/github/github-mcp-server"),
         http("Vercel", "Projects, deployments, and logs on Vercel.", "https://mcp.vercel.com", "https://vercel.com/docs/mcp/vercel-mcp"),
+        cmd("Vercel (Full API)", "Toolport overlay: 333 Vercel endpoints including the writes the official MCP omits (env vars, domains/DNS, the deploy lifecycle).", "npx", &["-y", "toolport-mcp-servers", "vercel"], &["VERCEL_TOKEN"], "https://github.com/tsouth89/toolport-mcp-servers"),
         http("Sentry", "Errors, issues, and releases from Sentry.", "https://mcp.sentry.dev/mcp", "https://docs.sentry.io"),
         http("Cloudflare Docs", "Search Cloudflare's documentation.", "https://docs.mcp.cloudflare.com/mcp", "https://developers.cloudflare.com/agents/model-context-protocol/"),
+        cmd("Cloudflare (Full API)", "Toolport overlay: 357 Cloudflare control-plane endpoints as named tools (DNS, email routing, zones, WAF, SSL, cache, R2, Access) for per-tool approval.", "npx", &["-y", "toolport-mcp-servers", "cloudflare"], &["CLOUDFLARE_API_TOKEN"], "https://github.com/tsouth89/toolport-mcp-servers"),
+        cmd("Clerk (Full API)", "Toolport overlay: 224 Clerk Backend API endpoints (users, orgs, sessions, invitations), vs the official 2-tool docs server.", "npx", &["-y", "toolport-mcp-servers", "clerk"], &["CLERK_SECRET_KEY"], "https://github.com/tsouth89/toolport-mcp-servers"),
         cmd("AWS", "AWS APIs, docs, and best practices via AWS Labs MCP.", "uvx", &["awslabs.core-mcp-server@latest"], &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], "https://github.com/awslabs/mcp"),
         cmd("Kubernetes", "Inspect and manage Kubernetes clusters via your kubeconfig.", "npx", &["-y", "mcp-server-kubernetes"], &[], "https://github.com/Flux159/mcp-server-kubernetes"),
         cmd("Linode", "Manage Linode (Akamai) cloud: instances, volumes, NodeBalancers, databases, and networking.", "npx", &["-y", "@takashito/linode-mcp-server"], &["LINODE_API_TOKEN"], "https://github.com/takashito/linode-mcp-server"),
@@ -545,8 +567,10 @@ mod tests {
         // The reported bug: searching a curated vendor must still surface it,
         // even though the live registry wouldn't return it.
         let vercel = filter_catalog(curated(), "vercel");
-        assert_eq!(vercel.len(), 1);
+        // The official Vercel and the Toolport (Full API) overlay both surface, official first.
+        assert_eq!(vercel.len(), 2);
         assert_eq!(vercel[0].name, "Vercel");
+        assert_eq!(vercel[1].name, "Vercel (Full API)");
         // Description matches too (Postgres -> Neon/Supabase).
         assert!(filter_catalog(curated(), "postgres")
             .iter()
