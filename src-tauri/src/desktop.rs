@@ -1609,6 +1609,23 @@ fn set_allow_agent_control(state: State<RegistryState>, allow: bool) -> Result<R
     Ok(reg)
 }
 
+/// Set (or clear) a client's discovery-mode override. `mode` is `"full" | "lazy" |
+/// "grouped"`; `None` (or "inherit"/unknown) clears it so the client inherits the global
+/// mode. The gateway resolves this live via `CONDUIT_CLIENT_ID`, so the change applies
+/// without reinstalling the client.
+#[tauri::command]
+fn set_client_discovery(
+    state: State<RegistryState>,
+    client_id: String,
+    mode: Option<String>,
+) -> Result<Registry, String> {
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_client_discovery(&client_id, mode.as_deref());
+        Ok(())
+    })?;
+    Ok(reg)
+}
+
 /// Flush the in-memory registry to disk so the teams module (which reads the registry
 /// file) operates on the current state, then refresh the in-memory state from disk
 /// after the team operation merged into it.
@@ -2706,6 +2723,7 @@ pub fn run() {
             release_quarantine,
             set_lazy_discovery,
             set_allow_agent_control,
+            set_client_discovery,
             team_connect,
             team_join_poll,
             team_sync,

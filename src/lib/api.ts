@@ -298,6 +298,16 @@ export function setLazyDiscovery(lazy: boolean): Promise<Registry> {
   return invoke<Registry>("set_lazy_discovery", { lazy });
 }
 
+/** Override one client's discovery mode ("full" | "lazy" | "grouped"), or clear it
+ * (`null`) so the client inherits the global mode. Applies live via the gateway's
+ * per-client resolution, no reconnect needed. */
+export function setClientDiscovery(
+  clientId: string,
+  mode: string | null,
+): Promise<Registry> {
+  return invoke<Registry>("set_client_discovery", { clientId, mode });
+}
+
 /** Opt into agent control: let an agent enable/disable servers via the gateway. */
 export function setAllowAgentControl(allow: boolean): Promise<Registry> {
   return invoke<Registry>("set_allow_agent_control", { allow });

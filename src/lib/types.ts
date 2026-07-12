@@ -404,6 +404,12 @@ export interface Registry {
   quarantineOnDrift?: boolean;
   /** Global switch: expose 4 meta-tools instead of the full catalog. */
   lazyDiscovery?: boolean;
+  /** Global discovery mode ("full" | "lazy" | "grouped"). Takes precedence over
+   * `lazyDiscovery`; absent = fall back to the `lazyDiscovery` bool. */
+  discoveryMode?: string | null;
+  /** Per-client discovery-mode override, keyed by client id (e.g. "cursor" ->
+   * "grouped"). Absent = that client inherits the global mode. */
+  clientDiscovery?: Record<string, string>;
   /** Opt-in: let an agent enable/disable servers via the gateway's control tools. */
   allowAgentControl?: boolean;
   /** Connection to a Toolport Teams server, if joined. Token lives in the keychain. */
