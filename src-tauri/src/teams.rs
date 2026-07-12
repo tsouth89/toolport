@@ -370,17 +370,20 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
     // Loading first and saving here would clobber any change another command made to the
     // registry while we were waiting on the join window's pull.
     let pulled = pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0, None, 0)?;
-    let mut reg = crate::registry::load()?;
-    reg.team = Some(conn);
-    let mut outcome = MergeOutcome::default();
-    if let Some((version, cfg, etag)) = pulled {
-        outcome = apply_team_config(&mut reg, &joined.team_id, &cfg);
-        if let Some(t) = reg.team.as_mut() {
-            t.last_version = version;
-            t.last_etag = etag;
+    // Load-modify-save the fresh registry under the cross-process lock, so a concurrent write
+    // during the join window's pull isn't reverted (SOU-23).
+    let (reg, outcome) = crate::registry::update(|reg| {
+        reg.team = Some(conn);
+        let mut outcome = MergeOutcome::default();
+        if let Some((version, cfg, etag)) = pulled {
+            outcome = apply_team_config(reg, &joined.team_id, &cfg);
+            if let Some(t) = reg.team.as_mut() {
+                t.last_version = version;
+                t.last_etag = etag;
+            }
         }
-    }
-    crate::registry::save(&reg)?;
+        Ok(outcome)
+    })?;
     let conn = reg.team.clone().ok_or_else(|| "team connection lost after save".to_string())?;
     Ok((conn, outcome))
 }
@@ -450,33 +453,39 @@ fn sync_inner(wait_secs: u64) -> Result<SyncResult, String> {
     // Re-load a FRESH registry now, AFTER the (possibly multi-second) network round
     // trips, and apply the deltas to it. Loading at the top and saving here would clobber
     // any change another command made to the registry while we were on the network.
-    let mut reg = crate::registry::load()?;
-    match reg.team.as_ref() {
-        // The user disconnected or switched teams mid-sync: don't apply stale results.
-        None => return Ok(SyncResult::Ok { role, role_changed, applied: None }),
-        Some(t) if t.team_id != conn.team_id => {
-            return Ok(SyncResult::Ok { role, role_changed, applied: None })
+    // Apply the deltas onto a FRESH registry under the cross-process lock, so a concurrent
+    // app or gateway write between our network round trip and our save isn't reverted
+    // (SOU-23). The closure returns `None` when the user disconnected / switched teams
+    // mid-sync (nothing applied); `Some(applied)` otherwise.
+    let (_, result) = crate::registry::update(|reg| {
+        match reg.team.as_ref() {
+            None => return Ok(None),
+            Some(t) if t.team_id != conn.team_id => return Ok(None),
+            _ => {}
         }
-        _ => {}
-    }
-
-    let applied = match pulled {
-        None => None,
-        Some((version, cfg, etag)) => {
-            let outcome = apply_team_config(&mut reg, &conn.team_id, &cfg);
-            if let Some(t) = reg.team.as_mut() {
-                t.last_version = version;
-                t.last_etag = etag;
+        let applied = match pulled {
+            None => None,
+            Some((version, cfg, etag)) => {
+                let outcome = apply_team_config(reg, &conn.team_id, &cfg);
+                if let Some(t) = reg.team.as_mut() {
+                    t.last_version = version;
+                    t.last_etag = etag;
+                }
+                Some((version, outcome))
             }
-            Some((version, outcome))
+        };
+        // Persist the refreshed role alongside any applied config, so admin-only UI tracks
+        // the member's real, current role on every sync.
+        if let Some(t) = reg.team.as_mut() {
+            t.role = role.clone();
         }
+        Ok(Some(applied))
+    })?;
+    let applied = match result {
+        // Skipped (disconnected / switched teams mid-sync): don't report usage for it.
+        None => return Ok(SyncResult::Ok { role, role_changed, applied: None }),
+        Some(applied) => applied,
     };
-    // Persist the refreshed role alongside any applied config, so admin-only UI tracks
-    // the member's real, current role on every sync.
-    if let Some(t) = reg.team.as_mut() {
-        t.role = role.clone();
-    }
-    crate::registry::save(&reg)?;
     // Best-effort showback after the config work: report today's/yesterday's per-server
     // usage rollup to the team server. Any failure here must never affect the sync
     // result — the member's config is already applied and saved.
@@ -587,23 +596,25 @@ fn report_usage(conn: &TeamConnection, token: &str) {
     // Persist the watermarks on a FRESH registry (same clobber-avoidance as sync_inner:
     // the POSTs above are network round trips another command may have raced past).
     // `new_state` only ever holds today + yesterday, so old days prune themselves.
-    let Ok(mut reg) = crate::registry::load() else { return };
-    if let Some(t) = reg.team.as_mut() {
-        if t.team_id == conn.team_id {
-            t.usage_reported = new_state;
-            let _ = crate::registry::save(&reg);
+    let _ = crate::registry::update(|reg| {
+        if let Some(t) = reg.team.as_mut() {
+            if t.team_id == conn.team_id {
+                t.usage_reported = new_state;
+            }
         }
-    }
+        Ok(())
+    });
 }
 
 /// Leave the team: remove its merged servers, clear the connection and the token.
 pub fn disconnect() -> Result<(), String> {
-    let mut reg = crate::registry::load()?;
-    if let Some(conn) = reg.team.clone() {
-        remove_team(&mut reg, &conn.team_id);
-    }
-    reg.team = None;
-    crate::registry::save(&reg)?;
+    crate::registry::update(|reg| {
+        if let Some(conn) = reg.team.clone() {
+            remove_team(reg, &conn.team_id);
+        }
+        reg.team = None;
+        Ok(())
+    })?;
     let _ = clear_token();
     Ok(())
 }
