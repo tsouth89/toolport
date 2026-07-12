@@ -63,6 +63,23 @@ const DISCOVERY_HINT: Record<string, string> = {
   full: "Advertises every tool up front. Most tokens, no discovery step.",
 };
 
+// Local-model desktop apps: users often run small / quantized models here that stumble on
+// lazy's multi-step search-then-call chain, yet get flooded by the full catalog. Grouped
+// (one hop per server) is the middle ground. Every other client is a hosted-model or
+// agentic client that handles lazy's savings fine. This drives a RECOMMENDATION only; it
+// never auto-applies, so an explicit user choice is never silently overridden.
+const LOCAL_MODEL_CLIENTS = new Set(["lm-studio", "jan", "anythingllm"]);
+
+/** The mode we suggest for a client, with a one-line why. Advisory, not enforced. */
+function recommendedMode(clientId: string): { mode: string; why: string } {
+  return LOCAL_MODEL_CLIENTS.has(clientId)
+    ? { mode: "grouped", why: "local models do better browsing one server at a time" }
+    : {
+        mode: "lazy",
+        why: "this client handles the search-then-call step and saves the most tokens",
+      };
+}
+
 export function ClientDetail({ client, registry, onChanged, onRegistryChange }: Props) {
   const [busy, setBusy] = useState(false);
   // Snapshotted at dialog-open time so a registry-changed event mid-review can't
@@ -91,6 +108,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
     ((registry?.lazyDiscovery ?? true) ? "lazy" : "full");
   const clientMode = registry?.clientDiscovery?.[client.id] ?? "";
   const effectiveMode = clientMode || globalMode;
+  const recommended = recommendedMode(client.id);
 
   /** Set or clear this client's discovery-mode override; applies live, no reconnect. */
   async function applyDiscovery(mode: string) {
@@ -405,6 +423,17 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
             <p className="mt-0.5 text-2xs text-muted-foreground">
               {DISCOVERY_HINT[effectiveMode] ?? DISCOVERY_HINT.lazy}
             </p>
+            {effectiveMode === recommended.mode ? (
+              <p className="mt-0.5 text-2xs text-success">
+                Recommended ({recommended.mode}) — {recommended.why}.
+              </p>
+            ) : (
+              <p className="mt-0.5 text-2xs text-muted-foreground/80">
+                Recommended:{" "}
+                <span className="font-medium text-foreground">{recommended.mode}</span> —{" "}
+                {recommended.why}.
+              </p>
+            )}
           </div>
           <Select
             value={clientMode || "__inherit__"}

@@ -919,6 +919,21 @@ fn registry_summary(reg: &Registry) -> String {
     let active = reg.active_profile_id();
     let _ = writeln!(out, "\nsettings:");
     let _ = writeln!(out, "  lazy discovery: {}", reg.lazy_discovery);
+    let global_mode = reg
+        .discovery_mode
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| if reg.lazy_discovery { "lazy".into() } else { "full".into() });
+    let _ = writeln!(out, "  discovery mode: {global_mode} (global)");
+    if !reg.client_discovery.is_empty() {
+        let mut overrides: Vec<String> = reg
+            .client_discovery
+            .iter()
+            .map(|(id, mode)| format!("{id}={mode}"))
+            .collect();
+        overrides.sort();
+        let _ = writeln!(out, "  per-client discovery: {}", overrides.join(", "));
+    }
     let _ = writeln!(out, "  deny destructive: {}", reg.deny_destructive);
     let _ = writeln!(out, "  active profile: {active}");
 

@@ -1234,6 +1234,10 @@ fn enabled_summary(
             }
         }
     }
+    // The discovery mode this client is actually resolved to (env > per-client override >
+    // global), so `toolport_status` answers "why am I seeing meta-tools vs the full
+    // catalog?" and confirms a per-client override took effect.
+    out.push_str(&format!("\nDiscovery mode: {}\n", discovery_mode().as_str()));
     out.push_str(&savings_line());
     out
 }
