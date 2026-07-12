@@ -919,6 +919,21 @@ fn registry_summary(reg: &Registry) -> String {
     let active = reg.active_profile_id();
     let _ = writeln!(out, "\nsettings:");
     let _ = writeln!(out, "  lazy discovery: {}", reg.lazy_discovery);
+    let global_mode = reg
+        .discovery_mode
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| if reg.lazy_discovery { "lazy".into() } else { "full".into() });
+    let _ = writeln!(out, "  discovery mode: {global_mode} (global)");
+    if !reg.client_discovery.is_empty() {
+        let mut overrides: Vec<String> = reg
+            .client_discovery
+            .iter()
+            .map(|(id, mode)| format!("{id}={mode}"))
+            .collect();
+        overrides.sort();
+        let _ = writeln!(out, "  per-client discovery: {}", overrides.join(", "));
+    }
     let _ = writeln!(out, "  deny destructive: {}", reg.deny_destructive);
     let _ = writeln!(out, "  active profile: {active}");
 
@@ -1604,6 +1619,23 @@ fn set_lazy_discovery(state: State<RegistryState>, lazy: bool) -> Result<Registr
 fn set_allow_agent_control(state: State<RegistryState>, allow: bool) -> Result<Registry, String> {
     let (reg, _) = write_registry(state.inner(), |reg| {
         reg.allow_agent_control = allow;
+        Ok(())
+    })?;
+    Ok(reg)
+}
+
+/// Set (or clear) a client's discovery-mode override. `mode` is `"full" | "lazy" |
+/// "grouped"`; `None` (or "inherit"/unknown) clears it so the client inherits the global
+/// mode. The gateway resolves this live via `CONDUIT_CLIENT_ID`, so the change applies
+/// without reinstalling the client.
+#[tauri::command]
+fn set_client_discovery(
+    state: State<RegistryState>,
+    client_id: String,
+    mode: Option<String>,
+) -> Result<Registry, String> {
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_client_discovery(&client_id, mode.as_deref());
         Ok(())
     })?;
     Ok(reg)
@@ -2706,6 +2738,7 @@ pub fn run() {
             release_quarantine,
             set_lazy_discovery,
             set_allow_agent_control,
+            set_client_discovery,
             team_connect,
             team_join_poll,
             team_sync,

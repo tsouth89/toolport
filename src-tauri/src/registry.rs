@@ -336,6 +336,13 @@ pub struct Registry {
     /// the client follows the active profile (all its enabled servers).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub client_scopes: HashMap<String, String>,
+    /// Per-client discovery-mode override, keyed by stable client id (e.g. "cursor" ->
+    /// "grouped"). Value is `"full" | "lazy" | "grouped"`; an absent entry means the client
+    /// inherits the global mode (`discovery_mode`, else `lazy_discovery`). The gateway
+    /// resolves it live via `CONDUIT_CLIENT_ID`, so changing it re-applies without
+    /// reinstalling the client (same mechanism as `client_scopes`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub client_discovery: HashMap<String, String>,
     /// Consumers registered to reach the gateway over the HTTP/OpenAPI bridge,
     /// each with its own hashed bearer token and scope. Empty = the bridge uses
     /// only the legacy single `CONDUIT_HTTP_TOKEN` (back-compat).
@@ -447,6 +454,7 @@ impl Default for Registry {
             team: None,
             result_budgets: HashMap::new(),
             client_scopes: HashMap::new(),
+            client_discovery: HashMap::new(),
             http_clients: Vec::new(),
             secrets_generation: 0,
             unknown_fields: serde_json::Map::new(),
@@ -867,6 +875,28 @@ impl Registry {
                 self.client_scopes.remove(client_id);
             }
         }
+    }
+
+    /// Set (or clear) a client's discovery-mode override. `Some("full"|"lazy"|"grouped")`
+    /// pins that mode for the client; `None`, an empty/whitespace value, `"inherit"`, or any
+    /// unrecognized value clears the entry so the client inherits the global mode.
+    pub fn set_client_discovery(&mut self, client_id: &str, mode: Option<&str>) {
+        let valid = mode
+            .map(|m| m.trim().to_ascii_lowercase())
+            .filter(|m| matches!(m.as_str(), "full" | "lazy" | "grouped"));
+        match valid {
+            Some(m) => {
+                self.client_discovery.insert(client_id.to_string(), m);
+            }
+            None => {
+                self.client_discovery.remove(client_id);
+            }
+        }
+    }
+
+    /// This client's discovery-mode override, if any (`None` = inherit the global mode).
+    pub fn client_discovery_mode(&self, client_id: &str) -> Option<&str> {
+        self.client_discovery.get(client_id).map(String::as_str)
     }
 
     /// Record that a client is *explicitly* unscoped: it follows the active
@@ -1694,6 +1724,25 @@ mod tests {
         r.set_client_scope("claude", Some("Work"));
         r.set_client_scope("claude", None);
         assert!(!r.client_scopes.contains_key("claude"));
+    }
+
+    #[test]
+    fn client_discovery_records_normalizes_and_clears() {
+        let mut r = Registry::default();
+        assert_eq!(r.client_discovery_mode("cursor"), None);
+        // Recorded case-insensitively / trimmed to a canonical lowercase mode.
+        r.set_client_discovery("cursor", Some("  LAZY "));
+        assert_eq!(r.client_discovery_mode("cursor"), Some("lazy"));
+        r.set_client_discovery("cursor", Some("Grouped"));
+        assert_eq!(r.client_discovery_mode("cursor"), Some("grouped"));
+        // Unknown / empty / None all clear the override (client inherits the global mode).
+        r.set_client_discovery("cursor", Some("nonsense"));
+        assert_eq!(r.client_discovery_mode("cursor"), None);
+        r.set_client_discovery("claude", Some("full"));
+        r.set_client_discovery("claude", None);
+        assert_eq!(r.client_discovery_mode("claude"), None);
+        // Empty map is omitted from serialization (skip_serializing_if).
+        assert!(r.client_discovery.is_empty());
     }
 
     #[test]
