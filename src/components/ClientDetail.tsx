@@ -425,12 +425,12 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
             </p>
             {effectiveMode === recommended.mode ? (
               <p className="mt-0.5 text-2xs text-success">
-                Recommended ({recommended.mode}) — {recommended.why}.
+                Recommended ({recommended.mode}), {recommended.why}.
               </p>
             ) : (
               <p className="mt-0.5 text-2xs text-muted-foreground/80">
                 Recommended:{" "}
-                <span className="font-medium text-foreground">{recommended.mode}</span> —{" "}
+                <span className="font-medium text-foreground">{recommended.mode}</span>,{" "}
                 {recommended.why}.
               </p>
             )}
