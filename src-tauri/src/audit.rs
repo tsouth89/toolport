@@ -24,6 +24,14 @@ pub fn audit_path() -> Option<PathBuf> {
     Some(crate::registry::conduit_dir()?.join("audit.jsonl"))
 }
 
+/// Delete the audit log (called when the user clears retained activity). Local,
+/// irreversible; the next call re-creates the file.
+pub fn clear() {
+    if let Some(path) = audit_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn epoch_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -13,6 +13,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Trash2,
   X,
   XCircle,
 } from "lucide-react";
@@ -21,7 +22,9 @@ import { fmtTokens } from "@/lib/utils";
 import { toastError } from "@/lib/toast";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Input } from "@/components/ui/input";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
+  clearActivityLogs,
   exportAuditToPath,
   getAuditLog,
   getAuditStats,
@@ -1368,6 +1371,20 @@ export function ActivityView({
   // this, a first-run backend failure renders the friendly "No tool calls yet" state
   // and hides that anything is wrong.
   const [loadError, setLoadError] = useState(false);
+  // Local reload trigger: bumped after a "Clear retained activity" so the panels
+  // refetch (they'd otherwise keep showing the just-deleted rows until the parent's
+  // refreshKey next changes).
+  const [reloadTick, setReloadTick] = useState(0);
+
+  async function clearActivity() {
+    try {
+      await clearActivityLogs();
+      toast.success("Cleared retained activity");
+      setReloadTick((t) => t + 1);
+    } catch (e) {
+      toastError(`Couldn't clear activity: ${e}`);
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -1394,7 +1411,7 @@ export function ActivityView({
     return () => {
       alive = false;
     };
-  }, [refreshKey]);
+  }, [refreshKey, reloadTick]);
 
   // Export the full retained audit log. The save dialog offers CSV and JSON; the
   // chosen extension picks the format. CSV is formula-injection-safe in the backend.
@@ -1556,6 +1573,22 @@ export function ActivityView({
           <Download className="size-3.5" aria-hidden="true" />
           Export
         </button>
+        <ConfirmDialog
+          trigger={
+            <button
+              title="Delete all retained activity kept on this device"
+              className="flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              <Trash2 className="size-3.5" aria-hidden="true" />
+              Clear
+            </button>
+          }
+          title="Clear retained activity?"
+          description="Permanently deletes everything Toolport keeps on this device: the audit log, discovery search traces, live-inspection captures, and the savings tally (including its running total). Nothing is sent anywhere; each log starts fresh on the next event. This can't be undone."
+          confirmLabel="Clear activity"
+          destructive
+          onConfirm={clearActivity}
+        />
       </div>
 
       {logOpen && (

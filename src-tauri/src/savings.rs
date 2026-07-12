@@ -28,6 +28,15 @@ fn savings_path() -> Option<PathBuf> {
     Some(crate::registry::conduit_dir()?.join("savings.jsonl"))
 }
 
+/// Delete the savings log, including the carry-forward aggregate (called when the
+/// user clears retained activity). Local, irreversible; the running total resets to
+/// zero and the next serve starts a fresh file.
+pub fn clear() {
+    if let Some(path) = savings_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn epoch_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

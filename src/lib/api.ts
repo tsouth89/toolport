@@ -263,6 +263,13 @@ export function clearSearchTraces(): Promise<void> {
   return invoke<void>("clear_search_traces");
 }
 
+/** Clear all retained local activity at once: audit log, discovery traces,
+ * live-inspection captures, and the savings tally (incl. its carry-forward total).
+ * Local, irreversible deletes; each log re-creates itself on the next event. */
+export function clearActivityLogs(): Promise<void> {
+  return invoke<void>("clear_activity_logs");
+}
+
 /** Every pinned tool's verifiable identity (alias -> server/profiles + fingerprint +
  * first-seen/last-changed) for the active profile. Empty until a baseline is pinned. */
 export function getToolIdentities(): Promise<ToolIdentity[]> {

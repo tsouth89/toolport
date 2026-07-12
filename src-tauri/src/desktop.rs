@@ -1455,6 +1455,19 @@ fn clear_search_traces() -> Result<(), String> {
     Ok(())
 }
 
+/// Clear all retained local activity in one confirmed action: the audit log, discovery
+/// search traces, live-inspection captures, and the savings tally (including its
+/// carry-forward total). Each is a local, irreversible delete; the logs re-create
+/// themselves on the next event. Backs the Activity view's "Clear retained activity".
+#[tauri::command]
+fn clear_activity_logs() -> Result<(), String> {
+    audit::clear();
+    searchtrace::clear();
+    inspect::clear();
+    savings::clear();
+    Ok(())
+}
+
 /// One exposed tool's verifiable identity: the model-visible alias joined back to its
 /// source server + the profiles that enable it, plus the integrity fingerprint and
 /// when the definition was first seen / last changed. This is the "capability
@@ -2732,6 +2745,7 @@ pub fn run() {
             clear_inspect_log,
             get_search_traces,
             clear_search_traces,
+            clear_activity_logs,
             list_tool_identities,
             set_quarantine_on_drift,
             list_quarantined,
