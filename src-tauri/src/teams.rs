@@ -356,7 +356,6 @@ fn complete_join(server_url: &str, member_name: Option<&str>, joined: Joined) ->
 }
 
 fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -> Result<(TeamConnection, MergeOutcome), String> {
-    let mut reg = crate::registry::load()?;
     let conn = TeamConnection {
         server_url: base(server_url),
         team_id: joined.team_id.clone(),
@@ -366,11 +365,15 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
         last_etag: None,
         usage_reported: HashMap::new(),
     };
+    // Pull BEFORE loading the registry, then load a FRESH copy AFTER the (possibly
+    // multi-second) network round trip and apply onto that — mirroring `sync_inner`.
+    // Loading first and saving here would clobber any change another command made to the
+    // registry while we were waiting on the join window's pull.
+    let pulled = pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0, None, 0)?;
+    let mut reg = crate::registry::load()?;
     reg.team = Some(conn);
     let mut outcome = MergeOutcome::default();
-    if let Some((version, cfg, etag)) =
-        pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0, None, 0)?
-    {
+    if let Some((version, cfg, etag)) = pulled {
         outcome = apply_team_config(&mut reg, &joined.team_id, &cfg);
         if let Some(t) = reg.team.as_mut() {
             t.last_version = version;
@@ -723,27 +726,30 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
     let tag = tag_for(team_id);
 
     // 1. Capture the prior generation of this team's servers, and which of them the
-    //    member had ENABLED. That enablement is their standing consent for the
-    //    review-required ones, so we re-apply it after the replace instead of forcing a
-    //    re-approval on every sync.
+    //    member had ENABLED IN EACH PROFILE. That enablement is their standing consent for
+    //    the review-required ones, so we re-apply it per profile after the replace instead
+    //    of forcing a re-approval on every sync. Capturing per-profile (not just the active
+    //    one) is what keeps a team server the member enabled in a NON-active profile from
+    //    being stripped on every sync and never restored.
     let old_ids: Vec<String> = reg
         .servers
         .iter()
         .filter(|s| is_team_server(s, &tag))
         .map(|s| s.id.clone())
         .collect();
-    let prev_enabled: std::collections::HashSet<String> = reg
-        .active_profile_id
-        .as_ref()
-        .and_then(|aid| reg.profiles.iter().find(|p| &p.id == aid))
-        .map(|p| {
-            p.enabled_server_ids
-                .iter()
-                .filter(|id| old_ids.contains(id))
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
+    let prev_enabled_by_profile: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        reg.profiles
+            .iter()
+            .map(|p| {
+                let enabled: std::collections::HashSet<String> = p
+                    .enabled_server_ids
+                    .iter()
+                    .filter(|id| old_ids.contains(id))
+                    .cloned()
+                    .collect();
+                (p.id.clone(), enabled)
+            })
+            .collect();
     reg.servers.retain(|s| !is_team_server(s, &tag));
     for p in &mut reg.profiles {
         p.enabled_server_ids.retain(|id| !old_ids.contains(id));
@@ -751,19 +757,26 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
 
     // 2. Classify and add the new team servers. Ready (public remote) servers are safe to
     //    auto-enable; review servers (local command or LAN URL) are added but left off;
-    //    blocked (link-local/metadata) are refused outright.
+    //    blocked (link-local/metadata) are refused outright. Two team entries can slugify to
+    //    the same id; dedup them (like `add_server`) so they don't collide on
+    //    secrets/profiles/tool-prefixes and silently overwrite each other.
     let mut auto_enable: Vec<String> = Vec::new();
     let mut review_ids: Vec<String> = Vec::new();
+    let mut used_ids: Vec<String> = Vec::new();
     let mut outcome = MergeOutcome::default();
     if let Some(arr) = team_cfg.get("servers").and_then(Value::as_array) {
         for s in arr {
             match classify_team_server(s, &tag) {
-                TeamClass::Ready(entry) => {
+                TeamClass::Ready(mut entry) => {
+                    entry.id = crate::registry::unique_id(&entry.id, &used_ids);
+                    used_ids.push(entry.id.clone());
                     auto_enable.push(entry.id.clone());
                     reg.servers.push(entry);
                     outcome.applied += 1;
                 }
-                TeamClass::Review(entry) => {
+                TeamClass::Review(mut entry) => {
+                    entry.id = crate::registry::unique_id(&entry.id, &used_ids);
+                    used_ids.push(entry.id.clone());
                     review_ids.push(entry.id.clone());
                     reg.servers.push(entry);
                     outcome.review += 1;
@@ -774,18 +787,24 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
         }
     }
 
-    // 3. Enable: ready servers always; review servers ONLY if the member had already
-    //    consented (enabled before this sync). New review servers stay off, so nothing
-    //    local runs without an explicit opt-in.
-    if let Some(active_id) = reg.active_profile_id.clone() {
-        if let Some(p) = reg.profiles.iter_mut().find(|p| p.id == active_id) {
-            let to_enable = auto_enable
-                .iter()
-                .chain(review_ids.iter().filter(|id| prev_enabled.contains(*id)));
-            for id in to_enable {
-                if !p.enabled_server_ids.contains(id) {
-                    p.enabled_server_ids.push(id.clone());
-                }
+    // 3. Enable per profile. Ready (public remote) servers auto-enable in the ACTIVE profile
+    //    (first-run convenience). EVERY profile then restores the exact team servers the
+    //    member had enabled in THAT profile before this sync — their standing consent — so a
+    //    server enabled in a non-active profile survives the replace. Review servers the
+    //    member never consented to stay off, so nothing local runs without an explicit opt-in.
+    let active_id = reg.active_profile_id.clone();
+    for p in &mut reg.profiles {
+        let is_active = active_id.as_deref() == Some(p.id.as_str());
+        let prev = prev_enabled_by_profile.get(&p.id);
+        let was_enabled = |id: &String| prev.map(|s| s.contains(id)).unwrap_or(false);
+        for id in &auto_enable {
+            if (is_active || was_enabled(id)) && !p.enabled_server_ids.contains(id) {
+                p.enabled_server_ids.push(id.clone());
+            }
+        }
+        for id in &review_ids {
+            if was_enabled(id) && !p.enabled_server_ids.contains(id) {
+                p.enabled_server_ids.push(id.clone());
             }
         }
     }
@@ -1040,6 +1059,66 @@ mod tests {
         assert!(team_ids.contains(&"team_c".to_string()));
         assert!(!team_ids.contains(&"team_b".to_string()), "removed team server is gone");
         assert!(!active_enabled(&r).contains(&"team_b".to_string()), "no stale profile entry");
+    }
+
+    #[test]
+    fn re_sync_preserves_enablement_in_a_non_active_profile() {
+        // A team server the member enabled in a NON-active profile must survive re-sync.
+        // The old code captured prior enablement from the active profile only, stripped the
+        // team ids from every profile, and re-enabled just the active one — so a non-active
+        // enablement was lost on every sync (SOU-20).
+        let mut r = base_registry();
+        r.profiles.push(crate::registry::Profile {
+            id: "p2".into(),
+            name: "Second".into(),
+            enabled_server_ids: Vec::new(),
+        });
+        let cfg = json!({ "servers": [
+            { "id": "review1", "name": "Review1", "transport": "stdio", "command": "run-me" }
+        ]});
+        // First sync adds the review server (present, but left OFF everywhere until opt-in).
+        apply_team_config(&mut r, "t1", &cfg);
+        assert!(r.servers.iter().any(|s| s.id == "team_review1"));
+        // Member consents to it in the NON-active profile p2.
+        r.profiles
+            .iter_mut()
+            .find(|p| p.id == "p2")
+            .unwrap()
+            .enabled_server_ids
+            .push("team_review1".into());
+
+        // Re-sync with the same config: the non-active-profile consent must be restored.
+        apply_team_config(&mut r, "t1", &cfg);
+        let p2 = r.profiles.iter().find(|p| p.id == "p2").unwrap();
+        assert!(
+            p2.enabled_server_ids.contains(&"team_review1".to_string()),
+            "team server enabled in a non-active profile survives re-sync"
+        );
+        // A review server with no consent in the active profile is still not auto-enabled there.
+        assert!(!active_enabled(&r).contains(&"team_review1".to_string()));
+    }
+
+    #[test]
+    fn colliding_team_ids_are_deduped_not_overwritten() {
+        // Two team entries whose ids slugify to the same value must both survive with
+        // DISTINCT ids. The old code built ids without dedup, so both became "team_my-server"
+        // and collided on secrets/profiles/tool-prefixes, silently dropping one (SOU-20).
+        let mut r = base_registry();
+        let cfg = json!({ "servers": [
+            { "id": "My Server", "name": "First", "transport": "http", "url": "https://1.2.3.4/mcp" },
+            { "id": "my-server", "name": "Second", "transport": "http", "url": "https://1.2.3.5/mcp" }
+        ]});
+        let outcome = apply_team_config(&mut r, "t1", &cfg);
+        assert_eq!(outcome.applied, 2, "both team servers applied");
+        let team_ids: Vec<String> = r
+            .servers
+            .iter()
+            .filter(|s| s.source.as_deref() == Some("team:t1"))
+            .map(|s| s.id.clone())
+            .collect();
+        assert_eq!(team_ids.len(), 2, "two team server entries, not one overwriting the other");
+        let unique: std::collections::HashSet<&String> = team_ids.iter().collect();
+        assert_eq!(unique.len(), 2, "the colliding ids were deduped to distinct ids");
     }
 
     #[test]

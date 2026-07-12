@@ -468,7 +468,7 @@ fn slugify(s: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-fn unique_id(base: &str, existing: &[String]) -> String {
+pub(crate) fn unique_id(base: &str, existing: &[String]) -> String {
     let base = if base.is_empty() { "item" } else { base };
     if !existing.iter().any(|e| e == base) {
         return base.to_string();

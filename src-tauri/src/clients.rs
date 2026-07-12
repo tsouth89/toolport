@@ -1365,18 +1365,21 @@ fn parse_yaml_value(content: &str) -> Result<serde_yaml::Value, String> {
     serde_yaml::from_str(content).map_err(|e| format!("YAML syntax error: {e}"))
 }
 
-/// Read an existing JSON config we're about to modify. Tolerant of JSONC. When
-/// `lenient` (e.g. Zed's settings.json, which holds the user's whole editor config),
-/// an unparseable file is an ERROR, never silently replaced with an empty object,
-/// so Toolport can't wipe it. For the well-behaved JSON configs, an unparseable file
-/// falls back to empty (start fresh), preserving prior behavior.
-fn read_existing_json(content: &str, lenient: bool) -> Result<serde_json::Value, String> {
+/// Read an existing JSON config we're about to modify. Tolerant of JSONC/JSON5. A
+/// NON-empty file that won't parse is ALWAYS an error, never silently replaced with an
+/// empty object, so writing our gateway entry back can't drop the user's other servers.
+/// This protection used to apply only to whole-app-state configs; single-purpose
+/// `mcpServers` files (Cursor/VS Code/Windsurf/LM Studio/Jan/Warp/etc.) fell back to an
+/// empty object on a parse failure, which silently wiped every other server the file held
+/// while still reporting success. An empty/whitespace file still starts fresh, since
+/// `parse_json_value` returns `{}` for it. `_lenient` is retained so callers can keep
+/// threading their whole-app-state flag, but it no longer changes this path.
+fn read_existing_json(content: &str, _lenient: bool) -> Result<serde_json::Value, String> {
     match parse_json_value(content) {
         Ok(v) => Ok(v),
-        Err(e) if lenient => Err(format!(
+        Err(e) => Err(format!(
             "Could not parse the existing config ({e}); leaving it untouched."
         )),
-        Err(_) => Ok(serde_json::Value::Object(serde_json::Map::new())),
     }
 }
 
@@ -3292,6 +3295,21 @@ bad = "not-a-table"
         std::fs::write(&path, garbage).unwrap();
         assert!(edit_json_gateway(&path, "mcpServers", true, None, true, "claude-code").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn single_purpose_edit_never_wipes_unparseable_config() {
+        // A single-purpose mcpServers file (Cursor/VS Code/claude-desktop/etc.) that won't
+        // parse must ERROR and be left intact — NOT silently replaced with a file holding
+        // only the gateway entry, which would drop every other MCP server the user had. This
+        // path used to fall back to an empty object (lenient=false); SOU-20 closed that.
+        assert!(!config_is_whole_app_state("claude-desktop"));
+        let path = std::env::temp_dir().join(format!("conduit-single-{}.json", std::process::id()));
+        let garbage = "{ \"mcpServers\": { \"other\": broken not json";
+        std::fs::write(&path, garbage).unwrap();
+        assert!(edit_json_gateway(&path, "mcpServers", true, None, false, "claude-desktop").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage, "unparseable file left untouched");
         std::fs::remove_file(&path).ok();
     }
 
