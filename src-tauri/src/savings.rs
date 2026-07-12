@@ -29,11 +29,17 @@ fn savings_path() -> Option<PathBuf> {
 }
 
 /// Delete the savings log, including the carry-forward aggregate (called when the
-/// user clears retained activity). Local, irreversible; the running total resets to
-/// zero and the next serve starts a fresh file.
-pub fn clear() {
-    if let Some(path) = savings_path() {
-        let _ = std::fs::remove_file(path);
+/// user clears retained activity). Returns `Err` only on a real removal failure; a
+/// missing file (nothing to clear) is success. Local and irreversible; the running
+/// total resets to zero and the next serve starts a fresh file.
+pub fn try_clear() -> std::io::Result<()> {
+    let Some(path) = savings_path() else {
+        return Ok(());
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 

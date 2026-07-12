@@ -157,11 +157,23 @@ pub fn read_recent(limit: usize) -> Vec<Value> {
         .collect()
 }
 
-/// Delete the trace log (called when the user clears it from Activity).
-pub fn clear() {
-    if let Some(path) = trace_path() {
-        let _ = std::fs::remove_file(path);
+/// Delete the trace log. Returns `Err` only on a real removal failure; a missing file
+/// (nothing to clear) is success, so a caller can honestly confirm it is gone.
+pub fn try_clear() -> std::io::Result<()> {
+    let Some(path) = trace_path() else {
+        return Ok(());
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
+}
+
+/// Fire-and-forget clear (called when the user clears it from Activity, and from the
+/// test resets that don't surface the outcome).
+pub fn clear() {
+    let _ = try_clear();
 }
 
 #[cfg(test)]

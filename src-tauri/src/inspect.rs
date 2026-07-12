@@ -142,12 +142,24 @@ pub fn read_recent(limit: usize) -> Vec<Value> {
     entries
 }
 
-/// Clear the inspect ring (delete the file). Called when the user turns live
-/// inspection off, so no captured args/results linger.
-pub fn clear() {
-    if let Some(path) = inspect_path() {
-        let _ = std::fs::remove_file(&path);
+/// Delete the inspect ring. Returns `Err` only on a real removal failure; a missing
+/// file (nothing to clear) is success, so a caller can honestly confirm the captured
+/// args/results are gone.
+pub fn try_clear() -> std::io::Result<()> {
+    let Some(path) = inspect_path() else {
+        return Ok(());
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
+}
+
+/// Fire-and-forget clear, for callers that clear best-effort (turning live inspection
+/// off) and don't surface the outcome.
+pub fn clear() {
+    let _ = try_clear();
 }
 
 #[cfg(test)]

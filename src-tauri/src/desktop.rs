@@ -1432,11 +1432,11 @@ fn get_inspect_log(limit: usize) -> Vec<serde_json::Value> {
 }
 
 /// Clear the live-inspection ring (delete `inspect.jsonl`), so no captured args/results
-/// linger. Called when the user turns live inspection off.
+/// linger. Called when the user turns live inspection off. Surfaces a real removal
+/// failure so the UI never confirms a delete that did not happen.
 #[tauri::command]
 fn clear_inspect_log() -> Result<(), String> {
-    inspect::clear();
-    Ok(())
+    inspect::try_clear().map_err(|e| format!("Couldn't clear the inspector log: {e}"))
 }
 
 /// Recent lazy-discovery search traces (newest first): what the model searched for,
@@ -1451,21 +1451,37 @@ fn get_search_traces(limit: usize) -> Vec<serde_json::Value> {
 /// Clear the search-trace log (delete `search-trace.jsonl`).
 #[tauri::command]
 fn clear_search_traces() -> Result<(), String> {
-    searchtrace::clear();
-    Ok(())
+    searchtrace::try_clear().map_err(|e| format!("Couldn't clear the search traces: {e}"))
 }
 
 /// Clear all retained local activity in one confirmed action: the audit log, discovery
 /// search traces, live-inspection captures, and the savings tally (including its
 /// carry-forward total). Each is a local, irreversible delete; the logs re-create
 /// themselves on the next event. Backs the Activity view's "Clear retained activity".
+///
+/// Attempts every log even if one fails (so a single locked file doesn't leave the
+/// rest un-cleared), then reports exactly which could not be removed. Never confirms a
+/// delete that did not happen: a leftover sensitive log must not read as "cleared".
 #[tauri::command]
 fn clear_activity_logs() -> Result<(), String> {
-    audit::clear();
-    searchtrace::clear();
-    inspect::clear();
-    savings::clear();
-    Ok(())
+    let mut failed = Vec::new();
+    if audit::try_clear().is_err() {
+        failed.push("audit log");
+    }
+    if searchtrace::try_clear().is_err() {
+        failed.push("search traces");
+    }
+    if inspect::try_clear().is_err() {
+        failed.push("inspector captures");
+    }
+    if savings::try_clear().is_err() {
+        failed.push("savings");
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Couldn't clear: {}", failed.join(", ")))
+    }
 }
 
 /// One exposed tool's verifiable identity: the model-visible alias joined back to its
