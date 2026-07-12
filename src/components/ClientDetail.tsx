@@ -207,29 +207,32 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
     setBusy(true);
     let ok = 0;
     const failed: string[] = [];
-    const failedServers: typeof servers = [];
+    const succeeded = new Set<string>();
     for (const key of selected) {
       const s = servers[Number(key)];
       if (!s) continue;
       try {
         await importOne(s);
         ok += 1;
+        succeeded.add(key);
       } catch {
         failed.push(s.name);
-        failedServers.push(s);
       }
     }
     setBusy(false);
     if (failed.length === 0) {
       toast.success(`Imported ${ok} server${ok === 1 ? "" : "s"} into Toolport`);
       setBulkImportServers(null);
-    } else if (ok > 0) {
-      // Partial success: keep the dialog open on just the failures so a re-confirm
-      // retries only those instead of re-importing the rows that already succeeded.
-      toast.warning(`Imported ${ok}, couldn't import ${failed.join(", ")}`);
-      setBulkImportServers(failedServers);
     } else {
-      toastError(`Couldn't import ${failed.join(", ")}`);
+      // Some imports failed. Drop ONLY the rows that succeeded so a re-confirm can't
+      // re-import them; the failures (and any rows the user didn't select this time)
+      // stay in the dialog to retry or import next.
+      if (ok > 0) {
+        toast.warning(`Imported ${ok}, couldn't import ${failed.join(", ")}`);
+      } else {
+        toastError(`Couldn't import ${failed.join(", ")}`);
+      }
+      setBulkImportServers(servers.filter((_, i) => !succeeded.has(String(i))));
     }
   }
 
