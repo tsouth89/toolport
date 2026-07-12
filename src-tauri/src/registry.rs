@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 const REGISTRY_VERSION: u32 = 1;
@@ -1357,6 +1358,93 @@ pub fn save(registry: &Registry) -> Result<(), String> {
     save_to(&path, registry)
 }
 
+/// A held cross-process exclusive lock over the registry, released on drop (and by the OS
+/// if the holding process exits). Serializes the registry read-modify-write section across
+/// the desktop app, the gateway binary, and the team-sync worker, so no writer's save can
+/// revert another process's concurrent change (SOU-23). Advisory: it only excludes other
+/// holders of THIS lock, which every registry writer takes via `update` / `update_at`.
+pub struct RegistryLock(std::fs::File);
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        // Also released when the File closes / the process exits; explicit for clarity.
+        let _ = self.0.unlock();
+    }
+}
+
+/// The sibling lock file for the registry at `path` (`<registry>.lock`). A dedicated file,
+/// not registry.json itself, so locking never races the atomic temp+rename that swaps the
+/// registry inode on every save.
+fn lock_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".lock");
+    PathBuf::from(s)
+}
+
+/// Acquire the exclusive registry lock, retrying briefly under contention. Registry writes
+/// are sub-millisecond, so a real conflict clears at once; a holder stuck past the deadline
+/// surfaces as an error rather than hanging the caller indefinitely.
+fn lock_for(path: &Path) -> Result<RegistryLock, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(lock_path(path))
+        .map_err(|e| format!("Could not open the registry lock: {e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(RegistryLock(file)),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(
+                        "The registry is locked by another Toolport process; try again.".into(),
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(format!("Could not lock the registry: {e}")),
+        }
+    }
+}
+
+/// Load-modify-save the resolved registry while holding the cross-process lock, so the
+/// write reflects (and can't clobber) any change another process made since this one last
+/// read. `f` mutates a FRESH on-disk copy; the persisted registry and `f`'s value are
+/// returned. Every registry writer (app commands, the gateway toggle, team sync) goes
+/// through this or [`update_at`] — that is what makes the lock effective.
+pub fn update<T>(f: impl FnOnce(&mut Registry) -> Result<T, String>) -> Result<(Registry, T), String> {
+    let path = resolved_path().ok_or("Could not resolve registry path")?;
+    let _lock = lock_for(&path)?;
+    let mut reg = load()?;
+    let out = f(&mut reg)?;
+    save(&reg)?;
+    Ok((reg, out))
+}
+
+/// Acquire the cross-process registry lock for an explicit path, for a caller that runs its
+/// own load-modify-save (the gateway's agent toggle, which interleaves audit + early
+/// returns) rather than using [`update_at`]. Hold the returned guard across the entire
+/// read-decide-write.
+pub fn lock_at(path: &Path) -> Result<RegistryLock, String> {
+    lock_for(path)
+}
+
+/// Like [`update`] but for a caller that already resolved an explicit path (the gateway
+/// binary), locking the same sibling lock file so it serializes with the app's `update`.
+pub fn update_at<T>(
+    path: &Path,
+    f: impl FnOnce(&mut Registry) -> Result<T, String>,
+) -> Result<(Registry, T), String> {
+    let _lock = lock_for(path)?;
+    let mut reg = load_from(path)?;
+    let out = f(&mut reg)?;
+    save_to(path, &reg)?;
+    Ok((reg, out))
+}
+
 /// The path the registry actually resolves to, honoring `CONDUIT_REGISTRY`.
 pub fn resolved_path() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("CONDUIT_REGISTRY") {
@@ -1443,6 +1531,37 @@ mod tests {
         assert_eq!(r.profiles.len(), 1);
         assert_eq!(r.active_profile_id(), DEFAULT_PROFILE_ID);
         assert!(r.enabled_servers().is_empty());
+    }
+
+    #[test]
+    fn update_at_loads_fresh_and_preserves_a_concurrent_write() {
+        // The core SOU-23 property: because `update_at` load-modify-saves a FRESH on-disk
+        // copy (under the cross-process lock), a write another process made to a DIFFERENT
+        // field between this process's reads is preserved, not reverted. Uses an explicit
+        // path (no CONDUIT_REGISTRY env), so it's independent of other tests.
+        let dir = std::env::temp_dir().join(format!("conduit-sou23-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        save_to(&path, &Registry::default()).unwrap();
+
+        // Simulate a concurrent external writer flipping `allow_agent_control` on disk.
+        let mut disk = load_from(&path).unwrap();
+        disk.allow_agent_control = true;
+        save_to(&path, &disk).unwrap();
+
+        // Our update touches a different field. Loading fresh must keep the concurrent change.
+        let (out, ()) = update_at(&path, |r| {
+            r.deny_destructive = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(out.deny_destructive, "our change applied");
+        assert!(out.allow_agent_control, "the concurrent write was NOT reverted");
+
+        let reloaded = load_from(&path).unwrap();
+        assert!(reloaded.deny_destructive && reloaded.allow_agent_control);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

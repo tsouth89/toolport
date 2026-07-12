@@ -52,6 +52,10 @@ sha2 = "0.10"
 base64 = "0.22"
 regex = "1"
 getrandom = "0.2"
+# OS advisory file locking (flock / LockFileEx) for the cross-process registry write
+# lock, so the app, the gateway binary, and the team-sync worker can't revert each
+# other's registry.json edits. Auto-released by the OS if a holder crashes.
+fs2 = "0.4"
 chacha20poly1305 = "0.10"
 urlencoding = "2"
 # file:// URI -> path decoding for the ${ROOT} cwd token (issue #239); already in
