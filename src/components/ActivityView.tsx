@@ -303,7 +303,9 @@ function SecurityNotices({
                     <span className={`rounded px-1.5 py-0.5 font-medium ${badge.cls}`}>
                       {badge.label}
                     </span>
-                    <code className="font-mono text-foreground">{e.tool}</code>
+                    <code className="font-mono text-foreground">
+                      {e.tool || e.server || "integrity baseline"}
+                    </code>
                     {e.signatures && e.signatures.length > 0 && (
                       <span className="text-muted-foreground">
                         ({e.signatures.join(", ")})
