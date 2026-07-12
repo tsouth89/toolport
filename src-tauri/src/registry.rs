@@ -1397,15 +1397,18 @@ fn lock_for(path: &Path) -> Result<RegistryLock, String> {
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(RegistryLock(file)),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            // Contended. The error KIND for "already locked" differs by platform (`WouldBlock`
+            // on Unix, a lock-violation OS error on Windows), so do NOT gate the retry on it:
+            // the lock file already opened above, so any try-lock failure here is contention.
+            // Retry briefly, then surface it rather than hang the caller indefinitely.
+            Err(e) => {
                 if std::time::Instant::now() >= deadline {
-                    return Err(
-                        "The registry is locked by another Toolport process; try again.".into(),
-                    );
+                    return Err(format!(
+                        "The registry is locked by another Toolport process ({e}); try again."
+                    ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            Err(e) => return Err(format!("Could not lock the registry: {e}")),
         }
     }
 }
@@ -1561,6 +1564,47 @@ mod tests {
         let reloaded = load_from(&path).unwrap();
         assert!(reloaded.deny_destructive && reloaded.allow_agent_control);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_at_serializes_concurrent_writers_with_no_lost_updates() {
+        // The definitive lock check: many threads each read-increment-write via update_at.
+        // Because each increment is a load-modify-save under the exclusive lock, none are
+        // lost, so the final count equals the total number of writes. Without the lock, the
+        // interleaved read-modify-write would drop increments. This exercises the same file
+        // lock used cross-process: each update_at opens its own handle and contends on it.
+        let dir = std::env::temp_dir().join(format!("conduit-sou23-conc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        save_to(&path, &Registry::default()).unwrap(); // secrets_generation starts at 0
+
+        const THREADS: u64 = 4;
+        const PER: u64 = 30;
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let p = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..PER {
+                        update_at(&p, |r| {
+                            r.secrets_generation += 1;
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_reg = load_from(&path).unwrap();
+        assert_eq!(
+            final_reg.secrets_generation,
+            THREADS * PER,
+            "every increment persisted; the lock prevented lost updates"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
