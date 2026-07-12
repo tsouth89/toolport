@@ -17,9 +17,12 @@ export default defineConfig(async () => ({
   },
 
   // Vitest config: reuses the alias above so tests can import via "@/lib/...".
+  // jsdom + Testing Library so component (*.test.tsx) flows run alongside the
+  // pure-logic src/lib tests; setup registers jest-dom matchers and RTL cleanup.
   test: {
-    environment: "node",
-    include: ["src/**/*.test.ts"],
+    environment: "jsdom",
+    include: ["src/**/*.test.{ts,tsx}"],
+    setupFiles: ["./src/test/setup.ts"],
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
