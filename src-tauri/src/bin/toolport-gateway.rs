@@ -1533,9 +1533,10 @@ fn tool_fingerprint_for(name: &str, cached: &[Value], router: &Router) -> Option
 /// `route_of` resolves an exposed name to its owning server id via the router's route
 /// map. Using it (not just the `server__` prefix) is what stops a tool renamed via a
 /// `ToolOverride` to a non-namespaced name (e.g. `deploy`) from being mistaken for a
-/// meta-tool and leaked to every scoped client. When the router doesn't know the name (a
-/// cold cache before downstream servers connect), it falls back to the `server__` prefix,
-/// which is still fail-closed for namespaced tools.
+/// meta-tool and leaked to every scoped client. When the router can't resolve the name (a
+/// cold cache before downstream servers are indexed), only KNOWN gateway meta-tools and
+/// in-scope `help_<server>` tools are kept; an unknown bare name is dropped (fail-closed)
+/// rather than assumed to be a meta-tool.
 fn scope_tools(
     tools: &[Value],
     allowed: Option<&std::collections::HashSet<String>>,
@@ -1568,13 +1569,42 @@ fn tool_in_scope(
         // Authoritative: gate on the real server, sanitized to the same prefix form
         // `allowed` stores. Catches override-renamed names and ids containing `__`.
         Some(server_id) => allowed.contains(sanitize_segment(&server_id).as_str()),
-        // Router doesn't know it: a genuine meta-tool (no `server__` prefix) is kept; a
-        // namespaced tool is gated on its prefix (fail-closed).
+        // The router can't resolve the name (a cold/stale cache before downstream servers
+        // are indexed). Recognize gateway-generated tools by name rather than assuming any
+        // bare name is a meta-tool - that assumption would leak a downstream tool renamed
+        // (via an override) to a bare name during that window.
         None => {
-            let prefix = server_of_tool(name);
-            prefix == name || allowed.contains(prefix)
+            if is_fixed_meta_tool(name) {
+                // Gateway meta-tools are owned by no server; always visible.
+                true
+            } else if let Some(server) = grouped_help_target(name) {
+                // A grouped `help_<server>` browse tool: gate on its target server.
+                allowed.contains(server)
+            } else {
+                // A namespaced tool the router hasn't indexed yet: gate on its `server__`
+                // prefix (fail-closed). A bare name that is neither a known meta-tool nor a
+                // help tool is unattributable (most likely an override-renamed downstream
+                // tool) - drop it rather than leak it.
+                let prefix = server_of_tool(name);
+                prefix != name && allowed.contains(prefix)
+            }
         }
     }
+}
+
+/// The fixed gateway meta-tools, owned by no downstream server. Grouped `help_<server>`
+/// browse tools are NOT here - they're server-scoped and handled via `grouped_help_target`.
+fn is_fixed_meta_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "toolport_status"
+            | "toolport_search_tools"
+            | "toolport_call_tool"
+            | "toolport_confirm"
+            | "toolport_fetch_result"
+            | "toolport_enable_server"
+            | "toolport_disable_server"
+    )
 }
 
 /// Resolve an HTTP bearer to (authorized, scope). `Some(allowed)` = authorized,
@@ -6099,6 +6129,29 @@ mod tests {
         assert!(
             !names.contains(&"deploy".to_string()),
             "renamed vercel tool must not leak to a resend-only client"
+        );
+    }
+
+    #[test]
+    fn scope_tools_drops_unknown_bare_name_when_router_misses() {
+        // Cold/stale cache: route_of can't resolve a downstream tool renamed to a bare name
+        // yet. It must NOT be treated as a meta-tool (that would leak it to every scoped
+        // client) - only known gateway meta-tools survive a route_of miss. (SOU-21)
+        let tools = vec![
+            json!({ "name": "deploy" }), // renamed downstream tool, router hasn't indexed it
+            json!({ "name": "toolport_status" }), // genuine gateway meta-tool
+            json!({ "name": "vercel__ship" }), // namespaced, in scope
+        ];
+        let set: std::collections::HashSet<String> = ["vercel".to_string()].into_iter().collect();
+        let names: Vec<String> = scope_tools(&tools, Some(&set), |_| None)
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert!(names.contains(&"toolport_status".to_string()), "known meta-tool kept");
+        assert!(names.contains(&"vercel__ship".to_string()), "namespaced in-scope tool kept");
+        assert!(
+            !names.contains(&"deploy".to_string()),
+            "unknown bare name must not leak during a cold cache"
         );
     }
 
