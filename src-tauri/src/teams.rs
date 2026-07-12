@@ -757,12 +757,14 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
 
     // 2. Classify and add the new team servers. Ready (public remote) servers are safe to
     //    auto-enable; review servers (local command or LAN URL) are added but left off;
-    //    blocked (link-local/metadata) are refused outright. Two team entries can slugify to
-    //    the same id; dedup them (like `add_server`) so they don't collide on
-    //    secrets/profiles/tool-prefixes and silently overwrite each other.
+    //    blocked (link-local/metadata) are refused outright. Dedup each new id (like
+    //    `add_server`) against BOTH the servers already in the registry and the other new
+    //    team entries, so a team id can't collide with the member's own server or a sibling
+    //    team entry and silently overwrite its secrets/profiles/tool-prefixes. (This team's
+    //    previous servers were already removed above, so they don't block id reuse.)
     let mut auto_enable: Vec<String> = Vec::new();
     let mut review_ids: Vec<String> = Vec::new();
-    let mut used_ids: Vec<String> = Vec::new();
+    let mut used_ids: Vec<String> = reg.servers.iter().map(|s| s.id.clone()).collect();
     let mut outcome = MergeOutcome::default();
     if let Some(arr) = team_cfg.get("servers").and_then(Value::as_array) {
         for s in arr {
@@ -1119,6 +1121,45 @@ mod tests {
         assert_eq!(team_ids.len(), 2, "two team server entries, not one overwriting the other");
         let unique: std::collections::HashSet<&String> = team_ids.iter().collect();
         assert_eq!(unique.len(), 2, "the colliding ids were deduped to distinct ids");
+    }
+
+    #[test]
+    fn team_id_does_not_collide_with_an_existing_local_server() {
+        // A team server whose id would slugify onto an EXISTING local server's id must be
+        // deduped against the whole registry, not just this sync's batch — otherwise team
+        // sync would overwrite the member's own server's secrets/profile/tool routing.
+        let mut r = base_registry();
+        r.servers.push(ServerEntry {
+            id: "team_github".into(),
+            name: "My own".into(),
+            transport: "stdio".into(),
+            command: Some("x".into()),
+            args: vec![],
+            env: vec![],
+            url: None,
+            source: Some("manual".into()),
+            disabled_tools: vec![],
+            cwd: None,
+            unknown_fields: serde_json::Map::new(),
+        });
+        let cfg = json!({ "servers": [
+            { "id": "github", "name": "GitHub", "transport": "http", "url": "https://1.2.3.4/mcp" }
+        ]});
+        apply_team_config(&mut r, "t1", &cfg);
+        // The member's own server keeps its id and is untouched.
+        assert_eq!(
+            r.servers.iter().filter(|s| s.id == "team_github").count(),
+            1,
+            "no duplicate id: the local server is not clobbered"
+        );
+        assert_eq!(
+            r.servers.iter().find(|s| s.id == "team_github").unwrap().source.as_deref(),
+            Some("manual"),
+        );
+        // The team server took a distinct, deduped id.
+        let team: Vec<_> = r.servers.iter().filter(|s| s.source.as_deref() == Some("team:t1")).collect();
+        assert_eq!(team.len(), 1);
+        assert_ne!(team[0].id, "team_github", "team server deduped away from the local id");
     }
 
     #[test]
