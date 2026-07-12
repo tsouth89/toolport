@@ -504,7 +504,7 @@ export function ServerDialog({
             )}
           </Button>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>
+            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
               Cancel
             </Button>
             <Button onClick={handleSave} disabled={!canSave}>

@@ -658,6 +658,12 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
 
   // Connect to the chosen server and pull its tool list.
   useEffect(() => {
+    // A server switch invalidates any in-flight call: drop its late result and clear the
+    // "Calling…" state + ticker, so a superseded call can't paint under the new server.
+    callSeq.current += 1;
+    if (tickerRef.current) clearInterval(tickerRef.current);
+    setCalling(false);
+    setElapsed(0);
     if (!serverId) {
       setTools(null);
       return;
@@ -745,6 +751,12 @@ export function PlaygroundView({ registry, onRegistryChange }: PlaygroundProps) 
 
   // Fresh argument state whenever the selected tool changes.
   useEffect(() => {
+    // Switching tools also invalidates an in-flight call (same reasoning as the server
+    // effect), so a late result doesn't land under the newly selected tool.
+    callSeq.current += 1;
+    if (tickerRef.current) clearInterval(tickerRef.current);
+    setCalling(false);
+    setElapsed(0);
     setArgs({});
     setResult(null);
     setCallError(null);

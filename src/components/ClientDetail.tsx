@@ -207,6 +207,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
     setBusy(true);
     let ok = 0;
     const failed: string[] = [];
+    const failedServers: typeof servers = [];
     for (const key of selected) {
       const s = servers[Number(key)];
       if (!s) continue;
@@ -215,6 +216,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
         ok += 1;
       } catch {
         failed.push(s.name);
+        failedServers.push(s);
       }
     }
     setBusy(false);
@@ -222,7 +224,10 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
       toast.success(`Imported ${ok} server${ok === 1 ? "" : "s"} into Toolport`);
       setBulkImportServers(null);
     } else if (ok > 0) {
+      // Partial success: keep the dialog open on just the failures so a re-confirm
+      // retries only those instead of re-importing the rows that already succeeded.
       toast.warning(`Imported ${ok}, couldn't import ${failed.join(", ")}`);
+      setBulkImportServers(failedServers);
     } else {
       toastError(`Couldn't import ${failed.join(", ")}`);
     }
