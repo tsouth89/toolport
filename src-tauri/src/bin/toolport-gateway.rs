@@ -52,6 +52,37 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+const MAX_SEARCH_QUERY_CHARS: usize = 512;
+const MAX_SEARCH_QUERY_TOKENS: usize = 64;
+
+/// Validate the model-authored search query in one short-circuiting pass before
+/// it reaches lexical ranking or the optional embedding endpoint. The ranker
+/// splits on whitespace too, so this token bound matches the work it performs.
+fn validate_search_query(query: &str) -> Result<(), &'static str> {
+    let mut chars = 0;
+    let mut tokens = 0;
+    let mut in_token = false;
+
+    for ch in query.chars() {
+        chars += 1;
+        if chars > MAX_SEARCH_QUERY_CHARS {
+            return Err("Toolport: search query exceeds the 512-character limit.");
+        }
+
+        if ch.is_whitespace() {
+            in_token = false;
+        } else if !in_token {
+            tokens += 1;
+            if tokens > MAX_SEARCH_QUERY_TOKENS {
+                return Err("Toolport: search query exceeds the 64-token limit.");
+            }
+            in_token = true;
+        }
+    }
+
+    Ok(())
+}
+
 fn status_tool_def() -> Value {
     json!({
         "name": "toolport_status",
@@ -95,7 +126,7 @@ fn search_tool_def() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Keywords describing the capability you need (e.g. \"list emails\", \"create payment\", \"recent deployments\"). Empty lists tools (use with `server`)." },
+                "query": { "type": "string", "maxLength": MAX_SEARCH_QUERY_CHARS, "description": "Keywords describing the capability you need (e.g. \"list emails\", \"create payment\", \"recent deployments\"). Empty lists tools (use with `server`). Maximum 512 characters / 64 whitespace-separated tokens." },
                 "server": { "type": "string", "description": "Optional: limit to this server, by name/prefix (e.g. \"resend\")." },
                 "limit": { "type": "integer", "description": "Max results (default 25, up to 200).", "default": 25 }
             },
@@ -2129,6 +2160,15 @@ fn handle_request_with_cancel(
                     .get("query")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                if let Err(message) = validate_search_query(query) {
+                    return Some(success(
+                        id,
+                        json!({
+                            "content": [{ "type": "text", "text": message }],
+                            "isError": true
+                        }),
+                    ));
+                }
                 let server = arguments.get("server").and_then(|v| v.as_str());
                 let limit = arguments
                     .get("limit")
@@ -7534,6 +7574,42 @@ mod tests {
         let d = hits[0]["description"].as_str().unwrap();
         assert!(d.chars().count() <= 501); // 500 chars + ellipsis
         assert!(d.ends_with('…'));
+    }
+
+    #[test]
+    fn search_query_bounds_are_enforced_before_ranking() {
+        assert!(validate_search_query(&"x".repeat(MAX_SEARCH_QUERY_CHARS)).is_ok());
+        assert!(validate_search_query(&"x".repeat(MAX_SEARCH_QUERY_CHARS + 1)).is_err());
+
+        let sixty_four_tokens = std::iter::repeat_n("x", MAX_SEARCH_QUERY_TOKENS)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(validate_search_query(&sixty_four_tokens).is_ok());
+        assert!(validate_search_query(&format!("{sixty_four_tokens} x")).is_err());
+
+        let req = search_req(&"x".repeat(MAX_SEARCH_QUERY_CHARS + 1));
+        let resp = handle_request(
+            &req,
+            &Registry::default(),
+            &router(),
+            &catalog(),
+            true,
+            None,
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("512-character limit"));
+        assert_eq!(
+            search_tool_def()["inputSchema"]["properties"]["query"]["maxLength"],
+            MAX_SEARCH_QUERY_CHARS
+        );
     }
 
     #[test]
