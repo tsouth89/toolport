@@ -16,7 +16,7 @@ Connect it to every AI tool
 
 5
 00:00:23,300 --> 00:00:28,800
-Your agent loads 3 tools, not hundreds
+Your agent loads a handful, not hundreds
 
 6
 00:00:29,200 --> 00:00:35,900

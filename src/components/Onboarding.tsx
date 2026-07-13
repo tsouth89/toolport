@@ -832,9 +832,10 @@ function Done({
             Toolport now manages {serverCount} server
             {serverCount === 1 ? "" : "s"} across {connectedCount} connected tool
             {connectedCount === 1 ? "" : "s"}. Toggle one on or off and your clients
-            update live, no restart. Each client loads 3 search tools instead of every
-            tool, up to 91% fewer tokens at the same task success. And Toolport watches
-            every server for tampering and prompt injection, see Activity.
+            update live, no restart. Each client loads a handful of Toolport meta-tools
+            instead of every downstream tool, up to 91% fewer tokens at the same task
+            success. And Toolport watches every server for tampering and prompt injection,
+            see Activity.
           </>
         ) : (
           <>

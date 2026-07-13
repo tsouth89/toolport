@@ -60,10 +60,11 @@ fn status_tool_def() -> Value {
     })
 }
 
-/// The two meta-tools that power lazy discovery: search then call. In lazy mode
-/// these (plus toolport_status) are the ONLY tools advertised, so the client's
-/// context holds a handful of tool defs instead of hundreds - the model discovers
-/// the real tool on demand and dispatches through `toolport_call_tool`.
+/// The core meta-tools that power lazy discovery. In lazy mode the gateway advertises
+/// status, search, call, and fetch-result, plus only the optional controls the user has
+/// enabled. The client's context holds a handful of tool defs instead of hundreds -
+/// the model discovers the real tool on demand and dispatches through
+/// `toolport_call_tool`.
 ///
 /// The description leads with a directive plus GENERIC capability examples (email,
 /// payments, deployments, ...) so the model treats Toolport as the front door for any

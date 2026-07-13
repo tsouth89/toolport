@@ -314,8 +314,8 @@ flips every weakness:
 
 - **~90% fewer tokens.** In lazy-discovery mode the gateway advertises 4 meta-tools
   instead of every server's full tool list, so the agent's context stays flat no
-  matter how many servers you connect. Measured: 97% less tool overhead per request
-  (see [BENCHMARK.md](../BENCHMARK.md)).
+  matter how many servers you connect. Measured: 99.5% less tool-definition overhead
+  per request on a 415-tool catalog (see [BENCHMARK.md](../BENCHMARK.md)).
 - **Hot toggle, no restart.** Enable/disable a server, the gateway re-emits its
   tool list via the MCP `notifications/tools/list_changed`; supporting clients
   update live. The client's own config never changed, so nothing reloads.
@@ -405,7 +405,7 @@ Phase 2 - Client integration
 
 Phase 3 - Scaling & UX
 
-- [x] Lazy discovery: `CONDUIT_DISCOVERY=lazy` exposes 4 meta-tools (search/call)
+- [x] Lazy discovery: `CONDUIT_DISCOVERY=lazy` exposes 4 core meta-tools (status/search/call/fetch)
 - [x] Per-agent scoping: `CONDUIT_PROFILE` + per-client profile picker, per-profile cache
 - [x] Catalog: curated popular set + live official MCP Registry search, type-ahead
 - [x] Catalog as a left-nav destination; status grouping; non-blocking UI commands
