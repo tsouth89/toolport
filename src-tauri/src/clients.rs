@@ -100,21 +100,27 @@ struct ClientDef {
 /// The name Toolport uses for its own entry when installed into a client config.
 pub const GATEWAY_ENTRY_NAME: &str = "conduit";
 
+/// Match the frozen canonical name, the short-lived `toolport` name used by
+/// manual installs, and both current and pre-rename gateway binary names.
+fn gateway_identity_matches(id: &str, name: &str, command: Option<&str>) -> bool {
+    let has_gateway_name = |value: &str| {
+        value.eq_ignore_ascii_case(GATEWAY_ENTRY_NAME) || value.eq_ignore_ascii_case("toolport")
+    };
+
+    has_gateway_name(id)
+        || has_gateway_name(name)
+        || command
+            .map(|command| {
+                let command = command.to_lowercase();
+                command.contains("toolport-gateway") || command.contains("conduit-gateway")
+            })
+            .unwrap_or(false)
+}
+
 /// Whether a registry entry refers to Toolport's own gateway. The gateway must
 /// never proxy itself (that recurses), and import must never pull it in.
 pub fn is_gateway_server(server: &ServerEntry) -> bool {
-    server.id == GATEWAY_ENTRY_NAME
-        || server.name.eq_ignore_ascii_case(GATEWAY_ENTRY_NAME)
-        || server
-            .command
-            .as_deref()
-            .map(|c| {
-                let c = c.to_lowercase();
-                // Match the current name and the pre-rename one, so a client
-                // configured by an older Toolport is still recognized as ours.
-                c.contains("toolport-gateway") || c.contains("conduit-gateway")
-            })
-            .unwrap_or(false)
+    gateway_identity_matches(&server.id, &server.name, server.command.as_deref())
 }
 
 fn home() -> Option<PathBuf> {
@@ -1559,9 +1565,13 @@ fn read_client(def: &ClientDef) -> DetectedClient {
                  config_exists: bool,
                  servers: Vec<McpServer>,
                  error: Option<String>| {
-        let gateway_installed = servers
-            .iter()
-            .any(|s| s.name.eq_ignore_ascii_case(GATEWAY_ENTRY_NAME));
+        let gateway_installed = servers.iter().any(|server| {
+            gateway_identity_matches(
+                &server.name,
+                &server.name,
+                server.command.as_deref(),
+            )
+        });
         // The config file's parent is the client's own data dir (e.g. `.../Code/User`,
         // `.../Claude`, `~/.codex`); its presence means the app has run here. If the
         // config itself exists the app is obviously present. An empty path means we
@@ -2015,10 +2025,19 @@ fn edit_yaml_gateway(
     let mut root = read_existing_yaml(path)?;
     let exts = yaml_extensions_mut(&mut root);
     let key = serde_yaml::Value::String(GATEWAY_ENTRY_NAME.into());
+    exts.retain(|name, definition| {
+        let name = name.as_str().unwrap_or_default();
+        let command = definition
+            .as_mapping()
+            .and_then(|mapping| mapping.get("cmd"))
+            .and_then(|value| value.as_str());
+        !gateway_identity_matches(name, name, command)
+    });
     if install {
-        exts.insert(key, entry_to_goose_yaml(&gateway_entry(profile, client_id)?));
-    } else {
-        exts.remove(&key);
+        exts.insert(
+            key,
+            entry_to_goose_yaml(&gateway_entry(profile, client_id)?),
+        );
     }
     let out = serde_yaml::to_string(&root).map_err(|e| e.to_string())?;
     atomic_write(path, &out)
@@ -2174,11 +2193,15 @@ fn edit_continue_yaml_gateway(
     let servers = continue_servers_mut(&mut root);
 
     servers.retain(|server| {
-        server
-            .as_mapping()
-            .and_then(|m| m.get(serde_yaml::Value::String("name".into())))
-            .and_then(|v| v.as_str())
-            != Some(GATEWAY_ENTRY_NAME)
+        let Some(mapping) = server.as_mapping() else {
+            return true;
+        };
+        let name = mapping
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let command = mapping.get("command").and_then(|value| value.as_str());
+        !gateway_identity_matches(name, name, command)
     });
 
     if install {
@@ -2363,13 +2386,19 @@ fn edit_hermes_yaml_gateway(
     let mut root = read_existing_hermes_yaml(path)?;
     let mcp_servers = hermes_mcp_servers_mut(&mut root);
     let key = serde_yaml::Value::String(GATEWAY_ENTRY_NAME.into());
+    mcp_servers.retain(|name, definition| {
+        let name = name.as_str().unwrap_or_default();
+        let command = definition
+            .as_mapping()
+            .and_then(|mapping| mapping.get("command"))
+            .and_then(|value| value.as_str());
+        !gateway_identity_matches(name, name, command)
+    });
     if install {
         mcp_servers.insert(
             key,
             entry_to_hermes_yaml(&gateway_entry(profile, client_id)?),
         );
-    } else {
-        mcp_servers.remove(&key);
     }
     let out = serde_yaml::to_string(&root).map_err(|e| e.to_string())?;
     atomic_write(path, &out)
@@ -2583,13 +2612,15 @@ fn edit_json_gateway(
         );
     }
     let servers = obj.get_mut(key).unwrap().as_object_mut().unwrap();
+    servers.retain(|name, definition| {
+        let command = definition.get("command").and_then(|value| value.as_str());
+        !gateway_identity_matches(name, name, command)
+    });
     if install {
         servers.insert(
             GATEWAY_ENTRY_NAME.to_string(),
             entry_to_json(&gateway_entry(profile, client_id)?),
         );
-    } else {
-        servers.remove(GATEWAY_ENTRY_NAME);
     }
 
     let out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
@@ -2627,13 +2658,15 @@ fn edit_toml_gateway(
         .unwrap()
         .as_table_mut()
         .unwrap();
+    servers.retain(|name, definition| {
+        let command = definition.get("command").and_then(|value| value.as_str());
+        !gateway_identity_matches(name, name, command)
+    });
     if install {
         servers.insert(
             GATEWAY_ENTRY_NAME.to_string(),
             entry_to_toml(&gateway_entry(profile, client_id)?),
         );
-    } else {
-        servers.remove(GATEWAY_ENTRY_NAME);
     }
 
     let out = toml::to_string_pretty(&root).map_err(|e| e.to_string())?;
@@ -3099,6 +3132,138 @@ bad = "not-a-table"
         assert!(!servers2.contains_key("conduit"));
         assert!(servers2.contains_key("existing"));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn gateway_edits_replace_all_legacy_entries_across_formats() {
+        assert!(is_gateway_server(&stdio("toolport")));
+
+        let json_path = temp_path("dedupe-json");
+        std::fs::write(
+            &json_path,
+            r#"{
+                "theme": "dark",
+                "mcpServers": {
+                    "toolport": { "command": "manual-wrapper" },
+                    "stale": { "command": "C:\\Local\\Toolport\\toolport-gateway.exe" },
+                    "existing": { "command": "node" }
+                }
+            }"#,
+        )
+        .unwrap();
+        edit_json_gateway(&json_path, "mcpServers", true, None, false, "claude-code").unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        let json_servers = json["mcpServers"].as_object().unwrap();
+        assert_eq!(json_servers.len(), 2);
+        assert!(json_servers.contains_key(GATEWAY_ENTRY_NAME));
+        assert!(json_servers.contains_key("existing"));
+        assert_eq!(
+            json_servers[GATEWAY_ENTRY_NAME]["env"]["CONDUIT_CLIENT_ID"],
+            "claude-code"
+        );
+        edit_json_gateway(&json_path, "mcpServers", false, None, false, "claude-code").unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        let json_servers = json["mcpServers"].as_object().unwrap();
+        assert_eq!(json_servers.keys().collect::<Vec<_>>(), vec!["existing"]);
+
+        let toml_path = temp_path("dedupe-toml");
+        std::fs::write(
+            &toml_path,
+            r#"model = "gpt-5"
+
+[mcp_servers.toolport]
+command = "manual-wrapper"
+
+[mcp_servers.stale]
+command = 'C:\Local\Toolport\conduit-gateway.exe'
+
+[mcp_servers.existing]
+command = "npx"
+"#,
+        )
+        .unwrap();
+        edit_toml_gateway(&toml_path, true, None, "codex").unwrap();
+        let toml: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&toml_path).unwrap()).unwrap();
+        let toml_servers = toml["mcp_servers"].as_table().unwrap();
+        assert_eq!(toml_servers.len(), 2);
+        assert!(toml_servers.contains_key(GATEWAY_ENTRY_NAME));
+        assert!(toml_servers.contains_key("existing"));
+        edit_toml_gateway(&toml_path, false, None, "codex").unwrap();
+        let toml: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&toml_path).unwrap()).unwrap();
+        let toml_servers = toml["mcp_servers"].as_table().unwrap();
+        assert_eq!(toml_servers.keys().collect::<Vec<_>>(), vec!["existing"]);
+
+        let goose_path = temp_path("dedupe-goose-yaml");
+        std::fs::write(
+            &goose_path,
+            "extensions:\n  toolport:\n    cmd: manual-wrapper\n  stale:\n    cmd: C:\\Local\\Toolport\\toolport-gateway.exe\n  fetch:\n    cmd: uvx\n",
+        )
+        .unwrap();
+        edit_yaml_gateway(&goose_path, true, None, "goose").unwrap();
+        let goose: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&goose_path).unwrap()).unwrap();
+        let goose_servers = goose["extensions"].as_mapping().unwrap();
+        assert_eq!(goose_servers.len(), 2);
+        assert!(goose_servers.contains_key(GATEWAY_ENTRY_NAME));
+        assert!(goose_servers.contains_key("fetch"));
+        edit_yaml_gateway(&goose_path, false, None, "goose").unwrap();
+        let goose: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&goose_path).unwrap()).unwrap();
+        let goose_servers = goose["extensions"].as_mapping().unwrap();
+        assert_eq!(goose_servers.len(), 1);
+        assert!(goose_servers.contains_key("fetch"));
+
+        let hermes_path = temp_path("dedupe-hermes-yaml");
+        std::fs::write(
+            &hermes_path,
+            "mcp_servers:\n  toolport:\n    command: manual-wrapper\n  stale:\n    command: C:\\Local\\Toolport\\conduit-gateway.exe\n  fetch:\n    command: uvx\n",
+        )
+        .unwrap();
+        edit_hermes_yaml_gateway(&hermes_path, true, None, "hermes").unwrap();
+        let hermes: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&hermes_path).unwrap()).unwrap();
+        let hermes_servers = hermes["mcp_servers"].as_mapping().unwrap();
+        assert_eq!(hermes_servers.len(), 2);
+        assert!(hermes_servers.contains_key(GATEWAY_ENTRY_NAME));
+        assert!(hermes_servers.contains_key("fetch"));
+        edit_hermes_yaml_gateway(&hermes_path, false, None, "hermes").unwrap();
+        let hermes: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&hermes_path).unwrap()).unwrap();
+        let hermes_servers = hermes["mcp_servers"].as_mapping().unwrap();
+        assert_eq!(hermes_servers.len(), 1);
+        assert!(hermes_servers.contains_key("fetch"));
+
+        let continue_path = temp_path("dedupe-continue-yaml");
+        std::fs::write(
+            &continue_path,
+            "mcpServers:\n  - name: toolport\n    command: manual-wrapper\n  - name: stale\n    command: C:\\Local\\Toolport\\toolport-gateway.exe\n  - name: fetch\n    command: uvx\n",
+        )
+        .unwrap();
+        edit_continue_yaml_gateway(&continue_path, true, None, "continue").unwrap();
+        let continue_yaml: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&continue_path).unwrap()).unwrap();
+        let continue_servers = continue_yaml["mcpServers"].as_sequence().unwrap();
+        assert_eq!(continue_servers.len(), 2);
+        assert!(continue_servers
+            .iter()
+            .any(|server| server["name"].as_str() == Some(GATEWAY_ENTRY_NAME)));
+        assert!(continue_servers
+            .iter()
+            .any(|server| server["name"].as_str() == Some("fetch")));
+        edit_continue_yaml_gateway(&continue_path, false, None, "continue").unwrap();
+        let continue_yaml: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&continue_path).unwrap()).unwrap();
+        let continue_servers = continue_yaml["mcpServers"].as_sequence().unwrap();
+        assert_eq!(continue_servers.len(), 1);
+        assert_eq!(continue_servers[0]["name"].as_str(), Some("fetch"));
+
+        for path in [json_path, toml_path, goose_path, hermes_path, continue_path] {
+            std::fs::remove_file(path).ok();
+        }
     }
 
     #[test]

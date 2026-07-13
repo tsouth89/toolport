@@ -461,17 +461,24 @@ export function isEnabled(registry: Registry, serverId: string): boolean {
 /** Whether a registry entry is Toolport's own gateway. It's infrastructure, not a
  * proxied server, so it shouldn't appear as a manageable server in the UI.
  * Mirrors `is_gateway_server` in the Rust backend. */
-export function isGatewayServer(server: ServerEntry): boolean {
-  const name = server.name.toLowerCase();
-  const command = server.command?.toLowerCase() ?? "";
+function isGatewayIdentity(id: string, name: string, command: string | null): boolean {
+  const normalizedId = id.toLowerCase();
+  const normalizedName = name.toLowerCase();
+  const normalizedCommand = command?.toLowerCase() ?? "";
   return (
-    server.id === "conduit" ||
-    name === "conduit" ||
+    normalizedId === "conduit" ||
+    normalizedId === "toolport" ||
+    normalizedName === "conduit" ||
+    normalizedName === "toolport" ||
     // Current binary name and the pre-rename one, so an entry written by an older
     // Toolport is still recognized as the gateway.
-    command.includes("toolport-gateway") ||
-    command.includes("conduit-gateway")
+    normalizedCommand.includes("toolport-gateway") ||
+    normalizedCommand.includes("conduit-gateway")
   );
+}
+
+export function isGatewayServer(server: ServerEntry): boolean {
+  return isGatewayIdentity(server.id, server.name, server.command);
 }
 
 /** Servers a client has (config + plugins) that Toolport doesn't manage yet.
@@ -483,6 +490,8 @@ export function importableServers(
 ): McpServer[] {
   const have = new Set((registry?.servers ?? []).map((s) => s.name.toLowerCase()));
   return [...client.servers, ...client.pluginServers].filter(
-    (s) => s.name.toLowerCase() !== "conduit" && !have.has(s.name.toLowerCase()),
+    (server) =>
+      !isGatewayIdentity(server.name, server.name, server.command) &&
+      !have.has(server.name.toLowerCase()),
   );
 }
