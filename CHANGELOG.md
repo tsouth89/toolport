@@ -41,8 +41,8 @@ commands are screened before execution. (#299)
 
 **Gateway flood and oversized-input paths are bounded.** HTTP requests above the in-flight
 cap receive an immediate retryable response, search queries are capped before ranking, and
-stdio request frames are limited to 16 MiB without losing the next valid frame. (#316, #317,
-#318)
+stdio request frames are limited to 16 MiB without losing the next valid frame.
+(#316, #317, #318)
 
 **Release and container workflows are harder to tamper with.** Third-party actions are pinned
 to immutable commits, Docker permissions are narrowed, and credentials are not persisted in
@@ -76,8 +76,8 @@ receive useful labels, and discovery messaging reflects the current 4-7 meta-too
 ### Quality
 
 Component-level regression coverage now protects the error boundary, bulk-import review,
-server dialogs, and external-link guard alongside the existing Rust gateway suite. (#300,
-#312)
+server dialogs, and external-link guard alongside the existing Rust gateway suite.
+(#300, #312)
 
 ### Thanks
 
