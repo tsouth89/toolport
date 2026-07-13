@@ -7581,31 +7581,43 @@ mod tests {
         assert!(validate_search_query(&"x".repeat(MAX_SEARCH_QUERY_CHARS)).is_ok());
         assert!(validate_search_query(&"x".repeat(MAX_SEARCH_QUERY_CHARS + 1)).is_err());
 
-        let sixty_four_tokens = std::iter::repeat_n("x", MAX_SEARCH_QUERY_TOKENS)
+        let sixty_four_tokens = std::iter::repeat("x")
+            .take(MAX_SEARCH_QUERY_TOKENS)
             .collect::<Vec<_>>()
             .join(" ");
         assert!(validate_search_query(&sixty_four_tokens).is_ok());
-        assert!(validate_search_query(&format!("{sixty_four_tokens} x")).is_err());
+        let sixty_five_tokens = format!("{sixty_four_tokens} x");
+        assert!(validate_search_query(&sixty_five_tokens).is_err());
 
-        let req = search_req(&"x".repeat(MAX_SEARCH_QUERY_CHARS + 1));
-        let resp = handle_request(
-            &req,
-            &Registry::default(),
-            &router(),
-            &catalog(),
-            true,
-            None,
-            &SearchGuard::default(),
-            &ConfirmGuard::new(),
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(resp["result"]["isError"], true);
-        assert!(resp["result"]["content"][0]["text"]
+        let call = |query: &str| {
+            handle_request(
+                &search_req(query),
+                &Registry::default(),
+                &router(),
+                &catalog(),
+                true,
+                None,
+                &SearchGuard::default(),
+                &ConfirmGuard::new(),
+                None,
+                None,
+            )
+            .unwrap()
+        };
+
+        let char_limit_resp = call(&"x".repeat(MAX_SEARCH_QUERY_CHARS + 1));
+        assert_eq!(char_limit_resp["result"]["isError"], true);
+        assert!(char_limit_resp["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("512-character limit"));
+
+        let token_limit_resp = call(&sixty_five_tokens);
+        assert_eq!(token_limit_resp["result"]["isError"], true);
+        assert!(token_limit_resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("64-token limit"));
         assert_eq!(
             search_tool_def()["inputSchema"]["properties"]["query"]["maxLength"],
             MAX_SEARCH_QUERY_CHARS
