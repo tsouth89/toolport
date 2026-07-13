@@ -4874,13 +4874,17 @@ fn handle_http(
 /// an unauthenticated caller from forcing the gateway to buffer a huge body.
 const MAX_HTTP_BODY: u64 = 4 * 1024 * 1024;
 
-/// Cap on concurrently-handled gateway requests. HTTP and stdio both use this
-/// worker backstop so their concurrency semantics do not drift. Past this many,
-/// new requests are handled inline (serially) rather than spawning without bound.
-/// Sized well above any realistic local concurrency: the approval broker caps
-/// simultaneous holds at 64, and non-held calls finish in milliseconds, so this
-/// backstop is only ever a flood guard.
+/// Cap on concurrently-handled HTTP gateway requests. Requests above the cap are
+/// rejected immediately so a slow request can never block the listener's accept
+/// loop. Sized well above any realistic local concurrency: the approval broker
+/// caps simultaneous holds at 64, and non-held calls finish in milliseconds, so
+/// this backstop is only ever a flood guard.
 const MAX_HTTP_INFLIGHT: usize = 256;
+
+/// Stdio keeps its historical inline fallback once its worker cap is reached.
+/// Unlike HTTP, this cannot stall a socket accept loop, and it keeps stdin
+/// processing bounded without dropping a protocol request.
+const MAX_STDIO_INFLIGHT: usize = 256;
 
 /// Parse a `Bearer <token>` Authorization value. Pure, so it's unit-testable.
 fn parse_bearer(auth_value: &str) -> Option<&str> {
@@ -4998,10 +5002,10 @@ impl Drop for InflightGuard {
     }
 }
 
-fn try_acquire_inflight(inflight: &Arc<AtomicUsize>) -> Option<InflightGuard> {
+fn try_acquire_inflight(inflight: &Arc<AtomicUsize>, limit: usize) -> Option<InflightGuard> {
     let mut current = inflight.load(Ordering::Relaxed);
     loop {
-        if current >= MAX_HTTP_INFLIGHT {
+        if current >= limit {
             return None;
         }
         match inflight.compare_exchange_weak(
@@ -5016,14 +5020,14 @@ fn try_acquire_inflight(inflight: &Arc<AtomicUsize>) -> Option<InflightGuard> {
     }
 }
 
-fn spawn_or_run_inflight<F>(
+fn spawn_or_run_stdio_inflight<F>(
     inflight: &Arc<AtomicUsize>,
     job: F,
 ) -> Option<std::thread::JoinHandle<()>>
 where
     F: FnOnce() + Send + 'static,
 {
-    let Some(guard) = try_acquire_inflight(inflight) else {
+    let Some(guard) = try_acquire_inflight(inflight, MAX_STDIO_INFLIGHT) else {
         job();
         return None;
     };
@@ -5100,18 +5104,55 @@ fn serve_http_loop(
     search: Arc<SearchGuard>,
     confirm: Arc<ConfirmGuard>,
 ) {
-    let inflight = Arc::new(AtomicUsize::new(0));
+    serve_http_loop_with_inflight(
+        server,
+        state,
+        token,
+        search,
+        confirm,
+        Arc::new(AtomicUsize::new(0)),
+    );
+}
+
+fn serve_http_loop_with_inflight(
+    server: tiny_http::Server,
+    state: GatewayState,
+    token: Option<String>,
+    search: Arc<SearchGuard>,
+    confirm: Arc<ConfirmGuard>,
+    inflight: Arc<AtomicUsize>,
+) {
     for request in server.incoming_requests() {
+        let Some(guard) = try_acquire_inflight(&inflight, MAX_HTTP_INFLIGHT) else {
+            respond_http_overloaded(request);
+            continue;
+        };
         let (state, token, search, confirm) = (
             state.clone(),
             token.clone(),
             Arc::clone(&search),
             Arc::clone(&confirm),
         );
-        let _ = spawn_or_run_inflight(&inflight, move || {
+        std::thread::spawn(move || {
+            let _permit = guard;
             handle_connection(request, &state, &token, &search, &confirm);
         });
     }
+}
+
+fn respond_http_overloaded(request: tiny_http::Request) {
+    let body = serde_json::json!({ "error": "gateway busy; retry later" }).to_string();
+    let mut response = tiny_http::Response::from_string(body).with_status_code(503);
+    for (name, value) in [
+        (b"Content-Type".as_slice(), b"application/json".as_slice()),
+        (b"Retry-After".as_slice(), b"1".as_slice()),
+        (b"Access-Control-Allow-Origin".as_slice(), b"*".as_slice()),
+    ] {
+        if let Ok(header) = tiny_http::Header::from_bytes(name, value) {
+            response = response.with_header(header);
+        }
+    }
+    let _ = request.respond(response);
 }
 
 /// Handle one accepted HTTP request end to end: parse, CORS, auth/scope, dispatch,
@@ -5619,7 +5660,7 @@ fn main() {
                 stdout_broken_for_worker,
             );
         };
-        if let Some(handle) = spawn_or_run_inflight(&stdio_inflight, job) {
+        if let Some(handle) = spawn_or_run_stdio_inflight(&stdio_inflight, job) {
             stdio_workers.push(handle);
         }
     }
@@ -6001,16 +6042,76 @@ mod tests {
     }
 
     #[test]
+    fn http_over_cap_rejects_promptly_and_recovers() {
+        let state = http_state(false);
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let search = Arc::new(SearchGuard::default());
+        let confirm = Arc::new(ConfirmGuard::new());
+        let inflight = Arc::new(AtomicUsize::new(0));
+
+        // Hold every permit without creating 256 slow OS threads. The listener
+        // sees exactly the same saturated counter it would see under real load.
+        let mut guards: Vec<_> = (0..MAX_HTTP_INFLIGHT)
+            .map(|_| {
+                try_acquire_inflight(&inflight, MAX_HTTP_INFLIGHT)
+                    .expect("permit under cap")
+            })
+            .collect();
+
+        let listener_inflight = Arc::clone(&inflight);
+        std::thread::spawn(move || {
+            serve_http_loop_with_inflight(
+                server,
+                state,
+                None,
+                search,
+                confirm,
+                listener_inflight,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(50));
+
+        let started = Instant::now();
+        let rejected = http_get(port, "/");
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "over-cap response blocked the accept loop"
+        );
+        assert!(
+            rejected.contains("503 Service Unavailable"),
+            "unexpected over-cap response: {rejected}"
+        );
+        assert!(
+            rejected.contains("Retry-After: 1"),
+            "missing retry guidance: {rejected}"
+        );
+
+        // Once one request releases its permit, the next connection is handled
+        // normally and the worker returns that permit when it finishes.
+        drop(guards.pop());
+        let recovered = http_get(port, "/");
+        assert!(
+            recovered.contains("200 OK") && recovered.contains("Toolport gateway"),
+            "listener did not recover after a permit released: {recovered}"
+        );
+        drop(guards);
+    }
+
+    #[test]
     fn inflight_guard_caps_and_releases_workers() {
         let inflight = Arc::new(AtomicUsize::new(0));
         let guards: Vec<_> = (0..MAX_HTTP_INFLIGHT)
-            .map(|_| try_acquire_inflight(&inflight).expect("permit under cap"))
+            .map(|_| {
+                try_acquire_inflight(&inflight, MAX_HTTP_INFLIGHT)
+                    .expect("permit under cap")
+            })
             .collect();
 
-        assert!(try_acquire_inflight(&inflight).is_none());
+        assert!(try_acquire_inflight(&inflight, MAX_HTTP_INFLIGHT).is_none());
         drop(guards);
         assert_eq!(inflight.load(Ordering::SeqCst), 0);
-        assert!(try_acquire_inflight(&inflight).is_some());
+        assert!(try_acquire_inflight(&inflight, MAX_HTTP_INFLIGHT).is_some());
     }
 
     #[test]
