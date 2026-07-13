@@ -54,6 +54,57 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 
 const MAX_SEARCH_QUERY_CHARS: usize = 512;
 const MAX_SEARCH_QUERY_TOKENS: usize = 64;
+const MAX_STDIO_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoundedLine {
+    Eof,
+    Line(String),
+    TooLong,
+}
+
+/// Read one newline-delimited stdio frame without allowing an upstream client to
+/// grow an unbounded String. An oversized frame is fully drained so the caller can
+/// safely continue with the next request instead of parsing a trailing fragment.
+fn read_bounded_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> std::io::Result<BoundedLine> {
+    let mut bytes = Vec::new();
+    let read = reader
+        .by_ref()
+        .take(max_bytes as u64 + 2)
+        .read_until(b'\n', &mut bytes)?;
+    if read == 0 {
+        return Ok(BoundedLine::Eof);
+    }
+
+    let terminated = bytes.last() == Some(&b'\n');
+    let mut content_len = bytes.len() - usize::from(terminated);
+    if terminated && content_len > 0 && bytes[content_len - 1] == b'\r' {
+        content_len -= 1;
+    }
+
+    if content_len > max_bytes {
+        if !terminated {
+            loop {
+                let buffered = reader.fill_buf()?;
+                if buffered.is_empty() {
+                    break;
+                }
+                if let Some(newline) = buffered.iter().position(|b| *b == b'\n') {
+                    reader.consume(newline + 1);
+                    break;
+                }
+                let len = buffered.len();
+                reader.consume(len);
+            }
+        }
+        return Ok(BoundedLine::TooLong);
+    }
+
+    bytes.truncate(content_len);
+    String::from_utf8(bytes)
+        .map(BoundedLine::Line)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+}
 
 /// Validate the model-authored search query in one short-circuiting pass before
 /// it reaches lexical ranking or the optional embedding endpoint. The ranker
@@ -5637,14 +5688,19 @@ fn main() {
     let stdio_inflight = Arc::new(AtomicUsize::new(0));
     let stdout_broken = Arc::new(AtomicBool::new(false));
     let mut stdio_workers = Vec::new();
-    for line in stdin.lock().lines() {
+    let mut stdin = stdin.lock();
+    loop {
         reap_finished_workers(&mut stdio_workers);
         if stdout_broken.load(Ordering::SeqCst) {
             break;
         }
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
+        let line = match read_bounded_line(&mut stdin, MAX_STDIO_LINE_BYTES) {
+            Ok(BoundedLine::Line(line)) => line,
+            Ok(BoundedLine::TooLong) => {
+                glog("ignored oversized stdio request (>16 MiB)");
+                continue;
+            }
+            Ok(BoundedLine::Eof) | Err(_) => break,
         };
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -6079,6 +6135,36 @@ mod tests {
         // The slow call still completes correctly.
         let slow_resp = slow.join().unwrap();
         assert!(slow_resp.contains("done"), "slow response was: {slow_resp}");
+    }
+
+    #[test]
+    fn bounded_stdio_line_recovers_after_oversized_frame() {
+        let input = b"1234\r\nabcdefgh\nok\nlast";
+        let mut reader = std::io::BufReader::with_capacity(3, input.as_slice());
+
+        assert_eq!(
+            read_bounded_line(&mut reader, 4).unwrap(),
+            BoundedLine::Line("1234".to_string()),
+            "CRLF is excluded from the byte limit"
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 4).unwrap(),
+            BoundedLine::TooLong
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 4).unwrap(),
+            BoundedLine::Line("ok".to_string()),
+            "oversized input is drained through its newline"
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 4).unwrap(),
+            BoundedLine::Line("last".to_string()),
+            "a final frame without a newline is still accepted"
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 4).unwrap(),
+            BoundedLine::Eof
+        );
     }
 
     #[test]
