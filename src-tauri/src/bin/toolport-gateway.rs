@@ -20,6 +20,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -5114,6 +5115,438 @@ fn handle_http(
 /// an unauthenticated caller from forcing the gateway to buffer a huge body.
 const MAX_HTTP_BODY: u64 = 4 * 1024 * 1024;
 
+/// Bound the pre-routing socket work that `tiny_http` otherwise performs before
+/// yielding a request. Headers and bodies each get an absolute deadline, so a
+/// client cannot keep a connection alive forever by dripping one byte at a time.
+const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+const MAX_HTTP_PENDING_READS: usize = 64;
+const MAX_HTTP_CHUNK_WIRE_BYTES: usize = MAX_HTTP_BODY as usize + MAX_HTTP_HEADER_BYTES;
+const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy)]
+struct HttpReadDeadlines {
+    header: Duration,
+    body: Duration,
+}
+
+impl Default for HttpReadDeadlines {
+    fn default() -> Self {
+        Self {
+            header: HTTP_HEADER_READ_TIMEOUT,
+            body: HTTP_BODY_READ_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HttpIngressError {
+    Timeout,
+    HeaderTooLarge,
+    BodyTooLarge,
+    BadRequest,
+    ExpectationFailed,
+}
+
+impl HttpIngressError {
+    fn response(&self) -> (u16, &'static str, &'static str) {
+        match self {
+            Self::Timeout => (408, "Request Timeout", "request read deadline exceeded"),
+            Self::HeaderTooLarge => (
+                431,
+                "Request Header Fields Too Large",
+                "request headers are too large",
+            ),
+            Self::BodyTooLarge => (413, "Content Too Large", "request body is too large"),
+            Self::BadRequest => (400, "Bad Request", "malformed HTTP request"),
+            Self::ExpectationFailed => (417, "Expectation Failed", "unsupported expectation"),
+        }
+    }
+}
+
+enum HttpBodyFraming {
+    None,
+    ContentLength(usize),
+    Chunked,
+}
+
+struct ParsedHttpHead {
+    forwarded: Vec<u8>,
+    framing: HttpBodyFraming,
+    send_continue: bool,
+}
+
+fn find_http_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|offset| offset + 4)
+}
+
+fn parse_http_head(bytes: &[u8]) -> Result<ParsedHttpHead, HttpIngressError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| HttpIngressError::BadRequest)?;
+    let mut lines = text.split("\r\n");
+    let request_line = lines
+        .next()
+        .filter(|line| !line.is_empty())
+        .ok_or(HttpIngressError::BadRequest)?;
+    if request_line.split_ascii_whitespace().count() != 3 {
+        return Err(HttpIngressError::BadRequest);
+    }
+
+    let mut forwarded = Vec::with_capacity(bytes.len() + 24);
+    forwarded.extend_from_slice(request_line.as_bytes());
+    forwarded.extend_from_slice(b"\r\n");
+    let mut content_length: Option<usize> = None;
+    let mut transfer_encoding: Option<String> = None;
+    let mut send_continue = false;
+
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, value) = line.split_once(':').ok_or(HttpIngressError::BadRequest)?;
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() {
+            return Err(HttpIngressError::BadRequest);
+        }
+
+        if name.eq_ignore_ascii_case("Connection") {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("Content-Length") {
+            let parsed = value
+                .parse::<usize>()
+                .map_err(|_| HttpIngressError::BadRequest)?;
+            if content_length.is_some_and(|existing| existing != parsed) {
+                return Err(HttpIngressError::BadRequest);
+            }
+            content_length = Some(parsed);
+        } else if name.eq_ignore_ascii_case("Transfer-Encoding") {
+            if transfer_encoding.is_some() {
+                return Err(HttpIngressError::BadRequest);
+            }
+            transfer_encoding = Some(value.to_ascii_lowercase());
+        } else if name.eq_ignore_ascii_case("Expect") {
+            if !value.eq_ignore_ascii_case("100-continue") {
+                return Err(HttpIngressError::ExpectationFailed);
+            }
+            send_continue = true;
+            continue;
+        }
+
+        forwarded.extend_from_slice(line.as_bytes());
+        forwarded.extend_from_slice(b"\r\n");
+    }
+
+    if content_length.unwrap_or(0) > MAX_HTTP_BODY as usize {
+        return Err(HttpIngressError::BodyTooLarge);
+    }
+    let framing = match (content_length, transfer_encoding) {
+        (Some(_), Some(_)) => return Err(HttpIngressError::BadRequest),
+        (Some(length), None) => HttpBodyFraming::ContentLength(length),
+        (None, Some(encoding)) if encoding.trim().eq_ignore_ascii_case("chunked") => {
+            HttpBodyFraming::Chunked
+        }
+        (None, Some(_)) => return Err(HttpIngressError::BadRequest),
+        (None, None) => HttpBodyFraming::None,
+    };
+
+    // The ingress handles one request per public connection. Forcing the private
+    // hop closed after its response keeps framing simple without changing any
+    // public HTTP semantics; clients transparently reconnect for their next call.
+    forwarded.extend_from_slice(b"Connection: close\r\n\r\n");
+    Ok(ParsedHttpHead {
+        forwarded,
+        framing,
+        send_continue,
+    })
+}
+
+fn read_before_deadline(
+    stream: &mut TcpStream,
+    target: &mut Vec<u8>,
+    deadline: Instant,
+) -> Result<usize, HttpIngressError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(HttpIngressError::Timeout)?
+        .max(Duration::from_millis(1));
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(|_| HttpIngressError::BadRequest)?;
+    let mut chunk = [0u8; 8192];
+    match stream.read(&mut chunk) {
+        Ok(0) => Err(HttpIngressError::BadRequest),
+        Ok(read) => {
+            target.extend_from_slice(&chunk[..read]);
+            Ok(read)
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            Err(HttpIngressError::Timeout)
+        }
+        Err(_) => Err(HttpIngressError::BadRequest),
+    }
+}
+
+fn chunked_http_body_end(body: &[u8]) -> Result<Option<usize>, HttpIngressError> {
+    let mut offset = 0usize;
+    let mut decoded = 0usize;
+    loop {
+        let Some(line_end_rel) = body[offset..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+        else {
+            return Ok(None);
+        };
+        if line_end_rel > 1024 {
+            return Err(HttpIngressError::BadRequest);
+        }
+        let line_end = offset + line_end_rel;
+        let size_text = std::str::from_utf8(&body[offset..line_end])
+            .map_err(|_| HttpIngressError::BadRequest)?;
+        let size = usize::from_str_radix(size_text.split(';').next().unwrap_or("").trim(), 16)
+            .map_err(|_| HttpIngressError::BadRequest)?;
+        let data_start = line_end + 2;
+        decoded = decoded
+            .checked_add(size)
+            .ok_or(HttpIngressError::BodyTooLarge)?;
+        if decoded > MAX_HTTP_BODY as usize {
+            return Err(HttpIngressError::BodyTooLarge);
+        }
+
+        if size == 0 {
+            if body.get(data_start..data_start + 2) == Some(b"\r\n") {
+                return Ok(Some(data_start + 2));
+            }
+            let Some(trailer_end) = find_http_header_end(&body[data_start..]) else {
+                return Ok(None);
+            };
+            return Ok(Some(data_start + trailer_end));
+        }
+
+        let data_end = data_start
+            .checked_add(size)
+            .ok_or(HttpIngressError::BodyTooLarge)?;
+        let chunk_end = data_end
+            .checked_add(2)
+            .ok_or(HttpIngressError::BodyTooLarge)?;
+        if body.len() < chunk_end {
+            return Ok(None);
+        }
+        if body.get(data_end..chunk_end) != Some(b"\r\n") {
+            return Err(HttpIngressError::BadRequest);
+        }
+        offset = chunk_end;
+    }
+}
+
+fn read_deadline_http_request(
+    stream: &mut TcpStream,
+    deadlines: HttpReadDeadlines,
+) -> Result<Vec<u8>, HttpIngressError> {
+    let header_deadline = Instant::now() + deadlines.header;
+    let mut received = Vec::new();
+    let header_end = loop {
+        read_before_deadline(stream, &mut received, header_deadline)?;
+        if let Some(end) = find_http_header_end(&received) {
+            if end > MAX_HTTP_HEADER_BYTES {
+                return Err(HttpIngressError::HeaderTooLarge);
+            }
+            break end;
+        }
+        if received.len() > MAX_HTTP_HEADER_BYTES {
+            return Err(HttpIngressError::HeaderTooLarge);
+        }
+    };
+
+    let parsed = parse_http_head(&received[..header_end - 2])?;
+    if parsed.send_continue {
+        stream
+            .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+            .map_err(|_| HttpIngressError::BadRequest)?;
+    }
+    let mut request = parsed.forwarded;
+    let mut body = received.split_off(header_end);
+    let body_deadline = Instant::now() + deadlines.body;
+
+    match parsed.framing {
+        HttpBodyFraming::None => {}
+        HttpBodyFraming::ContentLength(length) => {
+            while body.len() < length {
+                read_before_deadline(stream, &mut body, body_deadline)?;
+                if body.len() > MAX_HTTP_BODY as usize {
+                    return Err(HttpIngressError::BodyTooLarge);
+                }
+            }
+            request.extend_from_slice(&body[..length]);
+        }
+        HttpBodyFraming::Chunked => loop {
+            // Permit ordinary chunk framing overhead while bounding the total wire
+            // buffer as well as the decoded body size checked by the parser.
+            if body.len() > MAX_HTTP_CHUNK_WIRE_BYTES {
+                return Err(HttpIngressError::BodyTooLarge);
+            }
+            if let Some(end) = chunked_http_body_end(&body)? {
+                request.extend_from_slice(&body[..end]);
+                break;
+            }
+            read_before_deadline(stream, &mut body, body_deadline)?;
+        },
+    }
+    let _ = stream.set_read_timeout(None);
+    Ok(request)
+}
+
+fn write_ingress_response(stream: &mut TcpStream, status: u16, reason: &str, message: &str) {
+    let body = serde_json::json!({ "error": message }).to_string();
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+fn proxy_deadline_http_connection(
+    mut client: TcpStream,
+    backend: SocketAddr,
+    deadlines: HttpReadDeadlines,
+    pending_read: InflightGuard,
+) {
+    let request = match read_deadline_http_request(&mut client, deadlines) {
+        Ok(request) => request,
+        Err(err) => {
+            drop(pending_read);
+            let _ = client.set_read_timeout(None);
+            let (status, reason, message) = err.response();
+            write_ingress_response(&mut client, status, reason, message);
+            return;
+        }
+    };
+    // Only incomplete reads count against the slow-client cap. Completed requests
+    // move to the existing gateway in-flight cap, so long approvals and SSE streams
+    // do not consume all of the pre-routing slots.
+    drop(pending_read);
+
+    let mut upstream = match TcpStream::connect_timeout(&backend, Duration::from_secs(2)) {
+        Ok(stream) => stream,
+        Err(_) => {
+            write_ingress_response(
+                &mut client,
+                503,
+                "Service Unavailable",
+                "gateway unavailable",
+            );
+            return;
+        }
+    };
+    if upstream.write_all(&request).is_err() {
+        write_ingress_response(
+            &mut client,
+            503,
+            "Service Unavailable",
+            "gateway unavailable",
+        );
+        return;
+    }
+    let _ = upstream.shutdown(Shutdown::Write);
+    let _ = std::io::copy(&mut upstream, &mut client);
+}
+
+struct HttpIngressGuard {
+    close: Arc<AtomicBool>,
+    accept_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for HttpIngressGuard {
+    fn drop(&mut self) {
+        self.close.store(true, Ordering::Release);
+        if let Some(thread) = self.accept_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn bind_deadline_http_server<A: ToSocketAddrs>(
+    addr: A,
+    deadlines: HttpReadDeadlines,
+) -> Result<
+    (tiny_http::Server, HttpIngressGuard, SocketAddr),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let listener = TcpListener::bind(addr)?;
+    listener.set_nonblocking(true)?;
+    let public_addr = listener.local_addr()?;
+    let backend_listener = if public_addr.is_ipv6() {
+        TcpListener::bind(("::1", 0))?
+    } else {
+        TcpListener::bind(("127.0.0.1", 0))?
+    };
+    let backend_addr = backend_listener.local_addr()?;
+    let server = tiny_http::Server::from_listener(backend_listener, None)?;
+    let close = Arc::new(AtomicBool::new(false));
+    let accept_close = Arc::clone(&close);
+    let connections = Arc::new(AtomicUsize::new(0));
+    let accept_thread = std::thread::spawn(move || {
+        while !accept_close.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut client, _)) => {
+                    if accept_close.load(Ordering::Acquire) {
+                        break;
+                    }
+                    // The listener is nonblocking so the guard can shut it down.
+                    // Windows propagates that mode to accepted sockets; restore a
+                    // blocking stream so the explicit read deadlines govern it.
+                    if client.set_nonblocking(false).is_err() {
+                        write_ingress_response(
+                            &mut client,
+                            503,
+                            "Service Unavailable",
+                            "gateway unavailable",
+                        );
+                        continue;
+                    }
+                    let Some(guard) = try_acquire_inflight(&connections, MAX_HTTP_PENDING_READS)
+                    else {
+                        write_ingress_response(
+                            &mut client,
+                            503,
+                            "Service Unavailable",
+                            "gateway busy; retry later",
+                        );
+                        continue;
+                    };
+                    std::thread::spawn(move || {
+                        proxy_deadline_http_connection(client, backend_addr, deadlines, guard);
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => {
+                    glog(&format!("HTTP deadline ingress accept failed: {err}"));
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok((
+        server,
+        HttpIngressGuard {
+            close,
+            accept_thread: Some(accept_thread),
+        },
+        public_addr,
+    ))
+}
+
 /// Cap on concurrently-handled HTTP gateway requests. Requests above the cap are
 /// rejected immediately so a slow request can never block the listener's accept
 /// loop. Sized well above any realistic local concurrency: the approval broker
@@ -5240,7 +5673,9 @@ fn serve_http(state: GatewayState, port: u16) {
     // like Open WebUI try ::1 and don't fall back to 127.0.0.1, so an IPv4-only
     // listener makes `http://localhost:<port>` fail even though 127.0.0.1 works.
     if host == "127.0.0.1" {
-        if let Ok(server6) = tiny_http::Server::http(("::1", port)) {
+        if let Ok((server6, ingress6, _)) =
+            bind_deadline_http_server(("::1", port), HttpReadDeadlines::default())
+        {
             let (state6, token6, search6, confirm6) = (
                 state.clone(),
                 token.clone(),
@@ -5248,6 +5683,7 @@ fn serve_http(state: GatewayState, port: u16) {
                 confirm.clone(),
             );
             std::thread::spawn(move || {
+                let _ingress = ingress6;
                 serve_http_loop(
                     server6,
                     state6,
@@ -5263,28 +5699,24 @@ fn serve_http(state: GatewayState, port: u16) {
         }
     }
 
-    let server = match tiny_http::Server::http((host.as_str(), port)) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("toolport-gateway: could not bind HTTP {host}:{port}: {e}");
-            std::process::exit(1);
-        }
-    };
+    let (server, _ingress, _) =
+        match bind_deadline_http_server((host.as_str(), port), HttpReadDeadlines::default()) {
+            Ok(bound) => bound,
+            Err(e) => {
+                eprintln!("toolport-gateway: could not bind HTTP {host}:{port}: {e}");
+                std::process::exit(1);
+            }
+        };
     glog(&format!(
-        "HTTP mode on http://{host}:{port} (OpenAPI + MCP /mcp, auth={})",
-        auth_configured
+        "HTTP mode on http://{host}:{port} (OpenAPI + MCP /mcp, auth={}, header_timeout={}s, body_timeout={}s)",
+        auth_configured,
+        HTTP_HEADER_READ_TIMEOUT.as_secs(),
+        HTTP_BODY_READ_TIMEOUT.as_secs()
     ));
     eprintln!(
         "toolport-gateway: HTTP on http://localhost:{port}  (OpenAPI /openapi.json, MCP POST /mcp)"
     );
-    serve_http_loop(
-        server,
-        state,
-        token,
-        search,
-        confirm,
-        allow_insecure_open,
-    );
+    serve_http_loop(server, state, token, search, confirm, allow_insecure_open);
 }
 
 /// The accept loop for one listener. Each accepted request is handed to its own
@@ -6297,6 +6729,134 @@ mod tests {
         let mut buf = String::new();
         let _ = s.read_to_string(&mut buf);
         buf
+    }
+
+    #[test]
+    fn deadline_http_ingress_times_out_slow_headers_and_bodies() {
+        let deadlines = HttpReadDeadlines {
+            header: Duration::from_millis(180),
+            body: Duration::from_millis(120),
+        };
+        let (_server, _ingress, public_addr) =
+            bind_deadline_http_server("127.0.0.1:0", deadlines).unwrap();
+
+        let mut slow_header = TcpStream::connect(public_addr).unwrap();
+        slow_header
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut drip_stream = slow_header.try_clone().unwrap();
+        let drip = std::thread::spawn(move || {
+            for byte in b"GET / HTTP/1.1" {
+                if drip_stream.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        });
+        let started = Instant::now();
+        let mut response = String::new();
+        let read_result = slow_header.read_to_string(&mut response);
+        let elapsed = started.elapsed();
+        drip.join().unwrap();
+        assert!(
+            read_result.is_ok()
+                || read_result
+                    .as_ref()
+                    .is_err_and(|err| err.kind() == std::io::ErrorKind::ConnectionReset),
+            "unexpected slow-header read error: {read_result:?}"
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 408 Request Timeout"),
+            "slow header response was: {response}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(350),
+            "header timeout reset after each drip ({elapsed:?}) instead of enforcing an absolute deadline"
+        );
+
+        let mut slow_body = TcpStream::connect(public_addr).unwrap();
+        slow_body
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        slow_body
+            .write_all(b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\na")
+            .unwrap();
+        let mut response = String::new();
+        slow_body.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 408 Request Timeout"),
+            "slow body response was: {response}"
+        );
+    }
+
+    #[test]
+    fn deadline_http_ingress_forwards_complete_requests_and_closes_private_hop() {
+        let (server, _ingress, public_addr) =
+            bind_deadline_http_server("127.0.0.1:0", HttpReadDeadlines::default()).unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(public_addr).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .write_all(
+                    b"GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        });
+
+        let request = server
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .expect("ingress did not forward a complete request");
+        assert_eq!(request.url(), "/ready");
+        assert!(request.headers().iter().any(|header| {
+            header.field.equiv("Connection") && header.value.as_str().eq_ignore_ascii_case("close")
+        }));
+        request
+            .respond(tiny_http::Response::from_string("ready"))
+            .unwrap();
+        assert!(client.join().unwrap().contains("ready"));
+    }
+
+    #[test]
+    fn chunked_http_body_parser_bounds_and_finds_the_terminal_chunk() {
+        assert_eq!(
+            chunked_http_body_end(b"4\r\ntest\r\n0\r\n\r\n").unwrap(),
+            Some(14)
+        );
+        assert_eq!(
+            chunked_http_body_end(b"4\r\ntest\r\n0\r\nX-Test: yes\r\n\r\n").unwrap(),
+            Some(27)
+        );
+        assert_eq!(chunked_http_body_end(b"4\r\nte").unwrap(), None);
+        assert_eq!(
+            chunked_http_body_end(b"nope\r\n").unwrap_err(),
+            HttpIngressError::BadRequest
+        );
+    }
+
+    #[test]
+    fn deadline_http_ingress_rejects_ambiguous_request_framing() {
+        assert!(matches!(
+            parse_http_head(
+                b"POST / HTTP/1.1\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n"
+            ),
+            Err(HttpIngressError::BadRequest)
+        ));
+        assert!(matches!(
+            parse_http_head(
+                b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n"
+            ),
+            Err(HttpIngressError::BadRequest)
+        ));
+        assert!(matches!(
+            parse_http_head(b"POST / HTTP/1.1\r\nExpect: something-else\r\n"),
+            Err(HttpIngressError::ExpectationFailed)
+        ));
     }
 
     /// The live proof of the multithreaded HTTP loop: a call blocked in dispatch (a
