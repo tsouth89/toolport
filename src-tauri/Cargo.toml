@@ -49,6 +49,7 @@ toml = "0.8"
 dirs = "5"
 ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
+subtle = "2.6"
 base64 = "0.22"
 regex = "1"
 getrandom = "0.2"

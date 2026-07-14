@@ -13,13 +13,15 @@
 //! TCP + token for now; hardening to a named-pipe / uds is a follow-up.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::Serialize;
+use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
@@ -66,6 +68,79 @@ struct Inner {
 /// Cap on simultaneously-pending approvals, so a misbehaving client can't grow the
 /// queue without bound. Beyond this, new requests are denied immediately.
 const MAX_PENDING: usize = 64;
+/// Bound unauthenticated request memory before a gateway proves it has the token.
+const MAX_APPROVAL_REQUEST_BYTES: usize = 1024 * 1024;
+/// Pending approvals occupy workers while awaiting a decision. Keep bounded
+/// headroom for authentication, allowlisted calls, and prompt fail-closed denials.
+const MAX_CONNECTION_WORKERS: usize = MAX_PENDING + 32;
+
+struct ConnectionPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_acquire_connection(active: &Arc<AtomicUsize>) -> Option<ConnectionPermit> {
+    let mut current = active.load(Ordering::Acquire);
+    loop {
+        if current >= MAX_CONNECTION_WORKERS {
+            return None;
+        }
+        match active.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                return Some(ConnectionPermit {
+                    active: Arc::clone(active),
+                })
+            }
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+/// Read exactly one newline-terminated request without allowing an unauthenticated
+/// peer to grow the allocation indefinitely.
+fn read_approval_request<R: BufRead>(reader: &mut R) -> io::Result<Vec<u8>> {
+    let mut line = Vec::new();
+    let mut limited = Read::take(reader, (MAX_APPROVAL_REQUEST_BYTES + 1) as u64);
+    let read = limited.read_until(b'\n', &mut line)?;
+    if read == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "empty approval request",
+        ));
+    }
+    if line.len() > MAX_APPROVAL_REQUEST_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "approval request exceeds size limit",
+        ));
+    }
+    if !line.ends_with(b"\n") {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "approval request is not newline terminated",
+        ));
+    }
+    Ok(line)
+}
+
+/// Constant-time equality for the fixed-length broker token. Token length is public.
+fn token_eq(actual: &str, expected: &str) -> bool {
+    let (actual, expected) = (actual.as_bytes(), expected.as_bytes());
+    if actual.len() != expected.len() {
+        return false;
+    }
+    actual.ct_eq(expected).into()
+}
 
 /// The wall-clock epoch-millis deadline for a newly parked approval: now plus the
 /// fail-closed timeout. Matches the broker's own `recv_timeout` below, so the UI's
@@ -218,10 +293,22 @@ pub fn start(app: AppHandle) -> ApprovalBroker {
                 }
                 let accept_broker = broker.clone();
                 std::thread::spawn(move || {
+                    let active_workers = Arc::new(AtomicUsize::new(0));
                     for conn in listener.incoming().flatten() {
+                        let Some(permit) = try_acquire_connection(&active_workers) else {
+                            // Closing immediately is fail-closed and keeps a slow or
+                            // stalled peer from consuming an unbounded thread count.
+                            drop(conn);
+                            continue;
+                        };
                         let b = accept_broker.clone();
                         let a = app.clone();
-                        std::thread::spawn(move || handle_conn(conn, b, a));
+                        let _ = std::thread::Builder::new()
+                            .name("toolport-approval".into())
+                            .spawn(move || {
+                                let _permit = permit;
+                                handle_conn(conn, b, a);
+                            });
                     }
                 });
             }
@@ -264,11 +351,11 @@ fn handle_conn(stream: TcpStream, broker: ApprovalBroker, app: AppHandle) {
         Ok(s) => s,
         Err(_) => return,
     };
-    let mut line = String::new();
-    if BufReader::new(reader_stream).read_line(&mut line).is_err() {
-        return;
-    }
-    let req: ApprovalRequest = match serde_json::from_str(line.trim()) {
+    let line = match read_approval_request(&mut BufReader::new(reader_stream)) {
+        Ok(line) => line,
+        Err(_) => return,
+    };
+    let req: ApprovalRequest = match serde_json::from_slice(&line) {
         Ok(r) => r,
         Err(_) => return,
     };
@@ -284,7 +371,7 @@ fn handle_conn(stream: TcpStream, broker: ApprovalBroker, app: AppHandle) {
     };
 
     // Authenticate: only a process holding our token may register an approval.
-    if req.token.is_empty() || req.token != broker.inner.token {
+    if req.token.is_empty() || !token_eq(&req.token, &broker.inner.token) {
         deny(&mut out);
         return;
     }
@@ -470,6 +557,56 @@ mod tests {
             d >= now + target - 3_000 && d <= now + target + 3_000,
             "deadline {d} not ~{target}ms past {now}"
         );
+    }
+
+    #[test]
+    fn broker_token_comparison_matches_only_equal_values() {
+        assert!(token_eq("token123", "token123"));
+        assert!(!token_eq("token123", "token124"));
+        assert!(!token_eq("token123", "token1234"));
+        assert!(!token_eq("", "token123"));
+    }
+
+    #[test]
+    fn approval_request_reader_requires_a_bounded_line() {
+        let valid = b"{\"token\":\"tok\"}\n";
+        assert_eq!(
+            read_approval_request(&mut std::io::Cursor::new(valid)).unwrap(),
+            valid
+        );
+
+        let unterminated = br#"{"token":"tok"}"#;
+        assert_eq!(
+            read_approval_request(&mut std::io::Cursor::new(unterminated))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+
+        let oversized = vec![b'x'; MAX_APPROVAL_REQUEST_BYTES + 1];
+        assert_eq!(
+            read_approval_request(&mut std::io::Cursor::new(oversized))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn approval_connection_worker_count_is_bounded_and_released() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONNECTION_WORKERS {
+            permits.push(try_acquire_connection(&active).expect("worker permit"));
+        }
+        assert_eq!(active.load(Ordering::Acquire), MAX_CONNECTION_WORKERS);
+        assert!(try_acquire_connection(&active).is_none());
+
+        permits.pop();
+        assert_eq!(active.load(Ordering::Acquire), MAX_CONNECTION_WORKERS - 1);
+        permits.push(try_acquire_connection(&active).expect("released permit is reusable"));
+        drop(permits);
+        assert_eq!(active.load(Ordering::Acquire), 0);
     }
 
     #[test]
