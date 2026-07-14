@@ -57,8 +57,9 @@ fn cap_chars(s: &str, max: usize) -> String {
 ///
 /// `ranking` explains why each returned tool surfaced: one entry per result (in result
 /// order) of `{ name, rank, matched, pinned, fallback }`, so the Discovery panel can
-/// answer "why this tool" not just "which tools". `mode` is the ranker the search used
-/// (`lexical` or `semantic`). Both are additive; older traces have neither.
+/// answer "why this tool" not just "which tools". `fallbacks` stores the uncapped
+/// recovery-candidate count. `mode` is the ranker the search used (`lexical` or
+/// `semantic`). These fields are additive; older traces may omit them.
 #[allow(clippy::too_many_arguments)]
 pub fn record(
     client: Option<&str>,
@@ -68,6 +69,7 @@ pub fn record(
     names: &[String],
     returned: usize,
     total: usize,
+    fallbacks: usize,
     returned_tokens: u64,
     flat_tokens: u64,
     escalated: bool,
@@ -82,6 +84,7 @@ pub fn record(
         "names": stored_names,
         "returned": returned as u64,
         "total": total as u64,
+        "fallbacks": fallbacks as u64,
         "returnedTokens": returned_tokens,
         "flatTokens": flat_tokens,
         "savedTokens": flat_tokens.saturating_sub(returned_tokens),
@@ -188,8 +191,36 @@ mod tests {
     fn record_then_read_returns_newest_first() {
         let _g = TEST_LOCK.lock().unwrap();
         clear();
-        record(Some("cursor"), "list products", None, "stripe__list", &["stripe__list".into()], 1, 3, 120, 5000, false, &[], "lexical");
-        record(None, "send email", Some("resend"), "resend__send", &["resend__send".into()], 1, 1, 90, 5000, false, &[], "lexical");
+        record(
+            Some("cursor"),
+            "list products",
+            None,
+            "stripe__list",
+            &["stripe__list".into()],
+            1,
+            3,
+            0,
+            120,
+            5000,
+            false,
+            &[],
+            "lexical",
+        );
+        record(
+            None,
+            "send email",
+            Some("resend"),
+            "resend__send",
+            &["resend__send".into()],
+            1,
+            1,
+            0,
+            90,
+            5000,
+            false,
+            &[],
+            "lexical",
+        );
         let recent = read_recent(10);
         assert_eq!(recent.len(), 2);
         // Newest first.
@@ -212,9 +243,24 @@ mod tests {
                 json!({ "name": format!("srv__t{i}"), "rank": i + 1, "matched": ["list (name)"], "pinned": false })
             })
             .collect();
-        record(None, "list", None, "srv__t0", &["srv__t0".into()], 40, 40, 100, 200, false, &ranking, "semantic");
+        record(
+            None,
+            "list",
+            None,
+            "srv__t0",
+            &["srv__t0".into()],
+            40,
+            40,
+            30,
+            100,
+            200,
+            false,
+            &ranking,
+            "semantic",
+        );
         let e = &read_recent(1)[0];
         assert_eq!(e["mode"], "semantic");
+        assert_eq!(e["fallbacks"], 30);
         let r = e["ranking"].as_array().unwrap();
         assert_eq!(r.len(), MAX_NAMES);
         assert_eq!(r[0]["name"], "srv__t0");
@@ -222,7 +268,21 @@ mod tests {
         assert_eq!(r[0]["matched"][0], "list (name)");
         // Empty ranking is omitted entirely (older-style call), but mode still records.
         clear();
-        record(None, "x", None, "", &[], 0, 0, 0, 5000, false, &[], "lexical");
+        record(
+            None,
+            "x",
+            None,
+            "",
+            &[],
+            0,
+            0,
+            0,
+            0,
+            5000,
+            false,
+            &[],
+            "lexical",
+        );
         let e = &read_recent(1)[0];
         assert_eq!(e["mode"], "lexical");
         assert!(e.get("ranking").is_none());
@@ -235,7 +295,21 @@ mod tests {
         clear();
         let long_q = "x".repeat(500);
         let many: Vec<String> = (0..40).map(|i| format!("srv__t{i}")).collect();
-        record(None, &long_q, None, "srv__t0", &many, 40, 40, 100, 200, false, &[], "lexical");
+        record(
+            None,
+            &long_q,
+            None,
+            "srv__t0",
+            &many,
+            40,
+            40,
+            0,
+            100,
+            200,
+            false,
+            &[],
+            "lexical",
+        );
         let e = &read_recent(1)[0];
         let stored_q = e["query"].as_str().unwrap();
         // Capped to MAX_QUERY_CHARS (+ the ellipsis), never the full 500.
@@ -248,7 +322,21 @@ mod tests {
     fn no_match_search_is_still_recorded() {
         let _g = TEST_LOCK.lock().unwrap();
         clear();
-        record(None, "nonexistent capability", None, "", &[], 0, 0, 0, 5000, false, &[], "lexical");
+        record(
+            None,
+            "nonexistent capability",
+            None,
+            "",
+            &[],
+            0,
+            0,
+            0,
+            0,
+            5000,
+            false,
+            &[],
+            "lexical",
+        );
         let e = &read_recent(1)[0];
         assert_eq!(e["returned"], 0);
         assert_eq!(e["top"], "");

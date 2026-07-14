@@ -2557,13 +2557,15 @@ fn handle_request_with_cancel(
                              `server` prefix; otherwise call toolport_status to see the available prefixes."
                         .to_string(),
                 };
-                let lead = if low_confidence && total == 0 {
+                let lead = if low_confidence && total == 0 && !matches.is_empty() {
                     format!(
                         "No direct tools matched{scope}. Showing {} bounded fallback candidate(s) \
                          from the caller's scoped catalog so you can inspect their descriptions; do \
                          not assume the first candidate is correct. {exhaustive_hint}{pin_note}{schema_note}",
                         matches.len().saturating_sub(pins_added)
                     )
+                } else if matches.is_empty() {
+                    format!("No tools matched{scope}. {exhaustive_hint}")
                 } else if low_confidence {
                     let broad_note = if broadened > 0 {
                         format!(" Added {broadened} fallback candidate(s) from the scoped catalog.")
@@ -2577,8 +2579,6 @@ fn handle_request_with_cancel(
                          do not assume the first candidate is correct. {exhaustive_hint}{pin_note}{more}{schema_note}",
                         matches.len().saturating_sub(pins_added)
                     )
-                } else if matches.is_empty() {
-                    format!("No tools matched{scope}. {exhaustive_hint}")
                 } else if escalate {
                     // Behavioral loop-breaker: the model keeps re-searching the same need
                     // and landing on the same tool. Give it that one tool and a command,
@@ -2641,6 +2641,7 @@ fn handle_request_with_cancel(
                     &returned_names,
                     matches.len(),
                     total,
+                    broadened,
                     savings::estimate_tokens(&matches),
                     savings::estimate_tokens(source),
                     escalate,
@@ -9073,6 +9074,35 @@ mod tests {
         assert!(text.contains("toolport_status"));
         // No phantom "Top match" when there's nothing to call.
         assert!(!text.contains("Top match:"));
+    }
+
+    #[test]
+    fn search_empty_scope_does_not_claim_fallback_candidates_exist() {
+        let reg = Registry::default();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {
+                "name": "toolport_search_tools",
+                "arguments": { "query": "charges", "server": "missing" }
+            }
+        });
+        let resp = handle_request(
+            &req,
+            &reg,
+            &router(),
+            &catalog(),
+            true,
+            None,
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("No tools matched"));
+        assert!(!text.contains("fallback candidate"));
+        assert!(!text.contains("inspect their descriptions"));
     }
 
     const ESCALATION_MARK: &str = "keep getting the same top tool";

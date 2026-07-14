@@ -92,6 +92,8 @@ export interface SearchTrace {
   names: string[];
   returned: number;
   total: number;
+  /** Full count of appended recovery candidates. Absent on older traces. */
+  fallbacks?: number;
   /** Tool-definition tokens the returned schemas cost this turn (≈). */
   returnedTokens: number;
   /** Tool-definition tokens advertising the whole (scoped) catalog would cost (≈). */
