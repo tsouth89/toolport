@@ -8115,7 +8115,7 @@ mod tests {
                     "arguments": {
                         "cursor": cursor,
                         "offset": offset,
-                        "len": body.len() - offset,
+                        "len":  usize::MAX,
                     }
                 }
             });
@@ -8140,6 +8140,7 @@ mod tests {
                 .unwrap();
 
             assert!(fetched.starts_with(&body[offset..]));
+            
             assert!(fetched.contains("[Toolport: end of result"));
         }
 
