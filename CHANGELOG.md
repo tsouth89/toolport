@@ -6,6 +6,14 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+### Improved
+
+**Lazy discovery recovers from weak and zero-match searches.** The gateway now detects
+low-confidence lexical or hybrid rankings, preserves the ranked tools, and adds a bounded,
+server-diverse fallback menu from the caller's scoped catalog. Exact searches stay compact,
+and no-match responses explain how to enumerate every tool on a known server without adding
+another default meta-tool.
+
 ## [1.8.0] - 2026-07-13
 
 The safer-control release: per-client discovery modes and broader API coverage, backed by

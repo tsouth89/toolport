@@ -117,6 +117,8 @@ export interface SearchTraceRank {
   matched: string[];
   /** A pinned prerequisite prepended ahead of the ranked matches, not a query hit. */
   pinned: boolean;
+  /** A zero-score recovery candidate appended because the direct search was weak. */
+  fallback?: boolean;
 }
 
 /** One exposed tool's verifiable identity: the model-visible alias joined back to its

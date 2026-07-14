@@ -56,9 +56,9 @@ fn cap_chars(s: &str, max: usize) -> String {
 /// difference is the tool-definition context lazy discovery kept out on this turn.
 ///
 /// `ranking` explains why each returned tool surfaced: one entry per result (in result
-/// order) of `{ name, rank, matched, pinned }`, so the Discovery panel can answer "why
-/// this tool" not just "which tools". `mode` is the ranker the search used (`lexical`
-/// or `semantic`). Both are additive; older traces have neither.
+/// order) of `{ name, rank, matched, pinned, fallback }`, so the Discovery panel can
+/// answer "why this tool" not just "which tools". `mode` is the ranker the search used
+/// (`lexical` or `semantic`). Both are additive; older traces have neither.
 #[allow(clippy::too_many_arguments)]
 pub fn record(
     client: Option<&str>,

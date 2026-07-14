@@ -172,7 +172,9 @@ fn search_tool_def() -> Value {
             that server's tools. If the result says more tools matched than were shown, narrow with \
             `server` or raise `limit` before concluding a capability is missing - many servers expose \
             a generic API bridge (a single write/create tool), so search by capability, not just an \
-            exact operation name. toolport_status lists every server prefix and its tool count. Large \
+            exact operation name. toolport_status lists every server prefix and its tool count. \
+            Low-confidence searches automatically include a bounded set of fallback candidates; if \
+            nothing matches directly, the response explains how to enumerate a known server. Large \
             input schemas may be omitted from broad results (flagged schemaOmitted) to keep responses \
             small - search a tool's exact name to get its full schema.",
         "inputSchema": {
@@ -730,6 +732,27 @@ const DESC_W: f64 = 1.0;
 /// over a longer sibling that merely contains the same words. Small: it only tips
 /// near-ties toward the more specific tool, never overrides a stronger keyword signal.
 const NAME_SPECIFICITY_W: f64 = 0.35;
+/// Below these normalized scores the ranker has too little evidence to hide the
+/// rest of the scoped catalog. Hybrid scores are already normalized to 0..=1;
+/// lexical scores are normalized against an ideal all-name-hit score below.
+const LOW_CONFIDENCE_LEXICAL_RATIO: f64 = 0.55;
+const LOW_CONFIDENCE_HYBRID_SCORE: f64 = 0.45;
+/// A weak search should give the calling model enough descriptions to recover,
+/// while staying far below the normal 25-result/default context budget.
+const LOW_CONFIDENCE_MIN_RESULTS: usize = 12;
+
+struct SearchOutcome {
+    matches: Vec<Value>,
+    /// Number of candidates with a positive lexical or hybrid score.
+    total: usize,
+    /// The active ranker did not have enough evidence to treat its top result as
+    /// authoritative. The handler uses this to avoid the "call it now" directive.
+    low_confidence: bool,
+    /// Number of zero-score catalog candidates appended as a recovery menu.
+    broadened: usize,
+    /// Direct ranked results returned before recovery candidates were appended.
+    direct_returned: usize,
+}
 
 /// Split a camelCase/PascalCase word into lowercased pieces ("listProjects" -> [list, projects]).
 fn split_camel(word: &str) -> Vec<String> {
@@ -946,7 +969,8 @@ fn search_catalog(
     server: Option<&str>,
     limit: usize,
 ) -> (Vec<Value>, usize) {
-    search_catalog_with(cached, query, server, limit, None)
+    let outcome = search_catalog_with(cached, query, server, limit, None);
+    (outcome.matches, outcome.total)
 }
 
 /// As `search_catalog`, with optional semantic re-ranking. When `sem` is None or
@@ -958,7 +982,7 @@ fn search_catalog_with(
     server: Option<&str>,
     limit: usize,
     sem: Option<&semantic::SemanticConfig>,
-) -> (Vec<Value>, usize) {
+) -> SearchOutcome {
     use std::collections::HashMap;
     let q = query.to_lowercase();
     let terms: Vec<&str> = q.split_whitespace().filter(|t| !t.is_empty()).collect();
@@ -976,10 +1000,12 @@ fn search_catalog_with(
         .collect();
 
     // Select an ordered set of tool refs (ranking happens here; projection below).
-    let (selected, total): (Vec<&Value>, usize) = if terms.is_empty() {
+    let (selected, total, low_confidence, broadened, direct_returned) = if terms.is_empty() {
         // Empty query: list the pool. With `server` set this enumerates that server.
         let total = pool.len();
-        (pool.into_iter().take(limit).collect(), total)
+        let selected: Vec<&Value> = pool.iter().take(limit).copied().collect();
+        let direct_returned = selected.len();
+        (selected, total, false, 0, direct_returned)
     } else {
         // Tokenize each tool and compute document frequencies, so IDF can weight a
         // rare token (e.g. "products", "teams") far above a common one (e.g. "list",
@@ -1046,9 +1072,9 @@ fn search_catalog_with(
                     let explained = name_set
                         .iter()
                         .filter(|nt| {
-                            q_tokens.iter().any(|qt| {
-                                qt == *nt || synonym_group(qt).contains(&nt.as_str())
-                            })
+                            q_tokens
+                                .iter()
+                                .any(|qt| qt == *nt || synonym_group(qt).contains(&nt.as_str()))
                         })
                         .count();
                     let coverage = explained as f64 / name_set.len() as f64;
@@ -1060,7 +1086,9 @@ fn search_catalog_with(
 
         // Blended (semantic) ranking when configured and embeddings succeed; else
         // pure lexical (positive scores only, highest first), identical to before.
-        let ranked: Vec<(f64, &Value)> = semantic_rerank(sem, query, &lex).unwrap_or_else(|| {
+        let semantic_ranked = semantic_rerank(sem, query, &lex);
+        let used_semantic = semantic_ranked.is_some();
+        let ranked: Vec<(f64, &Value)> = semantic_ranked.unwrap_or_else(|| {
             let mut s: Vec<(f64, &Value)> =
                 lex.iter().filter(|(sc, _)| *sc > 0.0).cloned().collect();
             s.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -1068,15 +1096,43 @@ fn search_catalog_with(
         });
         let total = ranked.len();
 
+        let low_confidence = match ranked.first() {
+            None => true,
+            Some((top_score, _)) if used_semantic => *top_score < LOW_CONFIDENCE_HYBRID_SCORE,
+            Some((top_score, _)) => {
+                // Normalize the raw lexical score against an ideal result where
+                // every meaningful query token hits a tool name. Missing query
+                // terms still contribute to the denominator, which is exactly the
+                // weak-evidence case that should broaden.
+                let ideal_idf: f64 = q_tokens
+                    .iter()
+                    .map(|qt| {
+                        let matched_idf = std::iter::once(qt.as_str())
+                            .chain(synonym_group(qt).iter().copied())
+                            .filter(|candidate| df.contains_key(candidate))
+                            .map(idf)
+                            .fold(0.0_f64, f64::max);
+                        if matched_idf > 0.0 {
+                            matched_idf
+                        } else {
+                            idf(qt)
+                        }
+                    })
+                    .sum();
+                let ideal = NAME_W * ideal_idf * (1.0 + NAME_SPECIFICITY_W);
+                ideal <= f64::EPSILON || *top_score / ideal < LOW_CONFIDENCE_LEXICAL_RATIO
+            }
+        };
+
         // Scoped to a server: take the top `limit`. Unscoped: cap per server so one
         // server with many matching tools can't crowd the others out of the window.
-        let selected: Vec<&Value> = if server_filter.is_some() {
-            ranked.into_iter().take(limit).map(|(_, t)| t).collect()
+        let mut selected: Vec<&Value> = if server_filter.is_some() {
+            ranked.iter().take(limit).map(|(_, t)| *t).collect()
         } else {
             let cap = (limit / 3).max(4);
             let mut per: HashMap<String, usize> = HashMap::new();
             let mut out = Vec::new();
-            for (_, t) in ranked {
+            for (_, t) in &ranked {
                 if out.len() >= limit {
                     break;
                 }
@@ -1085,14 +1141,61 @@ fn search_catalog_with(
                     continue;
                 }
                 *c += 1;
-                out.push(t);
+                out.push(*t);
             }
             out
         };
-        (selected, total)
+        let direct_returned = selected.len();
+
+        // A weak score should not make every zero-score candidate invisible. Add
+        // a small recovery menu from the caller's already-scoped pool, preserving
+        // ranked order and the same cross-server diversity cap used above.
+        let target = limit.min(LOW_CONFIDENCE_MIN_RESULTS).min(pool.len());
+        if low_confidence && selected.len() < target {
+            let mut seen: std::collections::HashSet<String> = selected
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+                .collect();
+            let visible_servers = pool
+                .iter()
+                .map(|tool| tool_prefix(tool))
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                .max(1);
+            let cap = target.div_ceil(visible_servers).max(4);
+            let mut per: HashMap<String, usize> = HashMap::new();
+            for tool in &selected {
+                *per.entry(tool_prefix(tool)).or_insert(0) += 1;
+            }
+            for tool in &pool {
+                if selected.len() >= target {
+                    break;
+                }
+                let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+                if !seen.insert(name.to_string()) {
+                    continue;
+                }
+                if server_filter.is_none() {
+                    let count = per.entry(tool_prefix(tool)).or_insert(0);
+                    if *count >= cap {
+                        continue;
+                    }
+                    *count += 1;
+                }
+                selected.push(*tool);
+            }
+        }
+        let broadened = selected.len().saturating_sub(direct_returned);
+        (selected, total, low_confidence, broadened, direct_returned)
     };
 
-    (project_budgeted(&selected), total)
+    SearchOutcome {
+        matches: project_budgeted(&selected),
+        total,
+        low_confidence,
+        broadened,
+        direct_returned,
+    }
 }
 
 /// Blend embedding similarity into the lexical scores. Returns None when semantic
@@ -2337,8 +2440,12 @@ fn handle_request_with_cancel(
                     s.model.clone(),
                     s.blend,
                 );
-                let (mut matches, total) =
-                    search_catalog_with(source, query, server, limit, Some(&sem_cfg));
+                let outcome = search_catalog_with(source, query, server, limit, Some(&sem_cfg));
+                let mut matches = outcome.matches;
+                let total = outcome.total;
+                let low_confidence = outcome.low_confidence;
+                let broadened = outcome.broadened;
+                let direct_returned = outcome.direct_returned;
                 let scope = server
                     .filter(|s| !s.trim().is_empty())
                     .map(|s| format!(" on \"{s}\""))
@@ -2364,7 +2471,10 @@ fn handle_request_with_cancel(
                     }
                     s.repeats
                 };
-                let escalate = repeats >= SEARCH_REPEAT_LIMIT && !matches.is_empty();
+                // Never force a weak match into a call. Repeated low-confidence
+                // searches need recovery guidance, not the anti-thrash shortcut.
+                let escalate =
+                    repeats >= SEARCH_REPEAT_LIMIT && !matches.is_empty() && !low_confidence;
                 if escalate {
                     matches.truncate(1); // only the best match, no distractions
                 }
@@ -2404,7 +2514,7 @@ fn handle_request_with_cancel(
                 }
                 // Tell the agent when results were truncated, so a buried tool isn't
                 // mistaken for a missing capability.
-                let more = if total > matches.len() && !escalate {
+                let more = if total > direct_returned && !escalate {
                     format!(
                         " Showing {} of {}; narrow with the `server` filter (e.g. server: \
                          \"{}\") or raise `limit` (up to 200) before concluding a capability \
@@ -2438,11 +2548,37 @@ fn handle_request_with_cancel(
                 } else {
                     String::new()
                 };
-                let lead = if matches.is_empty() {
+                let exhaustive_hint = match server.filter(|s| !s.trim().is_empty()) {
+                    Some(server) => format!(
+                        "For an exhaustive listing on this server, search again with an empty query \
+                         and server \"{server}\"."
+                    ),
+                    None => "If you know the target server, search again with an empty query and its \
+                             `server` prefix; otherwise call toolport_status to see the available prefixes."
+                        .to_string(),
+                };
+                let lead = if low_confidence && total == 0 {
                     format!(
-                        "No tools matched{scope}. Try different keywords, or call toolport_status to \
-                         see the connected servers and their tool counts."
+                        "No direct tools matched{scope}. Showing {} bounded fallback candidate(s) \
+                         from the caller's scoped catalog so you can inspect their descriptions; do \
+                         not assume the first candidate is correct. {exhaustive_hint}{pin_note}{schema_note}",
+                        matches.len().saturating_sub(pins_added)
                     )
+                } else if low_confidence {
+                    let broad_note = if broadened > 0 {
+                        format!(" Added {broadened} fallback candidate(s) from the scoped catalog.")
+                    } else {
+                        " The direct result set was already broad enough for inspection."
+                            .to_string()
+                    };
+                    format!(
+                        "Search confidence is low{scope}: found {total} direct match(es) and returned \
+                         {} candidate(s).{broad_note} Inspect the descriptions before choosing a tool; \
+                         do not assume the first candidate is correct. {exhaustive_hint}{pin_note}{more}{schema_note}",
+                        matches.len().saturating_sub(pins_added)
+                    )
+                } else if matches.is_empty() {
+                    format!("No tools matched{scope}. {exhaustive_hint}")
                 } else if escalate {
                     // Behavioral loop-breaker: the model keeps re-searching the same need
                     // and landing on the same tool. Give it that one tool and a command,
@@ -2488,6 +2624,8 @@ fn handle_request_with_cancel(
                             "rank": i + 1,
                             "matched": explain_match(query, m),
                             "pinned": i < pins_added,
+                            "fallback": i >= pins_added + direct_returned
+                                && i < pins_added + direct_returned + broadened,
                         })
                     })
                     .collect();
@@ -8610,6 +8748,64 @@ mod tests {
         assert_eq!(total, 2);
     }
 
+    #[test]
+    fn high_confidence_name_match_stays_compact() {
+        let cat = vec![
+            json!({ "name": "mail__send_email", "description": "Send a message", "inputSchema": {} }),
+            json!({ "name": "calendar__list_events", "description": "Upcoming meetings", "inputSchema": {} }),
+            json!({ "name": "billing__get_invoice", "description": "Read an invoice", "inputSchema": {} }),
+        ];
+        let outcome = search_catalog_with(&cat, "send email", None, 25, None);
+        assert!(!outcome.low_confidence);
+        assert_eq!(outcome.total, 1);
+        assert_eq!(outcome.matches.len(), 1);
+        assert_eq!(outcome.broadened, 0);
+        assert_eq!(outcome.matches[0]["name"], "mail__send_email");
+    }
+
+    #[test]
+    fn weak_description_match_broadens_from_scoped_catalog() {
+        let cat = vec![
+            json!({ "name": "homes__lookup", "description": "Look up property records", "inputSchema": {} }),
+            json!({ "name": "maps__geocode", "description": "Resolve an address", "inputSchema": {} }),
+            json!({ "name": "tax__assessment", "description": "Read assessed values", "inputSchema": {} }),
+            json!({ "name": "photos__street_view", "description": "Show street imagery", "inputSchema": {} }),
+        ];
+        let outcome = search_catalog_with(&cat, "property details", None, 25, None);
+        assert!(outcome.low_confidence);
+        assert_eq!(outcome.total, 1, "only the description hit ranks directly");
+        assert_eq!(outcome.direct_returned, 1);
+        assert_eq!(outcome.broadened, 3);
+        assert_eq!(outcome.matches.len(), 4);
+        assert_eq!(outcome.matches[0]["name"], "homes__lookup");
+    }
+
+    #[test]
+    fn no_direct_match_returns_bounded_server_diverse_fallbacks() {
+        let mut cat = Vec::new();
+        for server in ["alpha", "beta", "gamma"] {
+            for i in 0..10 {
+                cat.push(json!({
+                    "name": format!("{server}__tool_{i}"),
+                    "description": format!("Capability {i}"),
+                    "inputSchema": {}
+                }));
+            }
+        }
+        let outcome = search_catalog_with(&cat, "astronaut nutrition", None, 25, None);
+        assert!(outcome.low_confidence);
+        assert_eq!(outcome.total, 0);
+        assert_eq!(outcome.direct_returned, 0);
+        assert_eq!(outcome.broadened, LOW_CONFIDENCE_MIN_RESULTS);
+        assert_eq!(outcome.matches.len(), LOW_CONFIDENCE_MIN_RESULTS);
+        let prefixes: std::collections::HashSet<_> = outcome
+            .matches
+            .iter()
+            .map(tool_prefix)
+            .collect();
+        assert_eq!(prefixes.len(), 3, "fallbacks should not come from one server");
+    }
+
     /// Data-driven recall measurement (not a pass/fail unit test): set
     /// STRIPE_TOOLS_JSON + STRIPE_INTENTS_JSON to fixture paths and run with
     /// `--nocapture` to print recall@k of the REAL lexical ranker over a generated
@@ -8851,7 +9047,7 @@ mod tests {
     }
 
     #[test]
-    fn search_no_matches_guides_without_pushing_more_search() {
+    fn search_no_matches_explains_the_exhaustive_escape_hatch() {
         let reg = Registry::default();
         let req = json!({
             "jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -8871,7 +9067,10 @@ mod tests {
         )
         .unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("No tools matched"));
+        assert!(text.contains("No direct tools matched"));
+        assert!(text.contains("bounded fallback candidate"));
+        assert!(text.contains("empty query"));
+        assert!(text.contains("toolport_status"));
         // No phantom "Top match" when there's nothing to call.
         assert!(!text.contains("Top match:"));
     }
@@ -8947,6 +9146,19 @@ mod tests {
             "non-search action should reset the streak"
         );
         assert!(text.contains("Top match:"));
+    }
+
+    #[test]
+    fn repeated_low_confidence_search_never_forces_a_weak_top_result() {
+        let reg = Registry::default();
+        let guard = SearchGuard::default();
+
+        for _ in 0..4 {
+            let text = search_text(&reg, &guard, "email details");
+            assert!(text.contains("Search confidence is low"));
+            assert!(!text.contains(ESCALATION_MARK));
+            assert!(!text.contains("call it now"));
+        }
     }
 
     #[test]
