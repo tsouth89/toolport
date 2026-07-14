@@ -3655,13 +3655,20 @@ struct McpSession {
     /// session. `None` is used only by direct unit-test callers.
     owner: Option<McpSessionOwner>,
     last_seen: Mutex<Instant>,
-    outbound: Mutex<VecDeque<String>>,
+    outbound: Mutex<VecDeque<McpOutboundMessage>>,
     closed: AtomicBool,
     listener_active: AtomicBool,
     wait: (Mutex<()>, Condvar),
     client_upstream: Mutex<ClientUpstreamCaps>,
     upstream_pending: Mutex<HashMap<String, std::sync::mpsc::Sender<Value>>>,
     next_upstream_id: AtomicI64,
+}
+
+struct McpOutboundMessage {
+    json: String,
+    /// Present for server-to-client JSON-RPC requests so a timed-out request can
+    /// be removed before a later SSE listener accidentally receives it.
+    request_id: Option<String>,
 }
 
 impl McpSession {
@@ -3707,7 +3714,13 @@ impl McpSession {
                 return Err(e.to_string());
             }
         };
-        self.push_message(json_str);
+        if !self.push_message(json_str, Some(id_key.clone())) {
+            self.upstream_pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id_key);
+            return Err("upstream MCP client outbound queue is full".to_string());
+        }
         let resp = match rx.recv_timeout(timeout) {
             Ok(v) => v,
             Err(_) => {
@@ -3715,6 +3728,7 @@ impl McpSession {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&id_key);
+                self.remove_queued_request(&id_key);
                 return Err("upstream MCP client did not answer".to_string());
             }
         };
@@ -3768,12 +3782,25 @@ impl McpSession {
         self.wait.1.notify_all();
     }
 
-    fn push_message(&self, json: String) {
+    fn push_message(&self, json: String, request_id: Option<String>) -> bool {
+        let mut outbound = self
+            .outbound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if outbound.len() >= MCP_SESSION_OUTBOUND_MAX {
+            return false;
+        }
+        outbound.push_back(McpOutboundMessage { json, request_id });
+        drop(outbound);
+        self.wait.1.notify_all();
+        true
+    }
+
+    fn remove_queued_request(&self, request_id: &str) {
         self.outbound
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(json);
-        self.wait.1.notify_all();
+            .retain(|msg| msg.request_id.as_deref() != Some(request_id));
     }
 
     fn next_sse_chunk(&self, timeout: Duration) -> Option<Vec<u8>> {
@@ -3792,7 +3819,7 @@ impl McpSession {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .pop_front()
             {
-                return Some(mcp_sse_body(&msg).into_bytes());
+                return Some(mcp_sse_body(&msg.json).into_bytes());
             }
             let result = self
                 .wait
@@ -3858,6 +3885,8 @@ impl Drop for McpSseReader {
 const MCP_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Upper bound on concurrent MCP sessions to avoid unbounded memory growth.
 const MCP_SESSION_MAX: usize = 4096;
+/// Maximum undelivered server-to-client messages retained by one MCP session.
+const MCP_SESSION_OUTBOUND_MAX: usize = 256;
 /// SSE comment frames on idle `GET /mcp` listen streams.
 const MCP_SSE_KEEPALIVE: Duration = Duration::from_secs(30);
 
@@ -3897,8 +3926,11 @@ fn mcp_push_server_message(state: &GatewayState, session_id: &str, msg: &Value) 
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(sess) = sessions.get(session_id) {
-        sess.push_message(json);
-        true
+        let queued = sess.push_message(json, request_id_key(msg));
+        if !queued {
+            eprintln!("toolport: MCP session outbound queue full; server message dropped");
+        }
+        queued
     } else {
         false
     }
@@ -7285,6 +7317,48 @@ mod tests {
         let chunk = String::from_utf8_lossy(&buf[..n]);
         assert!(chunk.contains("event: message"));
         assert!(chunk.contains("tools/list_changed"));
+    }
+
+    #[test]
+    fn mcp_session_outbound_queue_is_bounded() {
+        let session = McpSession::new(None);
+        for i in 0..MCP_SESSION_OUTBOUND_MAX {
+            assert!(session.push_message(
+                json!({"jsonrpc":"2.0","method":"notifications/test","params":{"i":i}})
+                    .to_string(),
+                None,
+            ));
+        }
+        assert!(!session.push_message(
+            json!({"jsonrpc":"2.0","method":"notifications/overflow"}).to_string(),
+            None,
+        ));
+        assert_eq!(session.outbound.lock().unwrap().len(), MCP_SESSION_OUTBOUND_MAX);
+    }
+
+    #[test]
+    fn mcp_upstream_timeout_drops_undelivered_request() {
+        let session = McpSession::new(None);
+        let err = session
+            .upstream_call_timeout("roots/list", json!({}), Duration::ZERO)
+            .unwrap_err();
+        assert_eq!(err, "upstream MCP client did not answer");
+        assert!(session.outbound.lock().unwrap().is_empty());
+        assert!(session.upstream_pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mcp_upstream_call_fails_immediately_when_queue_is_full() {
+        let session = McpSession::new(None);
+        for _ in 0..MCP_SESSION_OUTBOUND_MAX {
+            assert!(session.push_message("queued".to_string(), None));
+        }
+        let err = session
+            .upstream_call_timeout("roots/list", json!({}), Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(err, "upstream MCP client outbound queue is full");
+        assert!(session.upstream_pending.lock().unwrap().is_empty());
+        assert_eq!(session.outbound.lock().unwrap().len(), MCP_SESSION_OUTBOUND_MAX);
     }
 
     #[test]
