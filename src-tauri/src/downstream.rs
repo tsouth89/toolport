@@ -1565,15 +1565,19 @@ fn screen_resolved_addrs(
     Ok(())
 }
 
-/// A ureq agent for remote MCP HTTP calls, with the SSRF resolver installed. Because
-/// ureq resolves through this resolver immediately before connecting, screening here
-/// validates the exact address dialed - closing the resolve-then-connect (DNS-rebind)
-/// TOCTOU a separate pre-check has. `block_private` extends the screen to internal
-/// addresses for untrusted-provenance servers.
-fn guarded_agent(block_private: bool) -> ureq::Agent {
+/// A ureq agent with the SSRF resolver installed. Because ureq resolves through this
+/// resolver immediately before connecting, screening here validates the exact address
+/// dialed - closing the resolve-then-connect (DNS-rebind) TOCTOU a separate pre-check
+/// has. `block_private` extends the screen to internal addresses for untrusted inputs.
+/// Redirects stay disabled so a credential-bearing request cannot be replayed to a
+/// different host. Callers choose a timeout appropriate for their operation.
+pub(crate) fn guarded_agent_with_timeout(
+    block_private: bool,
+    timeout: std::time::Duration,
+) -> ureq::Agent {
     use std::net::{SocketAddr, ToSocketAddrs};
     ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(timeout)
         // Never follow redirects. MCP Streamable HTTP doesn't need cross-host
         // redirects, and following one would let a malicious server bounce us to an
         // internal address (SSRF, e.g. cloud metadata) or replay our Authorization
@@ -1585,6 +1589,12 @@ fn guarded_agent(block_private: bool) -> ureq::Agent {
             Ok(addrs)
         })
         .build()
+}
+
+/// The remote MCP transport allows longer-lived calls than short auxiliary HTTP
+/// requests such as semantic embedding lookups.
+fn guarded_agent(block_private: bool) -> ureq::Agent {
+    guarded_agent_with_timeout(block_private, std::time::Duration::from_secs(30))
 }
 
 /// Talks to a remote MCP server over the Streamable HTTP transport: each request
