@@ -1792,6 +1792,7 @@ fn resolve_http_caller(
     reg: &Registry,
     env_token: Option<&str>,
     provided: Option<&str>,
+    allow_insecure_open: bool,
 ) -> Option<(Option<std::collections::HashSet<String>>, HttpCaller)> {
     let owner_scope = |allowed: &Option<std::collections::HashSet<String>>| {
         allowed.as_ref().map(|set| {
@@ -1848,8 +1849,9 @@ fn resolve_http_caller(
         ));
     }
 
-    // No auth configured at all: open, preserving the loopback default.
-    if env_token.is_none() && reg.http_clients.is_empty() {
+    // No auth configured at all: reachable only when startup explicitly allowed
+    // `--insecure-loopback`; keep the request resolver usable for that escape hatch.
+    if allow_insecure_open && env_token.is_none() && reg.http_clients.is_empty() {
         return Some((
             None,
             HttpCaller {
@@ -1871,13 +1873,14 @@ fn resolve_http_scope(
     reg: &Registry,
     env_token: Option<&str>,
     provided: Option<&str>,
+    allow_insecure_open: bool,
 ) -> Option<Option<std::collections::HashSet<String>>> {
-    resolve_http_caller(reg, env_token, provided).map(|(allowed, _)| allowed)
+    resolve_http_caller(reg, env_token, provided, allow_insecure_open).map(|(allowed, _)| allowed)
 }
 
 /// The audit label for a registered HTTP client's bearer: its `label`, or its `id`
 /// when the label is blank. `None` when the token isn't a registered client (legacy
-/// single-token, open loopback, or the local stdio app), so those calls stay
+/// single-token, explicitly insecure loopback, or the local stdio app), so those calls stay
 /// unattributed in the audit log rather than mislabeled. Pure, so it's unit-testable.
 #[cfg(test)]
 fn http_client_label(reg: &Registry, provided: Option<&str>) -> Option<String> {
@@ -5105,8 +5108,8 @@ fn handle_http(
 }
 
 /// Run the blocking HTTP/OpenAPI server. Binds 127.0.0.1 by default (local
-/// only); set `CONDUIT_HTTP_HOST=0.0.0.0` to expose it (unauthenticated, so
-/// only on a trusted network).
+/// only); set `CONDUIT_HTTP_HOST=0.0.0.0` to expose it. Every bind requires a
+/// bearer token unless loopback is explicitly started with `--insecure-loopback`.
 /// Cap on an inbound HTTP request body. Tool arguments are tiny; this just stops
 /// an unauthenticated caller from forcing the gateway to buffer a huge body.
 const MAX_HTTP_BODY: u64 = 4 * 1024 * 1024;
@@ -5156,6 +5159,18 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+const INSECURE_LOOPBACK_FLAG: &str = "--insecure-loopback";
+
+/// Whether the operator explicitly requested the local unauthenticated escape hatch.
+fn insecure_loopback_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == INSECURE_LOOPBACK_FLAG)
+}
+
+/// Startup admission policy. The escape hatch is never valid for a non-loopback bind.
+fn http_bind_is_authorized(loopback: bool, auth_configured: bool, insecure_loopback: bool) -> bool {
+    auth_configured || (loopback && insecure_loopback)
+}
+
 fn serve_http(state: GatewayState, port: u16) {
     let host = std::env::var("CONDUIT_HTTP_HOST")
         .ok()
@@ -5170,19 +5185,35 @@ fn serve_http(state: GatewayState, port: u16) {
         .filter(|t| !t.is_empty());
 
     let loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
-    // Fail closed: a non-loopback endpoint runs the user's credentials for
-    // anyone who can reach the port, so refuse to bind one without a token.
-    if !loopback && token.is_none() {
-        eprintln!(
-            "toolport-gateway: refusing to bind {host}:{port} without CONDUIT_HTTP_TOKEN. \
-             A non-loopback HTTP endpoint would be unauthenticated. Set a token, or bind 127.0.0.1."
-        );
+    let registered_clients = state
+        .registry
+        .lock()
+        .map(|reg| !reg.http_clients.is_empty())
+        .unwrap_or(false);
+    let auth_configured = token.is_some() || registered_clients;
+    let args: Vec<String> = std::env::args().collect();
+    let insecure_loopback = insecure_loopback_requested(&args);
+
+    if !http_bind_is_authorized(loopback, auth_configured, insecure_loopback) {
+        if loopback {
+            eprintln!(
+                "toolport-gateway: refusing to bind {host}:{port} without HTTP authentication. \
+                 Set CONDUIT_HTTP_TOKEN, configure a registered HTTP client, or explicitly pass \
+                 {INSECURE_LOOPBACK_FLAG} to accept unauthenticated local access."
+            );
+        } else {
+            eprintln!(
+                "toolport-gateway: refusing to bind {host}:{port} without HTTP authentication. \
+                 Set CONDUIT_HTTP_TOKEN or configure a registered HTTP client. \
+                 {INSECURE_LOOPBACK_FLAG} is valid only for loopback binds."
+            );
+        }
         std::process::exit(1);
     }
-    if token.is_none() {
+    if !auth_configured {
         eprintln!(
-            "toolport-gateway: WARNING - HTTP endpoint has no token; any local process (including a \
-             web page open in your browser) can call your tools. Set CONDUIT_HTTP_TOKEN to require auth."
+            "toolport-gateway: WARNING - {INSECURE_LOOPBACK_FLAG} enabled; any local process \
+             (including a web page open in your browser) can call your tools."
         );
     }
 
@@ -5199,9 +5230,22 @@ fn serve_http(state: GatewayState, port: u16) {
     // listener makes `http://localhost:<port>` fail even though 127.0.0.1 works.
     if host == "127.0.0.1" {
         if let Ok(server6) = tiny_http::Server::http(("::1", port)) {
-            let (state6, token6, search6, confirm6) =
-                (state.clone(), token.clone(), search.clone(), confirm.clone());
-            std::thread::spawn(move || serve_http_loop(server6, state6, token6, search6, confirm6));
+            let (state6, token6, search6, confirm6) = (
+                state.clone(),
+                token.clone(),
+                search.clone(),
+                confirm.clone(),
+            );
+            std::thread::spawn(move || {
+                serve_http_loop(
+                    server6,
+                    state6,
+                    token6,
+                    search6,
+                    confirm6,
+                    insecure_loopback,
+                )
+            });
             glog(&format!(
                 "HTTP/OpenAPI also listening on http://[::1]:{port}"
             ));
@@ -5217,12 +5261,19 @@ fn serve_http(state: GatewayState, port: u16) {
     };
     glog(&format!(
         "HTTP mode on http://{host}:{port} (OpenAPI + MCP /mcp, auth={})",
-        token.is_some()
+        auth_configured
     ));
     eprintln!(
         "toolport-gateway: HTTP on http://localhost:{port}  (OpenAPI /openapi.json, MCP POST /mcp)"
     );
-    serve_http_loop(server, state, token, search, confirm);
+    serve_http_loop(
+        server,
+        state,
+        token,
+        search,
+        confirm,
+        loopback && insecure_loopback,
+    );
 }
 
 /// The accept loop for one listener. Each accepted request is handed to its own
@@ -5340,6 +5391,7 @@ fn serve_http_loop(
     token: Option<String>,
     search: Arc<SearchGuard>,
     confirm: Arc<ConfirmGuard>,
+    allow_insecure_open: bool,
 ) {
     serve_http_loop_with_inflight(
         server,
@@ -5347,6 +5399,7 @@ fn serve_http_loop(
         token,
         search,
         confirm,
+        allow_insecure_open,
         Arc::new(AtomicUsize::new(0)),
     );
 }
@@ -5357,6 +5410,7 @@ fn serve_http_loop_with_inflight(
     token: Option<String>,
     search: Arc<SearchGuard>,
     confirm: Arc<ConfirmGuard>,
+    allow_insecure_open: bool,
     inflight: Arc<AtomicUsize>,
 ) {
     for request in server.incoming_requests() {
@@ -5372,7 +5426,14 @@ fn serve_http_loop_with_inflight(
         );
         std::thread::spawn(move || {
             let _permit = guard;
-            handle_connection(request, &state, &token, &search, &confirm);
+            handle_connection(
+                request,
+                &state,
+                &token,
+                &search,
+                &confirm,
+                allow_insecure_open,
+            );
         });
     }
 }
@@ -5401,6 +5462,7 @@ fn handle_connection(
     token: &Option<String>,
     search: &SearchGuard,
     confirm: &ConfirmGuard,
+    allow_insecure_open: bool,
 ) {
         let method = request.method().to_string().to_uppercase();
         let url = request.url().to_string();
@@ -5448,7 +5510,8 @@ fn handle_connection(
         // Auth + scope gate: resolve the bearer to (authorized, allowed-servers).
         // OPTIONS is the data-less preflight, always allowed and unscoped. Else the
         // registry decides: the legacy env token (full connected set), a registered
-        // HTTP client (its profile's servers), or open when no auth is configured.
+        // HTTP client (its profile's servers), or open only when startup explicitly
+        // accepted `--insecure-loopback`.
         // A bad/missing token is rejected before we read the body or route.
         let provided = request
             .headers()
@@ -5466,7 +5529,12 @@ fn handle_connection(
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             // Resolve authorization, routing scope, audit attribution, and MCP
             // session ownership from one token lookup and one effective allow-set.
-            match resolve_http_caller(&reg, token.as_deref(), provided_tok) {
+            match resolve_http_caller(
+                &reg,
+                token.as_deref(),
+                provided_tok,
+                allow_insecure_open,
+            ) {
                 Some((allowed, resolved_caller)) => {
                     caller = Some(resolved_caller);
                     Some(allowed)
@@ -6265,7 +6333,7 @@ mod tests {
         let port = server.server_addr().to_ip().unwrap().port();
         let search = Arc::new(SearchGuard::default());
         let confirm = Arc::new(ConfirmGuard::new());
-        std::thread::spawn(move || serve_http_loop(server, state, None, search, confirm));
+        std::thread::spawn(move || serve_http_loop(server, state, None, search, confirm, true));
         std::thread::sleep(Duration::from_millis(50)); // let the listener come up
 
         // Kick off the slow (blocking) call on its own thread, then let it get parked
@@ -6344,6 +6412,7 @@ mod tests {
                 None,
                 search,
                 confirm,
+                true,
                 listener_inflight,
             )
         });
@@ -6508,6 +6577,31 @@ mod tests {
     }
 
     #[test]
+    fn insecure_loopback_requires_the_exact_cli_flag() {
+        let args = vec![
+            "toolport-gateway".to_string(),
+            "--http".to_string(),
+            "8765".to_string(),
+            INSECURE_LOOPBACK_FLAG.to_string(),
+        ];
+        assert!(insecure_loopback_requested(&args));
+        assert!(!insecure_loopback_requested(&[
+            "toolport-gateway".to_string(),
+            "--insecure".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn http_bind_requires_auth_except_for_explicit_loopback_escape_hatch() {
+        assert!(http_bind_is_authorized(true, true, false));
+        assert!(http_bind_is_authorized(false, true, false));
+        assert!(http_bind_is_authorized(true, false, true));
+        assert!(!http_bind_is_authorized(true, false, false));
+        assert!(!http_bind_is_authorized(false, false, false));
+        assert!(!http_bind_is_authorized(false, false, true));
+    }
+
+    #[test]
     fn server_of_tool_extracts_prefix() {
         assert_eq!(server_of_tool("vercel__deploy"), "vercel");
         assert_eq!(server_of_tool("resend__send_email"), "resend");
@@ -6611,14 +6705,15 @@ mod tests {
     #[test]
     fn resolve_http_scope_auth_and_scope_policy() {
         let mut reg = Registry::default();
-        // No auth configured at all -> open, unscoped.
-        assert_eq!(resolve_http_scope(&reg, None, None), Some(None));
+        // No auth configured at all -> open only under the explicit escape hatch.
+        assert_eq!(resolve_http_scope(&reg, None, None, true), Some(None));
+        assert_eq!(resolve_http_scope(&reg, None, None, false), None);
         // Legacy env token: exact match -> unscoped; mismatch -> rejected.
         assert_eq!(
-            resolve_http_scope(&reg, Some("envtok"), Some("envtok")),
+            resolve_http_scope(&reg, Some("envtok"), Some("envtok"), false),
             Some(None)
         );
-        assert!(resolve_http_scope(&reg, Some("envtok"), Some("nope")).is_none());
+        assert!(resolve_http_scope(&reg, Some("envtok"), Some("nope"), false).is_none());
         // A registered client with an empty profile is authorized but unscoped.
         reg.http_clients.push(registry::HttpClient {
             id: "c1".into(),
@@ -6626,11 +6721,14 @@ mod tests {
             token_sha256: registry::sha256_hex("fulltok"),
             profile: String::new(),
         });
-        assert_eq!(resolve_http_scope(&reg, None, Some("fulltok")), Some(None));
+        assert_eq!(
+            resolve_http_scope(&reg, None, Some("fulltok"), false),
+            Some(None)
+        );
         // Once any client is registered, an unknown/absent bearer is rejected
         // (the open default no longer applies).
-        assert!(resolve_http_scope(&reg, None, Some("unknown")).is_none());
-        assert!(resolve_http_scope(&reg, None, None).is_none());
+        assert!(resolve_http_scope(&reg, None, Some("unknown"), false).is_none());
+        assert!(resolve_http_scope(&reg, None, None, false).is_none());
         // A client scoped to a non-empty profile resolves to a (possibly empty)
         // allow-set; exact membership is covered by enabled_servers_for tests.
         reg.http_clients.push(registry::HttpClient {
@@ -6640,9 +6738,16 @@ mod tests {
             profile: "Default".into(),
         });
         assert!(matches!(
-            resolve_http_scope(&reg, None, Some("scopedtok")),
+            resolve_http_scope(&reg, None, Some("scopedtok"), false),
             Some(Some(_))
         ));
+
+        // Removing the last registered client while the gateway is live must not
+        // turn an authenticated listener into an open one. Only immutable startup
+        // policy from `--insecure-loopback` enables the fallback.
+        reg.http_clients.clear();
+        assert!(resolve_http_scope(&reg, None, None, false).is_none());
+        assert_eq!(resolve_http_scope(&reg, None, None, true), Some(None));
     }
 
     #[test]
@@ -6689,8 +6794,8 @@ mod tests {
             profile: String::new(),
         });
 
-        let (_, first) = resolve_http_caller(&reg, None, Some("tok1")).unwrap();
-        let (_, second) = resolve_http_caller(&reg, None, Some("tok2")).unwrap();
+        let (_, first) = resolve_http_caller(&reg, None, Some("tok1"), false).unwrap();
+        let (_, second) = resolve_http_caller(&reg, None, Some("tok2"), false).unwrap();
         assert_eq!(first.audit_label.as_deref(), Some("Open WebUI"));
         assert_eq!(second.audit_label.as_deref(), Some("Open WebUI"));
         assert_ne!(

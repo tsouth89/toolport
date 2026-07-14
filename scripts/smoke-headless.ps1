@@ -45,7 +45,7 @@ $p1 = Start-Process -FilePath $bin -ArgumentList "--http", "18765" -PassThru -Wi
 Start-Sleep -Seconds 2
 if ($p1.HasExited -and $p1.ExitCode -ne 0) {
     $err = Get-Content (Join-Path $smokeDir "t1.err") -Raw -ErrorAction SilentlyContinue
-    if ($err -match "refusing to bind.*without CONDUIT_HTTP_TOKEN") {
+    if ($err -match "refusing to bind.*without HTTP authentication") {
         Pass "non-loopback without token refuses start (exit $($p1.ExitCode))"
     } else {
         Fail "non-loopback without token exited $($p1.ExitCode) but message unexpected: $err"
@@ -55,7 +55,35 @@ if ($p1.HasExited -and $p1.ExitCode -ne 0) {
     Fail "non-loopback without token should refuse start"
 }
 
-# --- Start gateway for tests 2-3 ---
+# --- Test 2: loopback without auth also refuses start ---
+$env:CONDUIT_HTTP_HOST = "127.0.0.1"
+$p2 = Start-Process -FilePath $bin -ArgumentList "--http", "18764" -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $smokeDir "t2.err")
+Start-Sleep -Seconds 2
+if ($p2.HasExited -and $p2.ExitCode -ne 0) {
+    $err = Get-Content (Join-Path $smokeDir "t2.err") -Raw -ErrorAction SilentlyContinue
+    if ($err -match "refusing to bind.*without HTTP authentication") {
+        Pass "loopback without auth refuses start (exit $($p2.ExitCode))"
+    } else {
+        Fail "loopback without auth exited $($p2.ExitCode) but message unexpected: $err"
+    }
+} else {
+    if (-not $p2.HasExited) { Stop-Process -Id $p2.Id -Force -ErrorAction SilentlyContinue }
+    Fail "loopback without auth should refuse start"
+}
+
+# --- Test 3: explicit insecure loopback escape hatch works locally ---
+$p3 = Start-Process -FilePath $bin -ArgumentList "--http", "18764", "--insecure-loopback" -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $smokeDir "t3.err")
+Start-Sleep -Seconds 2
+if ($p3.HasExited) {
+    $err = Get-Content (Join-Path $smokeDir "t3.err") -Raw -ErrorAction SilentlyContinue
+    Fail "explicit insecure loopback exited unexpectedly: $err"
+} else {
+    $code = curl.exe -s -o NUL -w "%{http_code}" "http://127.0.0.1:18764/"
+    if ($code -eq "200") { Pass "explicit insecure loopback starts locally" } else { Fail "explicit insecure loopback returned $code" }
+    Stop-Process -Id $p3.Id -Force -ErrorAction SilentlyContinue
+}
+
+# --- Start authenticated gateway for tests 4-5 ---
 $env:CONDUIT_HTTP_HOST = "127.0.0.1"
 $env:CONDUIT_HTTP_TOKEN = $token
 $gw = Start-Process -FilePath $bin -ArgumentList "--http", "$port" -PassThru -WindowStyle Hidden
@@ -64,14 +92,14 @@ Set-Content -Path (Join-Path $smokeDir "gateway.pid") -Value $gatewayPid
 Start-Sleep -Seconds 2
 
 try {
-    # --- Test 2: auth ---
+    # --- Test 4: auth ---
     $codeNoAuth = curl.exe -s -o NUL -w "%{http_code}" "http://127.0.0.1:${port}/"
     if ($codeNoAuth -eq "401") { Pass "GET / without auth returns 401" } else { Fail "GET / without auth returned $codeNoAuth (expected 401)" }
 
     $codeAuth = curl.exe -s -o NUL -w "%{http_code}" -H "Authorization: Bearer $token" "http://127.0.0.1:${port}/"
     if ($codeAuth -eq "200") { Pass "GET / with bearer returns 200" } else { Fail "GET / with bearer returned $codeAuth (expected 200)" }
 
-    # --- Test 3: MCP handshake ---
+    # --- Test 5: MCP handshake ---
     $initReq = Join-Path $smokeDir "init-req.json"
     $initJson = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
     [System.IO.File]::WriteAllText($initReq, $initJson)

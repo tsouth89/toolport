@@ -13,8 +13,8 @@ Integrations -> "Open WebUI / HTTP endpoint"**, flip it on, and copy the **URL**
 gateway for you and shuts it down when you quit.
 
 > Prefer the command line? `toolport-gateway --http 8765` (or `CONDUIT_HTTP=8765`)
-> does the same thing; set `CONDUIT_HTTP_TOKEN=<your-token>` to require auth (the
-> app does this automatically). It serves an OpenAPI spec at
+> does the same thing when `CONDUIT_HTTP_TOKEN=<your-token>` is set (the app does
+> this automatically). It serves an OpenAPI spec at
 > `http://localhost:8765/openapi.json` and a POST endpoint per tool.
 
 **2. Add it to Open WebUI.** Settings -> Tools -> add an OpenAPI tool server
@@ -44,10 +44,10 @@ That's it. Ask for something one of your servers does ("list my recent emails",
 
 - **Local-only by default.** The gateway binds `127.0.0.1`, so only this machine
   can reach it. If you run Open WebUI in Docker, set `CONDUIT_HTTP_HOST=0.0.0.0`
-  and point the tool server at `http://host.docker.internal:8765`. A loopback bind
-  may run without a token, but a non-loopback bind (`0.0.0.0`) **requires**
-  `CONDUIT_HTTP_TOKEN` (the gateway refuses to bind non-loopback without one); still
-  only expose it on a trusted network.
+  and point the tool server at `http://host.docker.internal:8765`. Every bind requires
+  `CONDUIT_HTTP_TOKEN` or a registered HTTP client. For isolated local development,
+  `--insecure-loopback` explicitly permits an open loopback listener; it never bypasses
+  authentication for `0.0.0.0`. Only expose non-loopback HTTP on a trusted network.
 - **Lazy vs full discovery.** Lazy (default) keeps the model's context tiny and
   is best for capable models. For a weaker local model, `CONDUIT_DISCOVERY=full`
   scoped to a small profile exposes the tools directly (no search step) so the
