@@ -5295,9 +5295,43 @@ fn read_before_deadline(
     }
 }
 
-fn chunked_http_body_end(body: &[u8]) -> Result<Option<usize>, HttpIngressError> {
-    let mut offset = 0usize;
-    let mut decoded = 0usize;
+#[derive(Default)]
+struct ChunkedHttpBodyScan {
+    offset: usize,
+    decoded: usize,
+    trailer_start: Option<usize>,
+    trailer_search_from: usize,
+}
+
+fn chunked_http_trailer_end(body: &[u8], scan: &mut ChunkedHttpBodyScan) -> Option<usize> {
+    let trailer_start = scan.trailer_start?;
+    if body.get(trailer_start..trailer_start + 2) == Some(b"\r\n") {
+        return Some(trailer_start + 2);
+    }
+
+    let search_from = scan.trailer_search_from.max(trailer_start);
+    if let Some(end) = body
+        .get(search_from..)?
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+    {
+        return Some(search_from + end + 4);
+    }
+    // Preserve the final three bytes because the delimiter may straddle reads.
+    scan.trailer_search_from = body.len().saturating_sub(3).max(trailer_start);
+    None
+}
+
+fn chunked_http_body_end(
+    body: &[u8],
+    scan: &mut ChunkedHttpBodyScan,
+) -> Result<Option<usize>, HttpIngressError> {
+    if scan.trailer_start.is_some() {
+        return Ok(chunked_http_trailer_end(body, scan));
+    }
+
+    let mut offset = scan.offset;
+    let mut decoded = scan.decoded;
     loop {
         let Some(line_end_rel) = body[offset..]
             .windows(2)
@@ -5322,13 +5356,9 @@ fn chunked_http_body_end(body: &[u8]) -> Result<Option<usize>, HttpIngressError>
         }
 
         if size == 0 {
-            if body.get(data_start..data_start + 2) == Some(b"\r\n") {
-                return Ok(Some(data_start + 2));
-            }
-            let Some(trailer_end) = find_http_header_end(&body[data_start..]) else {
-                return Ok(None);
-            };
-            return Ok(Some(data_start + trailer_end));
+            scan.trailer_start = Some(data_start);
+            scan.trailer_search_from = data_start;
+            return Ok(chunked_http_trailer_end(body, scan));
         }
 
         let data_end = data_start
@@ -5344,6 +5374,8 @@ fn chunked_http_body_end(body: &[u8]) -> Result<Option<usize>, HttpIngressError>
             return Err(HttpIngressError::BadRequest);
         }
         offset = chunk_end;
+        scan.offset = offset;
+        scan.decoded = decoded;
     }
 }
 
@@ -5387,24 +5419,30 @@ fn read_deadline_http_request(
             }
             request.extend_from_slice(&body[..length]);
         }
-        HttpBodyFraming::Chunked => loop {
-            // Permit ordinary chunk framing overhead while bounding the total wire
-            // buffer as well as the decoded body size checked by the parser.
-            if body.len() > MAX_HTTP_CHUNK_WIRE_BYTES {
-                return Err(HttpIngressError::BodyTooLarge);
+        HttpBodyFraming::Chunked => {
+            let mut scan = ChunkedHttpBodyScan::default();
+            loop {
+                // Permit ordinary chunk framing overhead while bounding the total wire
+                // buffer as well as the decoded body size checked by the parser.
+                if body.len() > MAX_HTTP_CHUNK_WIRE_BYTES {
+                    return Err(HttpIngressError::BodyTooLarge);
+                }
+                if let Some(end) = chunked_http_body_end(&body, &mut scan)? {
+                    request.extend_from_slice(&body[..end]);
+                    break;
+                }
+                read_before_deadline(stream, &mut body, body_deadline)?;
             }
-            if let Some(end) = chunked_http_body_end(&body)? {
-                request.extend_from_slice(&body[..end]);
-                break;
-            }
-            read_before_deadline(stream, &mut body, body_deadline)?;
-        },
+        }
     }
     let _ = stream.set_read_timeout(None);
     Ok(request)
 }
 
 fn write_ingress_response(stream: &mut TcpStream, status: u16, reason: &str, message: &str) {
+    // Rejection responses can run on the shared accept thread, so a peer that
+    // stops reading must not be able to stall new connections indefinitely.
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let body = serde_json::json!({ "error": message }).to_string();
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -5422,10 +5460,10 @@ fn proxy_deadline_http_connection(
     let request = match read_deadline_http_request(&mut client, deadlines) {
         Ok(request) => request,
         Err(err) => {
-            drop(pending_read);
             let _ = client.set_read_timeout(None);
             let (status, reason, message) = err.response();
             write_ingress_response(&mut client, status, reason, message);
+            drop(pending_read);
             return;
         }
     };
@@ -6824,18 +6862,52 @@ mod tests {
 
     #[test]
     fn chunked_http_body_parser_bounds_and_finds_the_terminal_chunk() {
+        let mut scan = ChunkedHttpBodyScan::default();
         assert_eq!(
-            chunked_http_body_end(b"4\r\ntest\r\n0\r\n\r\n").unwrap(),
+            chunked_http_body_end(b"4\r\ntest\r\n0\r\n\r\n", &mut scan).unwrap(),
             Some(14)
         );
+        let mut scan = ChunkedHttpBodyScan::default();
         assert_eq!(
-            chunked_http_body_end(b"4\r\ntest\r\n0\r\nX-Test: yes\r\n\r\n").unwrap(),
+            chunked_http_body_end(
+                b"4\r\ntest\r\n0\r\nX-Test: yes\r\n\r\n",
+                &mut scan
+            )
+            .unwrap(),
             Some(27)
         );
-        assert_eq!(chunked_http_body_end(b"4\r\nte").unwrap(), None);
+        let mut scan = ChunkedHttpBodyScan::default();
         assert_eq!(
-            chunked_http_body_end(b"nope\r\n").unwrap_err(),
+            chunked_http_body_end(b"4\r\nte", &mut scan).unwrap(),
+            None
+        );
+        let mut scan = ChunkedHttpBodyScan::default();
+        assert_eq!(
+            chunked_http_body_end(b"nope\r\n", &mut scan).unwrap_err(),
             HttpIngressError::BadRequest
+        );
+    }
+
+    #[test]
+    fn chunked_http_body_parser_resumes_from_verified_boundaries() {
+        let mut scan = ChunkedHttpBodyScan::default();
+        assert_eq!(
+            chunked_http_body_end(b"4\r\ntest\r\n5\r\npar", &mut scan).unwrap(),
+            None
+        );
+        assert_eq!(scan.offset, 9);
+        assert_eq!(scan.decoded, 4);
+        assert_eq!(
+            chunked_http_body_end(b"4\r\ntest\r\n5\r\nparty\r\n0\r\nX: y\r\n", &mut scan)
+                .unwrap(),
+            None
+        );
+        assert_eq!(scan.offset, 19);
+        assert_eq!(scan.decoded, 9);
+        assert_eq!(
+            chunked_http_body_end(b"4\r\ntest\r\n5\r\nparty\r\n0\r\nX: y\r\n\r\n", &mut scan)
+                .unwrap(),
+            Some(30)
         );
     }
 
