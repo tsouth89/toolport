@@ -1423,6 +1423,9 @@ struct PendingCall {
     name: String,
     /// The exact arguments from the preview call (serialized for replay).
     arguments: Value,
+    /// The registered HTTP client that created this confirmation. `None` covers
+    /// stdio and the legacy unscoped HTTP bearer, which each have one shared caller.
+    owner: Option<String>,
     /// When this entry was created (for expiry).
     created: Instant,
 }
@@ -1453,8 +1456,8 @@ impl ConfirmGuard {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Store a pending call and return its confirmation token.
-    fn store(&self, name: String, arguments: Value) -> String {
+    /// Store a pending call for one client and return its confirmation token.
+    fn store(&self, name: String, arguments: Value, owner: Option<&str>) -> String {
         let mut pending = self.pending();
         // Evict expired entries to prevent unbounded growth.
         let cutoff = Instant::now() - CONFIRM_TTL;
@@ -1465,19 +1468,28 @@ impl ConfirmGuard {
             PendingCall {
                 name,
                 arguments,
+                owner: owner.map(str::to_string),
                 created: Instant::now(),
             },
         );
         token
     }
 
-    /// Consume a confirmation token, returning the stored call if valid.
-    /// Returns None if the token doesn't exist or has expired.
-    fn take(&self, token: &str) -> Option<(String, Value)> {
-        let entry = self.pending().remove(token)?;
+    /// Consume a confirmation token only for the client that created it. A
+    /// wrong-client attempt does not consume the entry, so it cannot deny the
+    /// rightful owner. Returns None when the token is missing, expired, or owned
+    /// by a different client; callers intentionally expose the same error for all.
+    fn take(&self, token: &str, owner: Option<&str>) -> Option<(String, Value)> {
+        let mut pending = self.pending();
+        let entry = pending.get(token)?;
         if entry.created.elapsed() > CONFIRM_TTL {
-            return None; // expired
+            pending.remove(token);
+            return None;
         }
+        if entry.owner.as_deref() != owner {
+            return None;
+        }
+        let entry = pending.remove(token)?;
         Some((entry.name, entry.arguments))
     }
 }
@@ -2178,7 +2190,7 @@ fn handle_request_with_cancel(
                         }),
                     ));
                 }
-                match confirm.take(token) {
+                match confirm.take(token, client) {
                     Some((confirmed_name, confirmed_args)) => {
                         name = confirmed_name;
                         arguments = confirmed_args;
@@ -2602,7 +2614,7 @@ fn handle_request_with_cancel(
                 // destructive tool.
                 let dest = tool_is_destructive_fail_closed(name, cached, router);
                 if dest {
-                    let token = confirm.store(name.to_string(), arguments.clone());
+                    let token = confirm.store(name.to_string(), arguments.clone(), client);
                     let args_pretty = serde_json::to_string_pretty(&arguments).unwrap_or_default();
                     let msg = format!(
                         "⚠️ Destructive action intercepted.\n\nTool: {name}\nArguments:\n{args_pretty}\n\n\
@@ -8399,20 +8411,27 @@ mod tests {
     #[test]
     fn confirm_guard_token_is_consumed_on_use() {
         let guard = ConfirmGuard::new();
-        let token = guard.store("srv__delete".into(), json!({"id": "x"}));
+        let token = guard.store(
+            "srv__delete".into(),
+            json!({"id": "x"}),
+            Some("cursor"),
+        );
         // First take succeeds.
-        let (name, args) = guard.take(&token).unwrap();
+        let (name, args) = guard.take(&token, Some("cursor")).unwrap();
         assert_eq!(name, "srv__delete");
         assert_eq!(args["id"], "x");
         // Second take fails (token consumed).
-        assert!(guard.take(&token).is_none(), "token should be single-use");
+        assert!(
+            guard.take(&token, Some("cursor")).is_none(),
+            "token should be single-use"
+        );
     }
 
     #[test]
-    fn confirm_destructive_full_flow_does_not_loop() {
+    fn confirm_destructive_token_is_client_scoped_and_does_not_loop() {
         // The critical test: a destructive call is intercepted, then confirmed
-        // via toolport_confirm. The confirmed call must NOT be re-intercepted
-        // (which would create an infinite loop).
+        // via toolport_confirm. A different client cannot redeem or consume it,
+        // and the rightful owner's confirmed call must NOT be re-intercepted.
         let reg = registry_with_confirm();
         let confirm = ConfirmGuard::new();
         let cat = catalog_with_destructive();
@@ -8432,7 +8451,7 @@ mod tests {
             &SearchGuard::default(),
             &confirm,
             None,
-            None,
+            Some("cursor"),
         )
         .unwrap();
         let text1 = resp1["result"]["content"][0]["text"].as_str().unwrap();
@@ -8442,8 +8461,7 @@ mod tests {
         let token_start = text1.find("token: ").unwrap() + 7;
         let token = &text1[token_start..token_start + 32];
 
-        // Step 2: confirm with the token. This must fall through to normal
-        // routing — NOT re-intercepted.
+        // Step 2: a different client cannot redeem the token.
         let req2 = json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": { "name": "toolport_confirm", "arguments": { "token": token } }
@@ -8458,16 +8476,38 @@ mod tests {
             &SearchGuard::default(),
             &confirm,
             None,
-            None,
+            Some("claude"),
         )
         .unwrap();
         let text2 = resp2["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text2.contains("expired or invalid"),
+            "another client must not redeem the token: {text2}"
+        );
+
+        // Step 3: the wrong-client attempt did not consume the token, so its
+        // owner can still confirm. This falls through to normal routing and is
+        // NOT re-intercepted.
+        let resp3 = handle_request(
+            &req2,
+            &reg,
+            &router(),
+            &cat,
+            true,
+            None,
+            &SearchGuard::default(),
+            &confirm,
+            None,
+            Some("cursor"),
+        )
+        .unwrap();
+        let text3 = resp3["result"]["content"][0]["text"].as_str().unwrap();
         // The confirmed call reached the router (which doesn't have a real
         // stripe server, so it errors), but the important thing is it was NOT
         // re-intercepted.
         assert!(
-            !text2.contains("Destructive action intercepted"),
-            "confirmed call must not be re-intercepted (would loop). Got: {text2}"
+            !text3.contains("Destructive action intercepted"),
+            "confirmed call must not be re-intercepted (would loop). Got: {text3}"
         );
     }
 }
