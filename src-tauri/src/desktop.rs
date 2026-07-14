@@ -1875,13 +1875,28 @@ fn team_disconnect(state: State<RegistryState>) -> Result<Registry, String> {
     Ok(fresh)
 }
 
-/// Admin: push the current local server set as the team's shared config (own servers
-/// only, secret values never sent). Returns the new config version.
+/// Admin: replace only the team's shared server list with the current local set (own servers
+/// only, secret values never sent). Remote instructions and policy fields are preserved, and
+/// an optimistic-concurrency conflict is returned rather than overwriting another admin.
 #[tauri::command]
-async fn team_push(state: State<'_, RegistryState>) -> Result<i64, String> {
+async fn team_push_preview(state: State<'_, RegistryState>) -> Result<teams::PushPreview, String> {
     refresh_from_disk(state.inner())?;
-    // push_current does a blocking PUT to the team server; keep it off the main thread.
-    tauri::async_runtime::spawn_blocking(teams::push_current)
+    tauri::async_runtime::spawn_blocking(teams::preview_push_current)
+        .await
+        .map_err(|e| format!("push preview task join failed: {e}"))?
+}
+
+#[tauri::command]
+async fn team_push(
+    state: State<'_, RegistryState>,
+    base_version: i64,
+    local_fingerprint: String,
+) -> Result<i64, String> {
+    refresh_from_disk(state.inner())?;
+    // push_current does a blocking GET + PUT to the team server; keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        teams::push_current(base_version, &local_fingerprint)
+    })
         .await
         .map_err(|e| format!("push task join failed: {e}"))?
 }
@@ -2774,6 +2789,7 @@ pub fn run() {
             team_sync,
             team_sync_wait,
             team_disconnect,
+            team_push_preview,
             team_push,
             set_auth_token,
             clear_auth_token,

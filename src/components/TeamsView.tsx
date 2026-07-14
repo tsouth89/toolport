@@ -20,11 +20,13 @@ import {
   teamJoinPoll,
   teamSync,
   teamDisconnect,
+  teamPushPreview,
   teamPush,
   setServerEnabled,
 } from "@/lib/api";
 import { teamUrlError } from "@/lib/teamUrl";
 import { isEnabled, activeProfile } from "@/lib/types";
+import type { TeamPushPreview } from "@/lib/api";
 import type { Registry } from "@/lib/types";
 
 /** The hosted Toolport Teams instance, prefilled as the default. Self-hosters replace
@@ -57,6 +59,7 @@ export function TeamsView({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [skipNote, setSkipNote] = useState<string | null>(null);
+  const [pushPreview, setPushPreview] = useState<TeamPushPreview | null>(null);
   // Set while an approval-gated join waits for an admin. Holds the connect inputs so a poll
   // uses the values from when the request was made, not whatever the fields say later.
   const [pending, setPending] = useState<{
@@ -180,10 +183,17 @@ export function TeamsView({
       setNotice("Left the team. Its servers were removed; your own are untouched.");
     });
 
+  const onPreviewPush = () =>
+    run("preview-push", async () => {
+      setPushPreview(await teamPushPreview());
+    });
+
   const onPush = () =>
     run("push", async () => {
-      const v = await teamPush();
-      setNotice(`Pushed your server set to the team (now version ${v}).`);
+      if (!pushPreview) throw new Error("Review the shared-server update before saving.");
+      const v = await teamPush(pushPreview);
+      setPushPreview(null);
+      setNotice(`Updated the team's shared servers (now version ${v}).`);
     });
 
   // Member consent: enable a review server (local command / LAN URL) into the active
@@ -435,14 +445,61 @@ export function TeamsView({
                     <ShieldCheck className="size-3.5 text-success" /> Admin
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Push your current server set to the team. Secret values are never
+                    Replace the team's shared servers with your current server set. Team
+                    instructions and security policies are preserved; secrets are never
                     sent.
                   </p>
                 </div>
-                <Button size="sm" onClick={onPush} disabled={busy !== null}>
+                <Button size="sm" onClick={onPreviewPush} disabled={busy !== null}>
                   <Upload className="size-3.5" />
-                  {busy === "push" ? "Pushing…" : "Push my setup"}
+                  {busy === "preview-push" ? "Comparing…" : "Update shared servers"}
                 </Button>
+                <ConfirmDialog
+                  open={pushPreview !== null}
+                  onOpenChange={(open) => {
+                    if (!open) setPushPreview(null);
+                  }}
+                  title="Replace the team's shared servers?"
+                  description={
+                    pushPreview && (
+                      <div className="grid gap-3 text-left">
+                        <p>
+                          Only the shared server list changes. Team instructions, security
+                          policies, and other settings stay unchanged.
+                        </p>
+                        {(
+                          [
+                            ["Added", pushPreview.added],
+                            ["Changed", pushPreview.changed],
+                            ["Removed", pushPreview.removed],
+                          ] as const
+                        ).map(([label, names]) => (
+                          <div key={label}>
+                            <div className="font-medium text-foreground">
+                              {label} ({names.length})
+                            </div>
+                            {names.length > 0 ? (
+                              <ul className="mt-1 max-h-24 list-disc overflow-y-auto pl-5">
+                                {names.map((name, index) => (
+                                  <li key={`${label}-${name}-${index}`}>{name}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="mt-1">None</div>
+                            )}
+                          </div>
+                        ))}
+                        <p>
+                          If the team or your local servers change before saving, Toolport
+                          will stop and ask you to review again instead of overwriting
+                          anything.
+                        </p>
+                      </div>
+                    )
+                  }
+                  confirmLabel="Replace shared servers"
+                  onConfirm={onPush}
+                />
               </div>
             )}
           </div>

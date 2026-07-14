@@ -270,16 +270,173 @@ pub fn fetch_me(server_url: &str, team_id: &str, token: &str) -> Result<Membersh
     }
 }
 
-/// Admin push of the team config. Returns the new version.
-pub fn push_config(server_url: &str, team_id: &str, token: &str, config: &Value) -> Result<i64, String> {
+/// A dashboard edit that lands between the preflight GET and PUT must never be overwritten.
+/// Keep this message stable and actionable: it is surfaced directly in the Teams UI.
+const STALE_PUSH_MESSAGE: &str =
+    "The team config changed before this update could be saved. Sync to review the latest settings, then try again; nothing was overwritten.";
+
+/// Fetch the complete current config before an admin replaces its server list. Unlike the
+/// sync pull, this request is intentionally unconditional: the caller needs the full object so
+/// instructions, policies, and future top-level fields can be round-tripped unchanged.
+fn fetch_config_for_update(
+    server_url: &str,
+    team_id: &str,
+    token: &str,
+) -> Result<(i64, Value), String> {
     require_secure_team_url(server_url)?;
     let url = format!("{}/teams/{}/config", base(server_url), team_id);
-    let body = serde_json::json!({ "config": config });
-    let resp = agent()
+    match agent()
+        .get(&url)
+        .set("authorization", &format!("Bearer {token}"))
+        .call()
+    {
+        Ok(resp) => {
+            let v: Value = resp.into_json().map_err(|e| e.to_string())?;
+            let version = v["version"]
+                .as_i64()
+                .ok_or("team server returned a config without a version")?;
+            let config = v.get("config").cloned().unwrap_or(Value::Null);
+            if !config.is_object()
+                || !config.get("servers").map(Value::is_array).unwrap_or(false)
+            {
+                return Err("team server returned a config without a server list".into());
+            }
+            Ok((version, config))
+        }
+        // Older self-hosted servers can have no config row until the first push. Version zero
+        // is the optimistic-concurrency baseline used by current servers for that empty state.
+        Err(ureq::Error::Status(404, _)) => Ok((0, json!({ "servers": [] }))),
+        Err(e) => Err(stringify(e)),
+    }
+}
+
+/// Replace only `servers` in a fetched config, preserving every other current and future field.
+fn replace_server_set(mut config: Value, servers: Value) -> Result<Value, String> {
+    if !servers.is_array() {
+        return Err("local team export did not contain a server list".into());
+    }
+    let object = config
+        .as_object_mut()
+        .ok_or("team server returned a config that was not an object")?;
+    object.insert("servers".to_string(), servers);
+    Ok(config)
+}
+
+fn push_body(config: &Value, base_version: i64) -> Value {
+    json!({ "config": config, "base_version": base_version })
+}
+
+fn push_status_message(status: u16) -> Option<&'static str> {
+    (status == 409).then_some(STALE_PUSH_MESSAGE)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushPreview {
+    pub base_version: i64,
+    pub local_fingerprint: String,
+    pub added: Vec<String>,
+    pub changed: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+fn server_index(servers: &Value) -> Result<BTreeMap<String, &Value>, String> {
+    let list = servers
+        .as_array()
+        .ok_or("team server list was not an array")?;
+    let mut indexed = BTreeMap::new();
+    for server in list {
+        let id = server
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or("team server entry had no id")?
+            .to_string();
+        if indexed.insert(id.clone(), server).is_some() {
+            return Err(format!("team server list contained duplicate id '{id}'"));
+        }
+    }
+    Ok(indexed)
+}
+
+fn preview_name(server: &Value, id: &str) -> String {
+    server
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(id)
+        .to_string()
+}
+
+fn sort_preview_names(names: &mut [String]) {
+    names.sort_by(|a, b| {
+        a.to_ascii_lowercase()
+            .cmp(&b.to_ascii_lowercase())
+            .then_with(|| a.cmp(b))
+    });
+}
+
+fn build_push_preview(
+    base_version: i64,
+    remote_servers: &Value,
+    local_servers: &Value,
+) -> Result<PushPreview, String> {
+    let remote = server_index(remote_servers)?;
+    let local = server_index(local_servers)?;
+    let mut added = Vec::new();
+    let mut changed = Vec::new();
+    let mut removed = Vec::new();
+
+    for (id, server) in &local {
+        match remote.get(id) {
+            None => added.push(preview_name(server, id)),
+            Some(previous) if *previous != *server => changed.push(preview_name(server, id)),
+            Some(_) => {}
+        }
+    }
+    for (id, server) in &remote {
+        if !local.contains_key(id) {
+            removed.push(preview_name(server, id));
+        }
+    }
+    sort_preview_names(&mut added);
+    sort_preview_names(&mut changed);
+    sort_preview_names(&mut removed);
+
+    Ok(PushPreview {
+        base_version,
+        local_fingerprint: crate::audit::args_hash(local_servers),
+        added,
+        changed,
+        removed,
+    })
+}
+
+/// Admin push of a servers-only config update. Returns the new version.
+pub fn push_config(
+    server_url: &str,
+    team_id: &str,
+    token: &str,
+    config: &Value,
+    base_version: i64,
+) -> Result<i64, String> {
+    require_secure_team_url(server_url)?;
+    let url = format!("{}/teams/{}/config", base(server_url), team_id);
+    let body = push_body(config, base_version);
+    let resp = match agent()
         .put(&url)
         .set("authorization", &format!("Bearer {token}"))
         .send_json(body)
-        .map_err(stringify)?;
+    {
+        Ok(resp) => resp,
+        Err(e @ ureq::Error::Status(status, _)) => {
+            if let Some(message) = push_status_message(status) {
+                return Err(message.into());
+            }
+            return Err(stringify(e));
+        }
+        Err(e) => return Err(stringify(e)),
+    };
     let v: Value = resp.into_json().map_err(|e| e.to_string())?;
     v["version"]
         .as_i64()
@@ -619,23 +776,60 @@ pub fn disconnect() -> Result<(), String> {
     Ok(())
 }
 
-/// Admin: push the current local server set as the team config. The user's own servers
-/// only (team-sourced ones are excluded), secret values never sent. Returns the version.
-pub fn push_current() -> Result<i64, String> {
+/// Admin: preview replacing the remote config's server list with the current local server set.
+/// The returned version and fingerprint bind the later confirmation to exactly what was shown.
+pub fn preview_push_current() -> Result<PushPreview, String> {
     let reg = crate::registry::load()?;
     let conn = reg.team.clone().ok_or("not connected to a team")?;
     if conn.role != "admin" {
         return Err("only a team admin can push the shared config".into());
     }
     let token = load_token().ok_or("team token is missing from the keychain")?;
-    let cfg = team_export(&reg);
-    push_config(&conn.server_url, &conn.team_id, &token, &cfg)
+    let local_servers = team_server_export(&reg);
+    let (base_version, remote_config) =
+        fetch_config_for_update(&conn.server_url, &conn.team_id, &token)?;
+    build_push_preview(
+        base_version,
+        remote_config
+            .get("servers")
+            .ok_or("team server returned a config without a server list")?,
+        &local_servers,
+    )
 }
 
-/// Build the config an admin pushes: the user's own servers (not team-sourced), with
-/// env keys but no secret values, plus the destructive-tool policy flag and the
-/// org screening policy.
-fn team_export(reg: &Registry) -> Value {
+/// Admin: replace only the remote config's server list with the current local server set.
+/// The user's own servers only (team-sourced ones are excluded), secret values never sent.
+/// Every other remote field is retained and the fetched version protects against stale writes.
+pub fn push_current(
+    expected_base_version: i64,
+    expected_local_fingerprint: &str,
+) -> Result<i64, String> {
+    let reg = crate::registry::load()?;
+    let conn = reg.team.clone().ok_or("not connected to a team")?;
+    if conn.role != "admin" {
+        return Err("only a team admin can push the shared config".into());
+    }
+    let token = load_token().ok_or("team token is missing from the keychain")?;
+    let servers = team_server_export(&reg);
+    if crate::audit::args_hash(&servers) != expected_local_fingerprint {
+        return Err(
+            "Your local server set changed after the preview. Review the update again before saving."
+                .into(),
+        );
+    }
+    let (base_version, remote_config) =
+        fetch_config_for_update(&conn.server_url, &conn.team_id, &token)?;
+    if base_version != expected_base_version {
+        return Err(STALE_PUSH_MESSAGE.into());
+    }
+    let cfg = replace_server_set(remote_config, servers)?;
+    push_config(&conn.server_url, &conn.team_id, &token, &cfg, base_version)
+}
+
+/// Build the server list an admin pushes: the user's own servers (not team-sourced), with
+/// env keys but no secret values. Governance lives on the server and is retained from the
+/// preflight GET rather than inferred from one admin's local safety preferences.
+fn team_server_export(reg: &Registry) -> Value {
     let servers: Vec<Value> = reg
         .servers
         .iter()
@@ -676,20 +870,7 @@ fn team_export(reg: &Registry) -> Value {
             })
         })
         .collect();
-    serde_json::json!({
-        "servers": servers,
-        "denyDestructive": reg.deny_destructive,
-        // Org screening policy. Emitted on every push so a desktop push never silently
-        // wipes a dashboard-set policy. Each flag is tighten-only on the member side:
-        // `true` forces the corresponding local safety toggle on, `false`/absent is a
-        // no-op that can never turn a member's toggle off. Shape is intentionally
-        // extensible (e.g. a future `sensitivity` field) without a breaking change.
-        "screeningPolicy": {
-            "forceContentDefense": reg.content_defense,
-            "forceQuarantineOnDrift": reg.quarantine_on_drift,
-            "forceHumanApproval": reg.human_approval,
-        },
-    })
+    Value::Array(servers)
 }
 
 // --- merge (pure, testable) ---
@@ -1317,22 +1498,85 @@ mod tests {
     }
 
     #[test]
-    fn team_export_round_trips_screening_policy() {
-        // The pushed config must carry the policy so a desktop push never wipes it, and
-        // it must reflect the admin's own toggles.
-        let mut r = base_registry();
-        r.content_defense = true;
-        r.quarantine_on_drift = true;
-        r.human_approval = true;
-        let cfg = team_export(&r);
-        let sp = cfg.get("screeningPolicy").expect("policy is emitted");
-        assert_eq!(sp.get("forceContentDefense").and_then(Value::as_bool), Some(true));
-        assert_eq!(sp.get("forceQuarantineOnDrift").and_then(Value::as_bool), Some(true));
-        assert_eq!(sp.get("forceHumanApproval").and_then(Value::as_bool), Some(true));
+    fn replacing_servers_preserves_instructions_policies_and_unknown_fields() {
+        let remote = json!({
+            "servers": [{ "id": "old" }],
+            "instructions": "Use the approved issue workflow.",
+            "denyDestructive": true,
+            "screeningPolicy": { "forceHumanApproval": true },
+            "futureControl": { "mode": "strict", "revision": 7 }
+        });
+        let new_servers = json!([{ "id": "new" }]);
+
+        let updated = replace_server_set(remote.clone(), new_servers.clone()).unwrap();
+
+        assert_eq!(updated["servers"], new_servers);
+        for key in [
+            "instructions",
+            "denyDestructive",
+            "screeningPolicy",
+            "futureControl",
+        ] {
+            assert_eq!(
+                updated[key], remote[key],
+                "{key} must be round-tripped unchanged"
+            );
+        }
     }
 
     #[test]
-    fn team_export_excludes_gateway_and_team_servers() {
+    fn push_payload_binds_the_fetched_base_version() {
+        let config = json!({ "servers": [], "instructions": "keep me" });
+        let body = push_body(&config, 42);
+        assert_eq!(body["base_version"], 42);
+        assert_eq!(body["config"], config);
+    }
+
+    #[test]
+    fn push_preview_reports_sorted_added_changed_and_removed_names() {
+        let remote = json!([
+            { "id": "remove-z", "name": "Zulu", "transport": "http" },
+            { "id": "same", "name": "Same", "transport": "http" },
+            { "id": "change", "name": "Old label", "transport": "http" }
+        ]);
+        let local = json!([
+            { "id": "new-b", "name": "beta", "transport": "http" },
+            { "id": "change", "name": "Changed", "transport": "stdio" },
+            { "id": "same", "name": "Same", "transport": "http" },
+            { "id": "new-a", "name": "Alpha", "transport": "http" }
+        ]);
+
+        let preview = build_push_preview(7, &remote, &local).unwrap();
+
+        assert_eq!(preview.base_version, 7);
+        assert_eq!(preview.added, vec!["Alpha", "beta"]);
+        assert_eq!(preview.changed, vec!["Changed"]);
+        assert_eq!(preview.removed, vec!["Zulu"]);
+        assert_eq!(preview.local_fingerprint, crate::audit::args_hash(&local));
+    }
+
+    #[test]
+    fn push_preview_rejects_ambiguous_duplicate_ids() {
+        let duplicated = json!([
+            { "id": "same", "name": "One" },
+            { "id": "same", "name": "Two" }
+        ]);
+        let err = build_push_preview(1, &json!([]), &duplicated).unwrap_err();
+        assert!(err.contains("duplicate id 'same'"));
+    }
+
+    #[test]
+    fn stale_push_status_is_actionable_and_other_errors_fall_through() {
+        let message = push_status_message(409).expect("409 must be recognized as stale");
+        assert!(message.contains("changed"));
+        assert!(message.contains("Sync"));
+        assert!(message.contains("nothing was overwritten"));
+        assert_eq!(push_status_message(401), None);
+        assert_eq!(push_status_message(500), None);
+    }
+
+    #[test]
+    fn team_server_export_excludes_gateway_and_team_servers() {
         let mut r = base_registry(); // has "mine" (manual)
         // Toolport's own gateway entry: infra, must never be pushed to the team.
         r.servers.push(ServerEntry {
@@ -1362,8 +1606,8 @@ mod tests {
             cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
-        let cfg = team_export(&r);
-        let ids: Vec<&str> = cfg["servers"]
+        let servers = team_server_export(&r);
+        let ids: Vec<&str> = servers
             .as_array()
             .unwrap()
             .iter()

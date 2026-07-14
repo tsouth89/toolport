@@ -404,9 +404,25 @@ export function teamDisconnect(): Promise<Registry> {
   return invoke<Registry>("team_disconnect");
 }
 
-/** Admin: push the current local server set as the team's shared config; returns version. */
-export function teamPush(): Promise<number> {
-  return invoke<number>("team_push");
+export interface TeamPushPreview {
+  baseVersion: number;
+  localFingerprint: string;
+  added: string[];
+  changed: string[];
+  removed: string[];
+}
+
+/** Admin: compare the local server export with the team's current shared server list. */
+export function teamPushPreview(): Promise<TeamPushPreview> {
+  return invoke<TeamPushPreview>("team_push_preview");
+}
+
+/** Admin: apply an explicitly previewed shared-server replacement; returns version. */
+export function teamPush(preview: TeamPushPreview): Promise<number> {
+  return invoke<number>("team_push", {
+    baseVersion: preview.baseVersion,
+    localFingerprint: preview.localFingerprint,
+  });
 }
 
 /** Probe every supported MCP client and read its current server configuration. */
