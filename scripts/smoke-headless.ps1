@@ -34,6 +34,18 @@ $failed = 0
 
 function Pass($msg) { Write-Host "[PASS] $msg" -ForegroundColor Green }
 function Fail($msg) { Write-Host "[FAIL] $msg" -ForegroundColor Red; $script:failed++ }
+function Wait-HttpCode($url, $expected, $headers = @(), $timeoutSeconds = 10) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    $code = ""
+    do {
+        $curlArgs = @("-s", "--connect-timeout", "1", "--max-time", "2", "-o", "NUL", "-w", "%{http_code}")
+        foreach ($header in $headers) { $curlArgs += @("-H", $header) }
+        $code = & curl.exe @curlArgs $url
+        if ($LASTEXITCODE -eq 0 -and $code -eq $expected) { return $code }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $code
+}
 
 Write-Host "Using gateway: $bin"
 
@@ -42,8 +54,8 @@ $env:CONDUIT_REGISTRY = $registry
 $env:CONDUIT_HTTP_HOST = "0.0.0.0"
 Remove-Item Env:CONDUIT_HTTP_TOKEN -ErrorAction SilentlyContinue
 $p1 = Start-Process -FilePath $bin -ArgumentList "--http", "18765" -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $smokeDir "t1.err")
-Start-Sleep -Seconds 2
-if ($p1.HasExited -and $p1.ExitCode -ne 0) {
+$p1Exited = $p1.WaitForExit(5000)
+if ($p1Exited -and $p1.ExitCode -ne 0) {
     $err = Get-Content (Join-Path $smokeDir "t1.err") -Raw -ErrorAction SilentlyContinue
     if ($err -match "refusing to bind.*without HTTP authentication") {
         Pass "non-loopback without token refuses start (exit $($p1.ExitCode))"
@@ -51,15 +63,18 @@ if ($p1.HasExited -and $p1.ExitCode -ne 0) {
         Fail "non-loopback without token exited $($p1.ExitCode) but message unexpected: $err"
     }
 } else {
-    if (-not $p1.HasExited) { Stop-Process -Id $p1.Id -Force -ErrorAction SilentlyContinue }
+    if (-not $p1Exited) {
+        Stop-Process -Id $p1.Id -Force -ErrorAction SilentlyContinue
+        [void]$p1.WaitForExit(5000)
+    }
     Fail "non-loopback without token should refuse start"
 }
 
 # --- Test 2: loopback without auth also refuses start ---
 $env:CONDUIT_HTTP_HOST = "127.0.0.1"
 $p2 = Start-Process -FilePath $bin -ArgumentList "--http", "18764" -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $smokeDir "t2.err")
-Start-Sleep -Seconds 2
-if ($p2.HasExited -and $p2.ExitCode -ne 0) {
+$p2Exited = $p2.WaitForExit(5000)
+if ($p2Exited -and $p2.ExitCode -ne 0) {
     $err = Get-Content (Join-Path $smokeDir "t2.err") -Raw -ErrorAction SilentlyContinue
     if ($err -match "refusing to bind.*without HTTP authentication") {
         Pass "loopback without auth refuses start (exit $($p2.ExitCode))"
@@ -67,20 +82,23 @@ if ($p2.HasExited -and $p2.ExitCode -ne 0) {
         Fail "loopback without auth exited $($p2.ExitCode) but message unexpected: $err"
     }
 } else {
-    if (-not $p2.HasExited) { Stop-Process -Id $p2.Id -Force -ErrorAction SilentlyContinue }
+    if (-not $p2Exited) {
+        Stop-Process -Id $p2.Id -Force -ErrorAction SilentlyContinue
+        [void]$p2.WaitForExit(5000)
+    }
     Fail "loopback without auth should refuse start"
 }
 
 # --- Test 3: explicit insecure loopback escape hatch works locally ---
 $p3 = Start-Process -FilePath $bin -ArgumentList "--http", "18764", "--insecure-loopback" -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $smokeDir "t3.err")
-Start-Sleep -Seconds 2
+$code = Wait-HttpCode "http://127.0.0.1:18764/" "200"
 if ($p3.HasExited) {
     $err = Get-Content (Join-Path $smokeDir "t3.err") -Raw -ErrorAction SilentlyContinue
     Fail "explicit insecure loopback exited unexpectedly: $err"
 } else {
-    $code = curl.exe -s -o NUL -w "%{http_code}" "http://127.0.0.1:18764/"
     if ($code -eq "200") { Pass "explicit insecure loopback starts locally" } else { Fail "explicit insecure loopback returned $code" }
     Stop-Process -Id $p3.Id -Force -ErrorAction SilentlyContinue
+    [void]$p3.WaitForExit(5000)
 }
 
 # --- Start authenticated gateway for tests 4-5 ---
@@ -89,14 +107,13 @@ $env:CONDUIT_HTTP_TOKEN = $token
 $gw = Start-Process -FilePath $bin -ArgumentList "--http", "$port" -PassThru -WindowStyle Hidden
 $gatewayPid = $gw.Id
 Set-Content -Path (Join-Path $smokeDir "gateway.pid") -Value $gatewayPid
-Start-Sleep -Seconds 2
 
 try {
     # --- Test 4: auth ---
-    $codeNoAuth = curl.exe -s -o NUL -w "%{http_code}" "http://127.0.0.1:${port}/"
+    $codeNoAuth = Wait-HttpCode "http://127.0.0.1:${port}/" "401"
     if ($codeNoAuth -eq "401") { Pass "GET / without auth returns 401" } else { Fail "GET / without auth returned $codeNoAuth (expected 401)" }
 
-    $codeAuth = curl.exe -s -o NUL -w "%{http_code}" -H "Authorization: Bearer $token" "http://127.0.0.1:${port}/"
+    $codeAuth = curl.exe -s --connect-timeout 2 --max-time 5 -o NUL -w "%{http_code}" -H "Authorization: Bearer $token" "http://127.0.0.1:${port}/"
     if ($codeAuth -eq "200") { Pass "GET / with bearer returns 200" } else { Fail "GET / with bearer returned $codeAuth (expected 200)" }
 
     # --- Test 5: MCP handshake ---
@@ -106,7 +123,7 @@ try {
 
     $initHdr = Join-Path $smokeDir "init.hdr"
     $initBody = Join-Path $smokeDir "init.json"
-    curl.exe -sD $initHdr -o $initBody -X POST "http://127.0.0.1:${port}/mcp" `
+    curl.exe -s --connect-timeout 2 --max-time 5 -D $initHdr -o $initBody -X POST "http://127.0.0.1:${port}/mcp" `
         -H "Authorization: Bearer $token" -H "Content-Type: application/json" -H "Accept: application/json" `
         --data-binary "@$initReq" | Out-Null
 
@@ -120,7 +137,7 @@ try {
         $listReq = Join-Path $smokeDir "list-req.json"
         [System.IO.File]::WriteAllText($listReq, '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
         $listOut = Join-Path $smokeDir "list.json"
-        curl.exe -s -o $listOut -X POST "http://127.0.0.1:${port}/mcp" `
+        curl.exe -s --connect-timeout 2 --max-time 5 -o $listOut -X POST "http://127.0.0.1:${port}/mcp" `
             -H "Authorization: Bearer $token" -H "Content-Type: application/json" `
             -H "Mcp-Session-Id: $sid" --data-binary "@$listReq" | Out-Null
         $listJson = Get-Content $listOut -Raw | ConvertFrom-Json
@@ -130,6 +147,7 @@ try {
 } finally {
     if ($gatewayPid) {
         Stop-Process -Id $gatewayPid -Force -ErrorAction SilentlyContinue
+        [void]$gw.WaitForExit(5000)
         Remove-Item (Join-Path $smokeDir "gateway.pid") -ErrorAction SilentlyContinue
     }
 }
