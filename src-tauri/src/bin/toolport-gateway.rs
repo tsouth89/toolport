@@ -1768,47 +1768,118 @@ fn is_fixed_meta_tool(name: &str) -> bool {
     )
 }
 
-/// Resolve an HTTP bearer to (authorized, scope). `Some(allowed)` = authorized,
-/// where `allowed` is the set of server prefixes the client may see (`None` =
-/// the full connected set). The outer `None` = unauthorized. Pure given the
-/// registry + tokens, so the auth/scope policy is unit-testable.
+/// Stable authorization context bound to an MCP Streamable-HTTP session. The
+/// identity distinguishes registered and legacy/open callers; the effective
+/// scope makes a live client re-scope invalidate its existing sessions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct McpSessionOwner {
+    identity: String,
+    /// `None` is the full connected set; `Some` is a sorted, deduplicated set of
+    /// sanitized server ids, matching [`resolve_http_scope`].
+    scope: Option<Vec<String>>,
+}
+
+/// Per-request HTTP attribution. The audit label stays human-readable while the
+/// session owner uses a stable id and effective scope for authorization checks.
+struct HttpCaller {
+    audit_label: Option<String>,
+    session_owner: McpSessionOwner,
+}
+
+/// Resolve authorization, routing scope, audit attribution, and MCP session
+/// ownership together so those security decisions cannot drift apart.
+fn resolve_http_caller(
+    reg: &Registry,
+    env_token: Option<&str>,
+    provided: Option<&str>,
+) -> Option<(Option<std::collections::HashSet<String>>, HttpCaller)> {
+    let owner_scope = |allowed: &Option<std::collections::HashSet<String>>| {
+        allowed.as_ref().map(|set| {
+            let mut ids: Vec<String> = set.iter().cloned().collect();
+            ids.sort();
+            ids
+        })
+    };
+
+    // Legacy single token: sees the full connected set (back-compat).
+    if let (Some(expected), Some(actual)) = (env_token, provided) {
+        if ct_eq(expected.as_bytes(), actual.as_bytes()) {
+            let allowed = None;
+            return Some((
+                allowed,
+                HttpCaller {
+                    audit_label: None,
+                    session_owner: McpSessionOwner {
+                        identity: format!("legacy:{}", registry::sha256_hex(actual)),
+                        scope: None,
+                    },
+                },
+            ));
+        }
+    }
+
+    // A registered client is scoped to its profile (empty profile = full set).
+    if let Some(client) = provided.and_then(|token| reg.http_client_for_token(token)) {
+        let allowed = if client.profile.trim().is_empty() {
+            None
+        } else {
+            Some(
+                reg
+                .enabled_servers_for(&client.profile)
+                .iter()
+                .map(|server| sanitize_segment(&server.id))
+                .collect(),
+            )
+        };
+        let audit_label = Some(if client.label.trim().is_empty() {
+            client.id.clone()
+        } else {
+            client.label.clone()
+        });
+        return Some((
+            allowed.clone(),
+            HttpCaller {
+                audit_label,
+                session_owner: McpSessionOwner {
+                    identity: format!("client:{}", client.id),
+                    scope: owner_scope(&allowed),
+                },
+            },
+        ));
+    }
+
+    // No auth configured at all: open, preserving the loopback default.
+    if env_token.is_none() && reg.http_clients.is_empty() {
+        return Some((
+            None,
+            HttpCaller {
+                audit_label: None,
+                session_owner: McpSessionOwner {
+                    identity: "open".to_string(),
+                    scope: None,
+                },
+            },
+        ));
+    }
+
+    None
+}
+
+/// Test-facing projection of the combined resolver's authorization/scope result.
+#[cfg(test)]
 fn resolve_http_scope(
     reg: &Registry,
     env_token: Option<&str>,
     provided: Option<&str>,
 ) -> Option<Option<std::collections::HashSet<String>>> {
-    use std::collections::HashSet;
-    // Legacy single token: sees the full connected set (back-compat).
-    if let (Some(t), Some(p)) = (env_token, provided) {
-        if ct_eq(p.as_bytes(), t.as_bytes()) {
-            return Some(None);
-        }
-    }
-    // A registered client is scoped to its profile (empty profile = full set).
-    if let Some(p) = provided {
-        if let Some(client) = reg.http_client_for_token(p) {
-            if client.profile.trim().is_empty() {
-                return Some(None);
-            }
-            let set: HashSet<String> = reg
-                .enabled_servers_for(&client.profile)
-                .iter()
-                .map(|s| sanitize_segment(&s.id))
-                .collect();
-            return Some(Some(set));
-        }
-    }
-    // No auth configured at all: open, preserving the loopback default.
-    if env_token.is_none() && reg.http_clients.is_empty() {
-        return Some(None);
-    }
-    None
+    resolve_http_caller(reg, env_token, provided).map(|(allowed, _)| allowed)
 }
 
 /// The audit label for a registered HTTP client's bearer: its `label`, or its `id`
 /// when the label is blank. `None` when the token isn't a registered client (legacy
 /// single-token, open loopback, or the local stdio app), so those calls stay
 /// unattributed in the audit log rather than mislabeled. Pure, so it's unit-testable.
+#[cfg(test)]
 fn http_client_label(reg: &Registry, provided: Option<&str>) -> Option<String> {
     let client = reg.http_client_for_token(provided?)?;
     Some(if client.label.trim().is_empty() {
@@ -3580,6 +3651,9 @@ thread_local! {
 
 /// Per-session state for streamable-HTTP MCP (POST responses + GET listen stream).
 struct McpSession {
+    /// The authenticated HTTP identity and effective scope that initialized this
+    /// session. `None` is used only by direct unit-test callers.
+    owner: Option<McpSessionOwner>,
     last_seen: Mutex<Instant>,
     outbound: Mutex<VecDeque<String>>,
     closed: AtomicBool,
@@ -3591,8 +3665,9 @@ struct McpSession {
 }
 
 impl McpSession {
-    fn new() -> Self {
+    fn new(owner: Option<McpSessionOwner>) -> Self {
         Self {
+            owner,
             last_seen: Mutex::new(Instant::now()),
             outbound: Mutex::new(VecDeque::new()),
             closed: AtomicBool::new(false),
@@ -3794,9 +3869,12 @@ fn new_mcp_session_id() -> String {
 }
 
 /// Mint a new MCP session after TTL cleanup. Returns 503 when at capacity.
-fn mint_mcp_session(state: &GatewayState) -> Result<String, HttpOut> {
+fn mint_mcp_session(
+    state: &GatewayState,
+    owner: Option<&McpSessionOwner>,
+) -> Result<String, HttpOut> {
     let sid = new_mcp_session_id();
-    let session = Arc::new(McpSession::new());
+    let session = Arc::new(McpSession::new(owner.cloned()));
     let mut sessions = state
         .mcp_sessions
         .lock()
@@ -4644,6 +4722,7 @@ impl HttpOut {
 fn mcp_require_session(
     state: &GatewayState,
     session_hdr: Option<&str>,
+    owner: Option<&McpSessionOwner>,
 ) -> Result<(String, Arc<McpSession>), HttpOut> {
     let Some(sid) = session_hdr.map(str::trim).filter(|s| !s.is_empty()) else {
         return Err(HttpOut::json_err(
@@ -4659,11 +4738,13 @@ fn mcp_require_session(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     sessions.retain(|_, s| !s.is_expired() && !s.closed.load(Ordering::SeqCst));
-    match sessions.get(sid) {
+    match sessions.get(sid).filter(|session| session.owner.as_ref() == owner) {
         Some(sess) => {
             sess.touch();
             Ok((sid.to_string(), Arc::clone(sess)))
         }
+        // Missing, expired, and wrong-owner sessions deliberately share one
+        // response so callers cannot probe whether another client's id exists.
         None => Err(HttpOut::json_err(
             404,
             "unknown or expired Mcp-Session-Id; re-initialize",
@@ -4737,6 +4818,7 @@ fn handle_mcp_http(
     accept: Option<&str>,
     allowed: Option<&std::collections::HashSet<String>>,
     client: Option<&str>,
+    session_owner: Option<&McpSessionOwner>,
 ) -> HttpOut {
     let prefer_sse = mcp_prefers_sse(accept);
     match method {
@@ -4744,7 +4826,7 @@ fn handle_mcp_http(
             if !mcp_prefers_sse(accept) {
                 return HttpOut::json_err(406, "Accept must include text/event-stream");
             }
-            match mcp_require_session(state, session_hdr) {
+            match mcp_require_session(state, session_hdr, session_owner) {
                 Ok((sid, session)) => {
                     if !session.try_begin_listen() {
                         return HttpOut::json_err(
@@ -4757,7 +4839,7 @@ fn handle_mcp_http(
                 Err(e) => e,
             }
         }
-        "DELETE" => match mcp_require_session(state, session_hdr) {
+        "DELETE" => match mcp_require_session(state, session_hdr, session_owner) {
             Ok((sid, session)) => {
                 session.close();
                 state
@@ -4797,21 +4879,21 @@ fn handle_mcp_http(
                 if let Some(existing) = session_hdr.map(str::trim).filter(|s| !s.is_empty()) {
                     // Client re-sent a session on initialize: accept if still live,
                     // otherwise mint a fresh one (spec: start over without the old id).
-                    match mcp_require_session(state, Some(existing)) {
+                    match mcp_require_session(state, Some(existing), session_owner) {
                         Ok((sid, _)) => sid,
-                        Err(_) => match mint_mcp_session(state) {
+                        Err(_) => match mint_mcp_session(state, session_owner) {
                             Ok(sid) => sid,
                             Err(e) => return e,
                         },
                     }
                 } else {
-                    match mint_mcp_session(state) {
+                    match mint_mcp_session(state, session_owner) {
                         Ok(sid) => sid,
                         Err(e) => return e,
                     }
                 }
             } else {
-                match mcp_require_session(state, session_hdr) {
+                match mcp_require_session(state, session_hdr, session_owner) {
                     Ok((sid, _)) => sid,
                     Err(e) => return e,
                 }
@@ -4895,8 +4977,10 @@ fn handle_http(
     session_hdr: Option<&str>,
     accept: Option<&str>,
     allowed: Option<&std::collections::HashSet<String>>,
-    client: Option<&str>,
+    caller: Option<&HttpCaller>,
 ) -> HttpOut {
+    let client = caller.and_then(|value| value.audit_label.as_deref());
+    let session_owner = caller.map(|value| &value.session_owner);
     if method == "OPTIONS" {
         return HttpOut::new(204, "text/plain", String::new());
     }
@@ -4904,7 +4988,16 @@ fn handle_http(
     // Streamable-HTTP MCP endpoint (same port as OpenAPI).
     if path == "/mcp" || path.starts_with("/mcp?") {
         return handle_mcp_http(
-            state, guard, confirm, method, body, session_hdr, accept, allowed, client,
+            state,
+            guard,
+            confirm,
+            method,
+            body,
+            session_hdr,
+            accept,
+            allowed,
+            client,
+            session_owner,
         );
     }
 
@@ -4931,7 +5024,16 @@ fn handle_http(
             // Don't let OpenAPI POST swallow /mcp if path matching drifted.
             if name == "mcp" {
                 return handle_mcp_http(
-                    state, guard, confirm, method, body, session_hdr, accept, allowed, client,
+                    state,
+                    guard,
+                    confirm,
+                    method,
+                    body,
+                    session_hdr,
+                    accept,
+                    allowed,
+                    client,
+                    session_owner,
                 );
             }
             let args: Value = if body.trim().is_empty() {
@@ -5322,7 +5424,7 @@ fn handle_connection(
             .find(|h| h.field.equiv("Authorization"))
             .map(|h| h.value.as_str().to_string());
         let provided_tok = provided.as_deref().and_then(parse_bearer);
-        let mut client_label: Option<String> = None;
+        let mut caller: Option<HttpCaller> = None;
         let scope: Option<Option<std::collections::HashSet<String>>> = if method == "OPTIONS" {
             Some(None)
         } else {
@@ -5330,10 +5432,15 @@ fn handle_connection(
                 .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // Resolve the client's audit label from the same token, so every call it
-            // makes can be attributed to it in the audit log.
-            client_label = http_client_label(&reg, provided_tok);
-            resolve_http_scope(&reg, token.as_deref(), provided_tok)
+            // Resolve authorization, routing scope, audit attribution, and MCP
+            // session ownership from one token lookup and one effective allow-set.
+            match resolve_http_caller(&reg, token.as_deref(), provided_tok) {
+                Some((allowed, resolved_caller)) => {
+                    caller = Some(resolved_caller);
+                    Some(allowed)
+                }
+                None => None,
+            }
         };
 
         let out: HttpOut = if cross_site && method != "OPTIONS" {
@@ -5361,7 +5468,7 @@ fn handle_connection(
                             session_hdr.as_deref(),
                             accept_hdr.as_deref(),
                             allowed.as_ref(),
-                            client_label.as_deref(),
+                            caller.as_ref(),
                         )
                     }))
                     .unwrap_or_else(|_| HttpOut::json_err(500, "internal error"))
@@ -6534,6 +6641,35 @@ mod tests {
     }
 
     #[test]
+    fn http_session_owner_uses_stable_client_id_and_effective_scope() {
+        let mut reg = Registry::default();
+        let billing = reg.add_profile("Billing");
+        reg.http_clients.push(registry::HttpClient {
+            id: "c1".into(),
+            label: "Open WebUI".into(),
+            token_sha256: registry::sha256_hex("tok1"),
+            profile: billing,
+        });
+        reg.http_clients.push(registry::HttpClient {
+            id: "c2".into(),
+            label: "Open WebUI".into(),
+            token_sha256: registry::sha256_hex("tok2"),
+            profile: String::new(),
+        });
+
+        let (_, first) = resolve_http_caller(&reg, None, Some("tok1")).unwrap();
+        let (_, second) = resolve_http_caller(&reg, None, Some("tok2")).unwrap();
+        assert_eq!(first.audit_label.as_deref(), Some("Open WebUI"));
+        assert_eq!(second.audit_label.as_deref(), Some("Open WebUI"));
+        assert_ne!(
+            first.session_owner.identity, second.session_owner.identity,
+            "duplicate display labels must not collapse distinct clients"
+        );
+        assert_eq!(first.session_owner.scope, Some(Vec::new()));
+        assert_eq!(second.session_owner.scope, None);
+    }
+
+    #[test]
     fn status_summary_scopes_to_allowed_servers() {
         use std::collections::HashSet;
         let mut reg = Registry::default();
@@ -6922,6 +7058,131 @@ mod tests {
     }
 
     #[test]
+    fn mcp_http_session_is_bound_to_client_identity_and_scope() {
+        let state = http_state(true);
+        let search = SearchGuard::default();
+        let confirm = ConfirmGuard::new();
+        let caller = |identity: &str, scope: &[&str]| HttpCaller {
+            audit_label: Some(identity.to_string()),
+            session_owner: McpSessionOwner {
+                identity: identity.to_string(),
+                scope: Some(scope.iter().map(|value| value.to_string()).collect()),
+            },
+        };
+        let owner = caller("client:cursor", &["github"]);
+        let intruder = caller("client:webui", &["github"]);
+        let rescoped_owner = caller("client:cursor", &["github", "stripe"]);
+
+        let init = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": "2025-06-18", "capabilities": {} }
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(&owner),
+        );
+        assert_eq!(init.status, 200, "body={}", init.body);
+        let sid = mcp_session_of(&init);
+        let list_body = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })
+            .to_string();
+
+        // A different authenticated identity cannot POST, listen, or delete.
+        let wrong_post = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &list_body,
+            Some(&sid),
+            None,
+            None,
+            Some(&intruder),
+        );
+        assert_eq!(wrong_post.status, 404);
+        let wrong_get = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "GET",
+            "/mcp",
+            "",
+            Some(&sid),
+            Some("text/event-stream"),
+            None,
+            Some(&intruder),
+        );
+        assert_eq!(wrong_get.status, 404);
+        let wrong_delete = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "DELETE",
+            "/mcp",
+            "",
+            Some(&sid),
+            None,
+            None,
+            Some(&intruder),
+        );
+        assert_eq!(wrong_delete.status, 404);
+
+        // The same client after a live scope change must also re-initialize.
+        let wrong_scope = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &list_body,
+            Some(&sid),
+            None,
+            None,
+            Some(&rescoped_owner),
+        );
+        assert_eq!(wrong_scope.status, 404);
+
+        // Refused attempts do not destroy the session; the original owner can
+        // still use and then explicitly terminate it.
+        let owner_post = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &list_body,
+            Some(&sid),
+            None,
+            None,
+            Some(&owner),
+        );
+        assert_eq!(owner_post.status, 200, "body={}", owner_post.body);
+        let owner_delete = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "DELETE",
+            "/mcp",
+            "",
+            Some(&sid),
+            None,
+            None,
+            Some(&owner),
+        );
+        assert_eq!(owner_delete.status, 204);
+    }
+
+    #[test]
     fn mcp_http_get_opens_listen_stream() {
         let state = http_state(true);
         let search = SearchGuard::default();
@@ -7012,7 +7273,7 @@ mod tests {
     #[test]
     fn mcp_push_server_message_queues_sse_payload() {
         let state = http_state(true);
-        let sid = mint_mcp_session(&state).ok().unwrap();
+        let sid = mint_mcp_session(&state, None).ok().unwrap();
         let msg = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
         assert!(mcp_push_server_message(&state, &sid, &msg));
         let sessions = state.mcp_sessions.lock().unwrap();
