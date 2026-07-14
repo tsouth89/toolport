@@ -175,6 +175,9 @@ Use this before exposing a headless gateway beyond a trusted host or LAN.
       untrusted HTTP.
 - [ ] **Scoped HTTP clients** — if the registry lists `httpClients[]`, give each
       caller its own token and profile scope instead of sharing one global token.
+- [ ] **Request deadlines accounted for** — the gateway allows 10 seconds for complete
+      headers and 30 seconds for the request body, then closes the connection with 408.
+      Keep reverse-proxy deadlines at least as strict when exposing the gateway remotely.
 
 ### Secrets and registry
 

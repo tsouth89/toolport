@@ -131,7 +131,8 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       validated address set is enforced at connect time (whole-set refusal), closing the
       resolve-once/connect-later window.
 - [x] Worker-per-request HTTP loop **SHIPPED (#99)** — a slow downstream / held call no
-      longer blocks other callers. (A per-request read timeout for slowloris is still open.)
+      longer blocks other callers. The public HTTP ingress now also enforces absolute
+      10-second header and 30-second body read deadlines before routing.
 
 ### New-user UX (first 10 minutes; scaffolding is strong, these are the sharp edges)
 
@@ -260,9 +261,9 @@ background sync so policy reaches every member; deployed server-side).
 
 **Still open from the audit (not yet built):**
 
-- [ ] **Slowloris read timeout on the HTTP bridge** (tracked) — needs a socket read
-      deadline `tiny_http` doesn't expose; deferred rather than shipped as a fragile
-      threaded-read hack. Low risk (loopback bind + bearer + 4MB + inflight caps).
+- [x] **Slowloris read timeout on the HTTP bridge:** a bounded ingress adapter enforces
+      absolute header/body deadlines before handing complete requests to `tiny_http`,
+      with a 64-connection cap on incomplete reads and direct 408 responses.
 - [ ] **Persist OAuth token expiry.** `authenticate_oauth` parses `expires_in` then drops
       it (`oauth.rs`), so no "re-auth soon" UX is possible. Store issue/expiry ts; then a
       subtle near/past-expiry hint on the server row (probe stays source of truth). (M)
