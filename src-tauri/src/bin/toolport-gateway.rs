@@ -5168,7 +5168,16 @@ fn insecure_loopback_requested(args: &[String]) -> bool {
 
 /// Startup admission policy. The escape hatch is never valid for a non-loopback bind.
 fn http_bind_is_authorized(loopback: bool, auth_configured: bool, insecure_loopback: bool) -> bool {
-    auth_configured || (loopback && insecure_loopback)
+    auth_configured || http_allows_insecure_open(loopback, auth_configured, insecure_loopback)
+}
+
+/// Activate the open-listener fallback only when the escape hatch was required at startup.
+fn http_allows_insecure_open(
+    loopback: bool,
+    auth_configured: bool,
+    insecure_loopback: bool,
+) -> bool {
+    loopback && insecure_loopback && !auth_configured
 }
 
 fn serve_http(state: GatewayState, port: u16) {
@@ -5193,6 +5202,8 @@ fn serve_http(state: GatewayState, port: u16) {
     let auth_configured = token.is_some() || registered_clients;
     let args: Vec<String> = std::env::args().collect();
     let insecure_loopback = insecure_loopback_requested(&args);
+    let allow_insecure_open =
+        http_allows_insecure_open(loopback, auth_configured, insecure_loopback);
 
     if !http_bind_is_authorized(loopback, auth_configured, insecure_loopback) {
         if loopback {
@@ -5210,7 +5221,7 @@ fn serve_http(state: GatewayState, port: u16) {
         }
         std::process::exit(1);
     }
-    if !auth_configured {
+    if allow_insecure_open {
         eprintln!(
             "toolport-gateway: WARNING - {INSECURE_LOOPBACK_FLAG} enabled; any local process \
              (including a web page open in your browser) can call your tools."
@@ -5243,7 +5254,7 @@ fn serve_http(state: GatewayState, port: u16) {
                     token6,
                     search6,
                     confirm6,
-                    insecure_loopback,
+                    allow_insecure_open,
                 )
             });
             glog(&format!(
@@ -5272,7 +5283,7 @@ fn serve_http(state: GatewayState, port: u16) {
         token,
         search,
         confirm,
-        loopback && insecure_loopback,
+        allow_insecure_open,
     );
 }
 
@@ -6599,6 +6610,9 @@ mod tests {
         assert!(!http_bind_is_authorized(true, false, false));
         assert!(!http_bind_is_authorized(false, false, false));
         assert!(!http_bind_is_authorized(false, false, true));
+        assert!(http_allows_insecure_open(true, false, true));
+        assert!(!http_allows_insecure_open(true, true, true));
+        assert!(!http_allows_insecure_open(false, false, true));
     }
 
     #[test]
@@ -6745,9 +6759,14 @@ mod tests {
         // Removing the last registered client while the gateway is live must not
         // turn an authenticated listener into an open one. Only immutable startup
         // policy from `--insecure-loopback` enables the fallback.
+        let authenticated_startup_allows_open = http_allows_insecure_open(true, true, true);
         reg.http_clients.clear();
-        assert!(resolve_http_scope(&reg, None, None, false).is_none());
-        assert_eq!(resolve_http_scope(&reg, None, None, true), Some(None));
+        assert!(resolve_http_scope(&reg, None, None, authenticated_startup_allows_open).is_none());
+        let explicit_open_startup = http_allows_insecure_open(true, false, true);
+        assert_eq!(
+            resolve_http_scope(&reg, None, None, explicit_open_startup),
+            Some(None)
+        );
     }
 
     #[test]

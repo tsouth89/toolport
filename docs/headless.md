@@ -231,9 +231,9 @@ the v1.5.1–1.5.2 audit batch (#203–#207).
 **Known limitations (not bugs, but deploy constraints):**
 
 - No built-in TLS or rate limiting — use a reverse proxy.
-- Loopback without a token warns but still starts: any **local** process (including
-  a malicious web page via browser) can call tools. Set a token even on localhost if
-  browsers run on the same machine.
+- `--insecure-loopback` warns and starts an unauthenticated **local-only** listener:
+  any local process (including a malicious web page via browser) can call tools.
+  Prefer a token even on localhost if browsers run on the same machine.
 - Headless + human approval on = destructive calls blocked, not prompted.
 - MCP HTTP test coverage is thinner than the stdio gateway path (see ROADMAP).
 

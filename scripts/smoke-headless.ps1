@@ -134,7 +134,7 @@ try {
     }
 }
 
-# --- Test 4: HITL fail-closed (unit test) ---
+# --- Test 6: HITL fail-closed (unit test) ---
 Write-Host "Running approval_broker_fails_closed unit test..."
 Push-Location $repoRoot
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --bin toolport-gateway approval_broker_fails_closed 2>&1 | Out-Null
