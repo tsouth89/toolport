@@ -58,6 +58,9 @@ export interface AuditEntry {
   ok: boolean;
   /** How long the call took, ms. Absent for records logged before timing. */
   durationMs?: number;
+  /** How long a gated call waited for a human approval decision, ms. Present on
+   * `kind:"approval"` records instead of durationMs (which is downstream exec time). */
+  heldMs?: number;
   /** Short failure message for a failed call (never args or result data). */
   error?: string;
   /** A destructive call held for confirmation (not a success and not an error). */

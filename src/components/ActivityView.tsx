@@ -673,7 +673,7 @@ function CallRow({ e }: { e: AuditEntry }) {
           </span>
         )}
         <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
-          {fmtMs(e.durationMs ?? null)}
+          {fmtMs(e.durationMs ?? e.heldMs ?? null)}
         </span>
         <span className="shrink-0 text-xs text-muted-foreground">
           {new Date(e.ts).toLocaleString()}
