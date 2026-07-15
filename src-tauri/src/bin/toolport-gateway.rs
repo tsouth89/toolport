@@ -163,12 +163,10 @@ fn fetch_result_tool_def() -> Value {
             "type": "object",
             "properties": {
                 "cursor": { "type": "string", "description": "The cursor from the marker." },
-                "offset": { "type": "integer", "minimum": 0, "description": "Character offset to read from (shown in the marker)." },
-                "projection": { "type": "string", "description": "Optional dot-separated path into structuredContent (for example: data.items.0.name)."
-             },
+                "offset": { "type": "integer", "minimum": 0, "description": "Character offset to read from (shown in the marker). Ignored when `projection` is set." },
+                "projection": { "type": "string", "description": "Optional dot-separated path into structuredContent (for example: data.items.0.name). When set, returns just that field instead of a text page." }
             },
-          
-            "required": ["cursor", "offset"],
+            "required": ["cursor"],
             "additionalProperties": false
         }
     })

@@ -46,6 +46,10 @@ pub fn budget() -> usize {
 struct Cached {
     body: String,
     structured: Option<Value>,
+    /// The entry's total serialized size (`body` + structured JSON), computed once at
+    /// insert. The eviction loop sums this across entries on every oversized call, so
+    /// caching it avoids re-serializing every structured payload on each iteration.
+    size: usize,
     at: Instant,
     /// The client the result belongs to (a registered HTTP client's label), or None
     /// for the single-tenant stdio process. Only this client may fetch it back.
@@ -182,11 +186,7 @@ pub fn shape_result(result: &mut Value, budget: usize, owner: Option<&str>) -> b
         .unwrap_or(false);
 
     let cursor = next_cursor();
-    let new_entry_size = body.len()
-        + structured
-            .as_ref()
-            .map(value_size)
-            .unwrap_or(0);
+    let new_entry_size = body.len() + structured.as_ref().map(value_size).unwrap_or(0);
 
     {
         let mut map = cache().lock().unwrap_or_else(|e| e.into_inner());
@@ -194,21 +194,11 @@ pub fn shape_result(result: &mut Value, budget: usize, owner: Option<&str>) -> b
 
         // Bound memory: evict oldest until the entry count and total bytes leave
         // room for this cached result (or the cache empties, keeping one over-cap
-        // result).
+        // result). Each entry's `size` is precomputed, so this sum is O(n) adds, not
+        // O(n) JSON re-serializations, on every iteration.
         while !map.is_empty()
             && (map.len() >= MAX_CACHE_ENTRIES
-                || map
-                    .values()
-                    .map(|c| {
-                        c.body.len()
-                            + c.structured
-                                .as_ref()
-                                .map(value_size)
-                                .unwrap_or(0)
-                    })
-                    .sum::<usize>()
-                    + new_entry_size
-                    > MAX_CACHE_BYTES)
+                || map.values().map(|c| c.size).sum::<usize>() + new_entry_size > MAX_CACHE_BYTES)
         {
             let Some(oldest) = map.iter().min_by_key(|(_, c)| c.at).map(|(k, _)| k.clone()) else {
                 break;
@@ -221,6 +211,7 @@ pub fn shape_result(result: &mut Value, budget: usize, owner: Option<&str>) -> b
             Cached {
                 body,
                 structured,
+                size: new_entry_size,
                 at: Instant::now(),
                 owner: owner.map(str::to_string),
             },
