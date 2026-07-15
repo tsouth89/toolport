@@ -74,16 +74,21 @@
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
   --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
+  /* Accent doubles as the hover + selected-row fill. On near-white surfaces the old 0.97
+     was invisible (a "grey bar you can't see"); 0.922 (== border strength) reads clearly
+     as a selection without going heavy. Dark keeps its own brighter accent below. */
+  --accent: oklch(0.922 0 0);
   --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
+  /* A hair less lightness/chroma than the raw red so error counts don't scream on white. */
+  --destructive: oklch(0.55 0.21 27.325);
   /* Semantic accent tokens, one shade each, so success/warning/info/owned render
        identically across every view (the audit found these drifting 300/400/500).
-       Values are the Tailwind v4 *-400 palette: emerald, amber, violet, sky. */
-  --success: oklch(0.765 0.177 163.223);
-  --warning: oklch(0.828 0.189 84.429);
-  --info: oklch(0.74 0.165 293.541);
-  --owned: oklch(0.746 0.16 232.661);
+       LIGHT uses the darker *-600 shades: the *-400 palette is tuned for dark navy and
+       reads as neon/low-contrast on white. Dark restores the *-400 values below. */
+  --success: oklch(0.6 0.14 163.223);
+  --warning: oklch(0.68 0.145 70);
+  --info: oklch(0.56 0.2 293.541);
+  --owned: oklch(0.6 0.15 232.661);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -97,7 +102,7 @@
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent: oklch(0.922 0 0);
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
@@ -128,6 +133,12 @@
   --accent: oklch(0.345 0.056 258);
   --accent-foreground: oklch(0.965 0.008 250);
   --destructive: oklch(0.704 0.191 22.216);
+  /* Restore the vivid *-400 semantics for dark (light darkens these for white surfaces).
+     These are the values the ramp was tuned against on navy - keep dark unchanged. */
+  --success: oklch(0.765 0.177 163.223);
+  --warning: oklch(0.828 0.189 84.429);
+  --info: oklch(0.74 0.165 293.541);
+  --owned: oklch(0.746 0.16 232.661);
   /* 22% (was 16%) so card edges and row dividers actually read against the navy. */
   --border: oklch(0.72 0.05 258 / 22%);
   --input: oklch(0.72 0.05 258 / 22%);
