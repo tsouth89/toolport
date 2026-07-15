@@ -1691,7 +1691,12 @@ impl HttpTransport {
     }
 
     fn force_refresh_after_auth_error(&mut self, code: u16) -> Result<(), TransportError> {
-        match self.refresh.as_ref().expect("refresh callback checked")(true) {
+        let Some(refresh) = self.refresh.as_ref() else {
+            return Err(TransportError::Fatal(format!(
+                "HTTP {code} (needs authentication): no refresh callback configured"
+            )));
+        };
+        match refresh(true) {
             Ok(Some(token)) => {
                 self.auth = Some(token);
                 Ok(())
@@ -3000,6 +3005,21 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(*seen_auth.lock().unwrap(), "Bearer still-valid");
+    }
+
+    #[test]
+    fn forced_refresh_without_callback_returns_auth_error() {
+        use super::HttpTransport;
+
+        let mut transport = HttpTransport::new("http://127.0.0.1:1/");
+        let error = transport
+            .force_refresh_after_auth_error(401)
+            .expect_err("missing refresh callback should return an authentication error");
+
+        assert_eq!(
+            error.to_string(),
+            "HTTP 401 (needs authentication): no refresh callback configured"
+        );
     }
 
     #[test]
