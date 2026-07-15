@@ -808,7 +808,7 @@ function App() {
         destructive
         onConfirm={handleToggleAll}
       />
-      <Toaster position="bottom-right" />
+      <Toaster theme="dark" position="bottom-right" />
     </TooltipProvider>
   );
 }

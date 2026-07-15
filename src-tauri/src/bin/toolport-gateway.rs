@@ -30,6 +30,7 @@ use serde_json::{json, Value};
 
 use conduit_lib::audit;
 use conduit_lib::clients;
+use conduit_lib::codemode;
 use conduit_lib::downstream::{
     self, DownstreamServer, ServerRequestHandler, StdioTransport, Transport, PROTOCOL_VERSION,
 };
@@ -238,6 +239,40 @@ fn confirm_tool_def() -> Value {
     })
 }
 
+/// The `toolport_run_script` "code mode" meta-tool (advertised only when
+/// [`code_mode_enabled`]). One script replaces many round-trips.
+fn run_script_tool_def() -> Value {
+    json!({
+        "name": "toolport_run_script",
+        "description": "Run ONE JavaScript orchestration script server-side instead of making \
+            many separate tool calls. Inside the script, call downstream tools with \
+            `toolport.call(name, args)` (name = the exact tool name from toolport_search_tools, \
+            args = its arguments object); it returns that tool's result as a value. Loop, branch, \
+            and combine results, then `return` a single aggregated value - only the returned value \
+            comes back, so intermediate results never fill your context and a multi-step task \
+            costs one round-trip. Each call still passes the same gates as toolport_call_tool \
+            (scope, human approval). Synchronous: call tools one after another (no await / \
+            Promises). Best when you already know the steps; use toolport_search_tools + \
+            toolport_call_tool while you are still exploring.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "script": {
+                    "type": "string",
+                    "description": "JavaScript body. Call tools with toolport.call(name, args) and `return` the final value. The optional `data` payload below is available as the global `data`."
+                },
+                "data": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Optional input object exposed to the script as the global `data`."
+                }
+            },
+            "required": ["script"],
+            "additionalProperties": false
+        }
+    })
+}
+
 fn fetch_result_tool_def() -> Value {
     json!({
         "name": "toolport_fetch_result",
@@ -431,6 +466,20 @@ fn grouped_discovery() -> bool {
     discovery_mode() == DiscoveryMode::Grouped
 }
 
+/// Opt-in gate for server-side "code mode" (the `toolport_run_script` meta-tool). Off by
+/// default: code mode runs an agent-supplied JS script that can call many tools in one
+/// round-trip, a powerful capability worth an explicit opt-in even under Toolport's local
+/// trust model. Enable with `CONDUIT_CODE_MODE=1` (or `true`). When off, `run_script` is
+/// neither advertised nor dispatched.
+fn code_mode_enabled() -> bool {
+    std::env::var("CONDUIT_CODE_MODE")
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
 /// The server prefix of a *namespaced* tool (`server__tool`). `None` for a bare name
 /// (a meta-tool), so those never spawn a spurious `help_<meta>` browse tool. (Guard:
 /// `tool_prefix` returns the whole name when there is no `__`.)
@@ -490,6 +539,9 @@ fn grouped_tool_defs(allow_agent_control: bool, confirm_destructive: bool, catal
         call_tool_def(),
         fetch_result_tool_def(),
     ];
+    if code_mode_enabled() {
+        tools.push(run_script_tool_def());
+    }
     if allow_agent_control {
         tools.push(enable_server_tool_def());
         tools.push(disable_server_tool_def());
@@ -1447,25 +1499,37 @@ fn fmt_tokens(n: u64) -> String {
 fn savings_line() -> String {
     let s = savings::summary();
     let saved = s.get("tokensSaved").and_then(Value::as_u64).unwrap_or(0);
-    if saved == 0 {
+    let round_trips = s.get("roundTripsSaved").and_then(Value::as_u64).unwrap_or(0);
+    if saved == 0 && round_trips == 0 {
         return String::new();
     }
-    let loads = s.get("listLoads").and_then(Value::as_u64).unwrap_or(0);
-    let peak = s.get("peakCatalog").and_then(Value::as_u64).unwrap_or(0);
-    let dollars = (saved as f64 / 1_000_000.0) * 3.0; // Claude Sonnet input $/M
-    let mut line = format!(
-        "\nLazy discovery has kept ~{} tokens of tool definitions out of your agent's \
-         context so far (about ${:.2} at Claude Sonnet input rates) across {loads} \
-         tool-list load(s)",
-        fmt_tokens(saved),
-        dollars
-    );
-    if peak > 4 {
+    let mut line = String::from("\n");
+    if saved > 0 {
+        let loads = s.get("listLoads").and_then(Value::as_u64).unwrap_or(0);
+        let peak = s.get("peakCatalog").and_then(Value::as_u64).unwrap_or(0);
+        let dollars = (saved as f64 / 1_000_000.0) * 3.0; // Claude Sonnet input $/M
         line.push_str(&format!(
-            "; the biggest catalog collapsed {peak} tools down to a handful of meta-tools"
+            "Lazy discovery has kept ~{} tokens of tool definitions out of your agent's \
+             context so far (about ${:.2} at Claude Sonnet input rates) across {loads} \
+             tool-list load(s)",
+            fmt_tokens(saved),
+            dollars
+        ));
+        if peak > 4 {
+            line.push_str(&format!(
+                "; the biggest catalog collapsed {peak} tools down to a handful of meta-tools"
+            ));
+        }
+        line.push_str(".\n");
+    }
+    if round_trips > 0 {
+        // Code mode's second savings headline: round-trips (and their intermediate results)
+        // collapsed into single run_script calls.
+        line.push_str(&format!(
+            "Code mode has collapsed ~{round_trips} downstream tool round-trip(s) into single \
+             run_script call(s), keeping their intermediate results out of context.\n"
         ));
     }
-    line.push_str(".\n");
     line
 }
 
@@ -1870,6 +1934,7 @@ fn is_fixed_meta_tool(name: &str) -> bool {
             | "toolport_fetch_result"
             | "toolport_enable_server"
             | "toolport_disable_server"
+            | "toolport_run_script"
     )
 }
 
@@ -2148,13 +2213,13 @@ fn content_binding_decision(
     }
 }
 
-/// Build the agent-facing envelope for a call the gateway refused to run. Carries a
-/// machine-readable `toolportDecision` + gate `reason` (+ a `retriable` hint) in
-/// `structuredContent` so an agent - or a code-mode script inspecting the result - can pick
+/// Build the agent-facing tool RESULT for a call the gateway refused to run (the inner
+/// `{content, isError, structuredContent}`, which the caller wraps in a JSON-RPC envelope or
+/// hands to a code-mode script as its `toolport.call()` return). Carries a machine-readable
+/// `toolportDecision` + gate `reason` (+ a `retriable` hint) so an agent or script can pick
 /// the right recovery (retry after approval, re-form the call, or abandon) instead of
 /// blind-retrying a flat error string. Every non-approval is fail-closed (`isError: true`).
 fn refused_call_result(
-    id: Value,
     name: &str,
     decision: approval::ApprovalDecision,
     reason_str: &str,
@@ -2190,19 +2255,400 @@ fn refused_call_result(
         approval::ApprovalDecision::Denied => "",
         _ => " Ask the user to approve it in the Toolport app, then retry.",
     };
-    success(
-        id,
-        json!({
-            "content": [{ "type": "text", "text":
-                format!("Toolport: {why}, so it did not run.{guidance}") }],
-            "isError": true,
-            "structuredContent": {
-                "toolportDecision": token,
-                "reason": reason_str,
-                "retriable": retriable,
+    json!({
+        "content": [{ "type": "text", "text":
+            format!("Toolport: {why}, so it did not run.{guidance}") }],
+        "isError": true,
+        "structuredContent": {
+            "toolportDecision": token,
+            "reason": reason_str,
+            "retriable": retriable,
+        }
+    })
+}
+
+/// Execute ONE already-resolved tool call and return the MCP tool RESULT (the inner
+/// `{content, isError, structuredContent}`), NOT a JSON-RPC envelope. This is the single
+/// path both a direct `toolport_call_tool` dispatch and a code-mode script's
+/// `toolport.call()` binding go through, so every gate applies identically to both: the
+/// per-client scope guard, the placeholder guard, the typed human-approval gate with
+/// content-binding, the per-call destructive confirmation, live inspection, result shaping,
+/// and audit. A script therefore never reaches a tool the client couldn't already call, nor
+/// skips a gate a direct call would hit.
+///
+/// `confirm` is `Some` only on the interactive direct path, where a destructive tool can be
+/// held for the agent's `toolport_confirm` token replay. Inside a script that two-step
+/// handshake can't happen, so `confirm` is `None` and such a call fails closed rather than
+/// running unconfirmed. `confirmed` is true only when the call already came back through
+/// `toolport_confirm` (skips the approval + confirm gates so it isn't re-intercepted).
+#[allow(clippy::too_many_arguments)]
+fn execute_call(
+    reg: &Registry,
+    router: &Router,
+    cached: &[Value],
+    client: Option<&str>,
+    allowed: Option<&std::collections::HashSet<String>>,
+    cancel: Option<downstream::CancelContext>,
+    confirm: Option<&ConfirmGuard>,
+    name: &str,
+    arguments: Value,
+    mut confirmed: bool,
+) -> Value {
+    // Resolve the call's real (server, original tool) from the router's route map,
+    // NOT by splitting the exposed name on `__`. A renamed tool (via a tool override)
+    // or a server id containing `__` would otherwise mis-derive the server and
+    // silently weaken the scope guard and the HITL untrusted-provenance check below.
+    let (server_id, tool_name) = router
+        .route_of(name)
+        .map(|(s, t)| (s.to_string(), t.to_string()))
+        .unwrap_or_else(|| (String::new(), name.to_string()));
+    let srv_owned = sanitize_segment(&server_id);
+    let srv = srv_owned.as_str();
+    let tool = tool_name.as_str();
+
+    // Scope guard: a registered HTTP client may only call tools on the
+    // servers its token is allowed to see (a no-op when unscoped). Search
+    // and list are already filtered, but a client could name any tool, so
+    // enforce it on the call path too.
+    if let Some(set) = allowed {
+        if !set.contains(srv) {
+            return json!({
+                "content": [{ "type": "text", "text": format!("Toolport: '{srv}' is not available to this client.") }],
+                "isError": true
+            });
+        }
+    }
+
+    // Pre-call guard: a model that invents an identifier (e.g.
+    // teamId = "your_team_id") would otherwise waste a downstream call
+    // and get a confusing failure. Catch obvious placeholders and point
+    // it at where to source the real value. General across every server.
+    if let Some((param, value)) = find_placeholder_arg(&arguments) {
+        let resource = resource_stem(&param);
+        let hints = source_tool_hints(cached, srv, Some(&resource), 3);
+        let source = if hints.is_empty() {
+            format!("call a list or get tool on the '{srv}' server")
+        } else {
+            format!(
+                "call one of these on the '{srv}' server first: {}",
+                hints.join(", ")
+            )
+        };
+        let msg = format!(
+            "Toolport: \"{value}\" for \"{param}\" looks like a placeholder, not a real \
+             value, and was not sent. Don't invent identifiers. To get a real \"{param}\", \
+             {source}, then call {name} again with the value it returns."
+        );
+        return json!({ "content": [{ "type": "text", "text": msg }], "isError": true });
+    }
+
+    // Human-in-the-loop approval: hold a gated call (destructive, or from an
+    // untrusted-provenance server) until a person approves it in the Toolport app.
+    // Takes precedence over the agent-facing confirm below, and is fail-closed
+    // (no broker / no answer / timeout all deny). Skipped once `confirmed`.
+    if reg.human_approval_effective() && !confirmed {
+        // Resolve destructiveness robustly: cache, then live router, else
+        // fail-closed (an unknown tool must not skip the human gate).
+        let is_dest = tool_is_destructive_fail_closed(name, cached, router);
+        // Untrusted provenance = the same shared/registry signal the SSRF guard
+        // uses. Match on the REAL server id from `route_of` (not the sanitized
+        // prefix): two ids that sanitize alike would otherwise read the wrong
+        // server's trust flag and could skip this gate.
+        let untrusted = reg
+            .servers
+            .iter()
+            .find(|s| s.id == server_id)
+            .map(|s| matches!(s.source.as_deref(), Some("shared") | Some("registry")))
+            .unwrap_or(false);
+        if let Some(reason) = approval::gate_reason(true, is_dest, untrusted) {
+            // The gate reason names WHY a human was asked; shared by the audit record
+            // and the agent-facing envelope on every outcome (approved included).
+            let reason_str = match reason {
+                approval::ApprovalReason::Destructive => "destructive",
+                approval::ApprovalReason::UntrustedSource => "untrusted_source",
+                approval::ApprovalReason::DestructiveAndUntrusted => {
+                    "destructive_and_untrusted"
+                }
+            };
+            // The exact call being approved, content-bound: the bytes that RUN must
+            // hash-match these. Captured before the (blocking) human decision.
+            let approved_args_hash = audit::args_hash(&arguments);
+            let t0 = std::time::Instant::now();
+            let decision = request_human_decision(approval::ApprovalRequest {
+                token: String::new(),
+                id: new_correlation_id(),
+                client: client.map(str::to_string),
+                server: srv.to_string(),
+                tool: tool.to_string(),
+                reason,
+                arguments: arguments.clone(),
+                tool_fingerprint: tool_fingerprint_for(name, cached, router),
+            });
+            let held_ms = t0.elapsed().as_millis() as u64;
+            if !decision.is_approved() {
+                // Governance audit: the gate reason and which non-approval outcome
+                // (denied / no-response / unreachable), plus a content hash of the
+                // exact call - never the raw args. Replaces the flat record_held so
+                // the failure modes are no longer indistinguishable in the log.
+                audit::record_decision(
+                    srv,
+                    tool,
+                    client,
+                    reason_str,
+                    decision_token(decision),
+                    &arguments,
+                    Some(held_ms),
+                );
+                return refused_call_result(name, decision, reason_str);
             }
+            // A human approved. Enforce content-binding before running: if the call
+            // was mutated after approval, reject the stale approval (fail-closed)
+            // rather than run bytes a human never actually saw.
+            if let Some(stale) = content_binding_decision(&approved_args_hash, &arguments) {
+                audit::record_decision(
+                    srv,
+                    tool,
+                    client,
+                    reason_str,
+                    decision_token(stale),
+                    &arguments,
+                    Some(held_ms),
+                );
+                return refused_call_result(name, stale, reason_str);
+            }
+            // Approved calls are audited too, so the trail shows what actually ran,
+            // not only what was blocked.
+            audit::record_decision(
+                srv,
+                tool,
+                client,
+                reason_str,
+                "approved",
+                &arguments,
+                Some(held_ms),
+            );
+            // Skip the agent-confirm step and route the call.
+            confirmed = true;
+        }
+    }
+
+    // Per-call confirmation for destructive tools: intercept the first
+    // call with these arguments, store it, and return a preview. The
+    // agent calls toolport_confirm { token } to replay the stored call.
+    // This runs AFTER the placeholder guard (so a placeholder never
+    // gets a token) and BEFORE the actual route_call (so a destructive
+    // call never reaches the downstream server unconfirmed).
+    // Skip when `confirmed` is true: the call arrived via toolport_confirm
+    // and was already reviewed (prevents re-interception loop).
+    if reg.confirm_destructive && !confirmed {
+        // Resolve destructiveness robustly (cache, then live router, else
+        // fail-closed), so a cold/stale cache can't skip the confirm step for a
+        // destructive tool.
+        let dest = tool_is_destructive_fail_closed(name, cached, router);
+        if dest {
+            match confirm {
+                Some(confirm) => {
+                    let token = confirm.store(name.to_string(), arguments.clone(), client);
+                    let args_pretty =
+                        serde_json::to_string_pretty(&arguments).unwrap_or_default();
+                    let msg = format!(
+                        "⚠️ Destructive action intercepted.\n\nTool: {name}\nArguments:\n{args_pretty}\n\n\
+                         Review the arguments above carefully. If correct, call toolport_confirm \
+                         with token: {token}\n\
+                         The token expires in 60 seconds. The original arguments will be replayed \
+                         exactly."
+                    );
+                    // Held for confirmation, not a failure: record as held (ok), so the
+                    // confirm-destructive feature doesn't inflate the error rate.
+                    audit::record_held(srv, tool, client);
+                    return json!({
+                        "content": [{ "type": "text", "text": msg }],
+                        "isError": true
+                    });
+                }
+                None => {
+                    // Code mode: the agent-token replay handshake can't happen inside a
+                    // script (it needs a second round-trip). Fail closed rather than run
+                    // an unconfirmed destructive call.
+                    audit::record_held(srv, tool, client);
+                    return json!({
+                        "content": [{ "type": "text", "text": format!(
+                            "Toolport: {name} is a destructive tool that requires per-call \
+                             confirmation, which is not available inside a code-mode script. Call \
+                             it directly with toolport_call_tool, or enable human approval so it \
+                             can be approved in the app."
+                        ) }],
+                        "isError": true
+                    });
+                }
+            }
+        }
+    }
+
+    // Live inspection (opt-in, off by default): capture the raw request
+    // args now, only when enabled, so the response can be paired with them
+    // below. When off, nothing is cloned and nothing is ever captured.
+    let inspect_args = if reg.live_inspect {
+        Some(arguments.clone())
+    } else {
+        None
+    };
+
+    let started = Instant::now();
+    match router.route_call_with_cancel(name, arguments, cancel.clone()) {
+        Ok(mut result) => {
+            let ok = !result
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let ms = started.elapsed().as_millis() as u64;
+            // Capture the failure message (the result's text) before shaping
+            // rewrites the content, so Activity can show why the call failed.
+            let err = if ok {
+                None
+            } else {
+                Some(content_text(&result))
+            };
+            audit::record_timed(srv, tool, ok, Some(ms), err.as_deref(), client);
+            // Live inspection: capture the RAW result here, before content
+            // defense and shaping rewrite it, so the inspector shows exactly
+            // what the server returned. Only runs when live_inspect is on
+            // (inspect_args is Some only then). Attributed to the same client
+            // as the audit line.
+            if let Some(req) = &inspect_args {
+                inspect::record(client, srv, tool, req, &result, ok, ms);
+            }
+            // Content defense: scan this untrusted tool output for injection
+            // and label any flagged text as data before it reaches the agent.
+            if reg.content_defense_effective() {
+                integrity::inspect_result(srv, tool, &mut result);
+            }
+            // Result-shaping: cap an oversized result, cache the full body, and
+            // hand the model a head + a toolport_fetch_result cursor (lossless).
+            // Per-server fidelity policy: a server's `resultBudget` overrides the
+            // global default (Some(0) = never shape, for full-fidelity servers).
+            let budget = reg
+                .result_budgets
+                .get(srv)
+                .map(|&b| b as usize)
+                .unwrap_or_else(shaping::budget);
+            shaping::shape_result(&mut result, budget, client);
+
+            // Recover from a downstream failure: point the model at
+            // sibling list/get tools that can supply a missing/invalid
+            // identifier. Appended after shaping so it's never truncated.
+            if !ok {
+                let hint = recovery_hint(cached, srv);
+                if !hint.is_empty() {
+                    if let Some(arr) = result.get_mut("content").and_then(|c| c.as_array_mut())
+                    {
+                        arr.push(json!({ "type": "text", "text": hint.trim() }));
+                    }
+                }
+            }
+            result
+        }
+        Err(e) => {
+            let ms = started.elapsed().as_millis() as u64;
+            audit::record_timed(srv, tool, false, Some(ms), Some(&e), client);
+            // Live inspection: capture the failed call too, with the error
+            // as the response body. Only when live_inspect is on.
+            if let Some(req) = &inspect_args {
+                inspect::record(client, srv, tool, req, &json!({ "error": e }), false, ms);
+            }
+            let recovery = recovery_hint(cached, srv);
+            json!({
+                "content": [{ "type": "text", "text": format!("Toolport: {e}.{recovery}") }],
+                "isError": true
+            })
+        }
+    }
+}
+
+/// Dispatch a `toolport_run_script` "code mode" call: run the agent's script in the boa
+/// sandbox with a `toolport.call()` binding that re-enters [`execute_call`] for each
+/// downstream call, so every call passes the identical scope + approval gates a direct call
+/// would - a script never widens the client's reach. Returns one aggregated tool result;
+/// the intermediate call results never enter model context. `router_arc` is the shareable
+/// router used to build the `'static` closure the sandbox requires (`None` -> unavailable).
+fn run_script_dispatch(
+    reg: &Registry,
+    router_arc: Option<&Arc<Router>>,
+    cached: &[Value],
+    client: Option<&str>,
+    allowed: Option<&std::collections::HashSet<String>>,
+    cancel: Option<downstream::CancelContext>,
+    arguments: &Value,
+) -> Value {
+    let Some(router_arc) = router_arc else {
+        return json!({
+            "content": [{ "type": "text", "text": "Toolport: code mode is unavailable in this context." }],
+            "isError": true
+        });
+    };
+    let script = match arguments.get("script").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => {
+            return json!({
+                "content": [{ "type": "text", "text": "Toolport: run_script requires a non-empty `script` string." }],
+                "isError": true
+            });
+        }
+    };
+    let data = arguments.get("data").cloned().unwrap_or_else(|| json!({}));
+
+    // Owned handles so the sandbox's call binding can be `'static`. Each toolport.call()
+    // re-enters execute_call with these, applying the identical scope + approval gates a
+    // direct call would. `confirm = None` fails closed on the agent-token confirmation path,
+    // which can't complete inside a single script round-trip.
+    let reg_owned = reg.clone();
+    let router_owned = Arc::clone(router_arc);
+    let cached_owned = cached.to_vec();
+    let client_owned = client.map(str::to_string);
+    let allowed_owned = allowed.cloned();
+    let cancel_owned = cancel;
+
+    let call: std::rc::Rc<dyn Fn(&str, Value) -> Value> =
+        std::rc::Rc::new(move |name: &str, args: Value| {
+            execute_call(
+                &reg_owned,
+                &router_owned,
+                &cached_owned,
+                client_owned.as_deref(),
+                allowed_owned.as_ref(),
+                cancel_owned.clone(),
+                None,
+                name,
+                args,
+                false,
+            )
+        });
+
+    let outcome = codemode::run_script(&script, data, call, codemode::Limits::default());
+
+    // Account the round-trips this one call replaced (calls - 1), composing with the
+    // lazy-discovery savings in the same log + counter.
+    if outcome.calls > 1 {
+        savings::record_orchestration((outcome.calls - 1) as u64);
+    }
+
+    match outcome.error {
+        Some(err) => json!({
+            "content": [{ "type": "text", "text": format!("Toolport code mode: the script failed: {err}") }],
+            "isError": true,
+            "structuredContent": { "toolportScript": { "ok": false, "calls": outcome.calls, "error": err } }
         }),
-    )
+        None => {
+            // One aggregated value; the intermediate call results stayed out of context.
+            let text =
+                serde_json::to_string(&outcome.value).unwrap_or_else(|_| "null".to_string());
+            json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+                "structuredContent": { "toolportScript": { "ok": true, "calls": outcome.calls }, "result": outcome.value }
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2223,7 +2669,7 @@ fn handle_request(
     client: Option<&str>,
 ) -> Option<Value> {
     handle_request_with_cancel(
-        req, reg, router, cached, lazy, profile, guard, confirm, allowed, None, client,
+        req, reg, router, cached, lazy, profile, guard, confirm, allowed, None, client, None,
     )
 }
 
@@ -2243,6 +2689,11 @@ fn handle_request_with_cancel(
     // label), threaded in rather than stored on the shared router so concurrent
     // requests can't cross-contaminate and dispatch needn't hold the router lock.
     client: Option<&str>,
+    // The live router as a shareable Arc, used ONLY to build the `'static` call closure a
+    // code-mode script needs (its downstream calls re-enter execute_call). `None` disables
+    // code mode for this request (the test wrapper / any caller without the Arc); the
+    // production dispatch passes `Some(&router)`, the same Arc it already cloned off the lock.
+    router_arc: Option<&Arc<Router>>,
 ) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
@@ -2282,6 +2733,12 @@ fn handle_request_with_cancel(
                     call_tool_def(),
                     fetch_result_tool_def(),
                 ];
+                // Opt-in code mode: one script that orchestrates many calls in a single
+                // round-trip. Advertised only when enabled, same visibility discipline as
+                // the agent-control tools below.
+                if code_mode_enabled() {
+                    tools.push(run_script_tool_def());
+                }
                 // Opt-in: surface the agent-control tools only when the user has
                 // allowed it, so an agent can't even see them otherwise.
                 if reg.allow_agent_control {
@@ -2357,6 +2814,9 @@ fn handle_request_with_cancel(
                 return Some(success(id, json!({ "tools": tools })));
             }
             let mut tools = vec![status_tool_def(), fetch_result_tool_def()];
+            if code_mode_enabled() {
+                tools.push(run_script_tool_def());
+            }
             // The confirm tool is advertised only while confirmation is on.
             if reg.confirm_destructive {
                 tools.push(confirm_tool_def());
@@ -2769,277 +3229,49 @@ fn handle_request_with_cancel(
                 ));
             }
 
+            // toolport_run_script: server-side "code mode". Run one agent script that calls
+            // many downstream tools via toolport.call(), collapsing an N-step task into one
+            // round-trip; intermediate results never enter model context. Opt-in, and needs
+            // the shareable router (router_arc) to build the script's call binding.
+            if name == "toolport_run_script" {
+                if !code_mode_enabled() {
+                    return Some(success(
+                        id,
+                        json!({
+                            "content": [{ "type": "text", "text": "Toolport: code mode is disabled. Set CONDUIT_CODE_MODE=1 to enable toolport_run_script." }],
+                            "isError": true
+                        }),
+                    ));
+                }
+                return Some(success(
+                    id,
+                    run_script_dispatch(reg, router_arc, cached, client, allowed, cancel, &arguments),
+                ));
+            }
+
             // toolport_call_tool dispatches a discovered tool: unwrap to its real
-            // name + arguments and fall through to the normal routing below.
+            // name + arguments, then run it through the shared execute path (scope,
+            // approval, confirm, shaping) that a code-mode toolport.call() also uses.
             let (name, arguments) = if name == "toolport_call_tool" {
                 unwrap_call_tool(&arguments)
             } else {
                 (name, arguments)
             };
-            let name = name.as_str();
-
-            // Resolve the call's real (server, original tool) from the router's route map,
-            // NOT by splitting the exposed name on `__`. A renamed tool (via a tool override)
-            // or a server id containing `__` would otherwise mis-derive the server and
-            // silently weaken the scope guard and the HITL untrusted-provenance check below.
-            let (server_id, tool_name) = router
-                .route_of(name)
-                .map(|(s, t)| (s.to_string(), t.to_string()))
-                .unwrap_or_else(|| (String::new(), name.to_string()));
-            let srv_owned = sanitize_segment(&server_id);
-            let srv = srv_owned.as_str();
-            let tool = tool_name.as_str();
-
-            // Scope guard: a registered HTTP client may only call tools on the
-            // servers its token is allowed to see (a no-op when unscoped). Search
-            // and list are already filtered, but a client could name any tool, so
-            // enforce it on the call path too.
-            if let Some(set) = allowed {
-                if !set.contains(srv) {
-                    return Some(success(
-                        id,
-                        json!({
-                            "content": [{ "type": "text", "text": format!("Toolport: '{srv}' is not available to this client.") }],
-                            "isError": true
-                        }),
-                    ));
-                }
-            }
-
-            // Pre-call guard: a model that invents an identifier (e.g.
-            // teamId = "your_team_id") would otherwise waste a downstream call
-            // and get a confusing failure. Catch obvious placeholders and point
-            // it at where to source the real value. General across every server.
-            if let Some((param, value)) = find_placeholder_arg(&arguments) {
-                let resource = resource_stem(&param);
-                let hints = source_tool_hints(cached, srv, Some(&resource), 3);
-                let source = if hints.is_empty() {
-                    format!("call a list or get tool on the '{srv}' server")
-                } else {
-                    format!(
-                        "call one of these on the '{srv}' server first: {}",
-                        hints.join(", ")
-                    )
-                };
-                let msg = format!(
-                    "Toolport: \"{value}\" for \"{param}\" looks like a placeholder, not a real \
-                     value, and was not sent. Don't invent identifiers. To get a real \"{param}\", \
-                     {source}, then call {name} again with the value it returns."
-                );
-                return Some(success(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
-                ));
-            }
-
-            // Human-in-the-loop approval: hold a gated call (destructive, or from an
-            // untrusted-provenance server) until a person approves it in the Toolport app.
-            // Takes precedence over the agent-facing confirm below, and is fail-closed
-            // (no broker / no answer / timeout all deny). Skipped once `confirmed`.
-            if reg.human_approval_effective() && !confirmed {
-                // Resolve destructiveness robustly: cache, then live router, else
-                // fail-closed (an unknown tool must not skip the human gate).
-                let is_dest = tool_is_destructive_fail_closed(name, cached, router);
-                // Untrusted provenance = the same shared/registry signal the SSRF guard
-                // uses. Match on the REAL server id from `route_of` (not the sanitized
-                // prefix): two ids that sanitize alike would otherwise read the wrong
-                // server's trust flag and could skip this gate.
-                let untrusted = reg
-                    .servers
-                    .iter()
-                    .find(|s| s.id == server_id)
-                    .map(|s| matches!(s.source.as_deref(), Some("shared") | Some("registry")))
-                    .unwrap_or(false);
-                if let Some(reason) = approval::gate_reason(true, is_dest, untrusted) {
-                    // The gate reason names WHY a human was asked; shared by the audit record
-                    // and the agent-facing envelope on every outcome (approved included).
-                    let reason_str = match reason {
-                        approval::ApprovalReason::Destructive => "destructive",
-                        approval::ApprovalReason::UntrustedSource => "untrusted_source",
-                        approval::ApprovalReason::DestructiveAndUntrusted => {
-                            "destructive_and_untrusted"
-                        }
-                    };
-                    // The exact call being approved, content-bound: the bytes that RUN must
-                    // hash-match these. Captured before the (blocking) human decision.
-                    let approved_args_hash = audit::args_hash(&arguments);
-                    let t0 = std::time::Instant::now();
-                    let decision = request_human_decision(approval::ApprovalRequest {
-                        token: String::new(),
-                        id: new_correlation_id(),
-                        client: client.map(str::to_string),
-                        server: srv.to_string(),
-                        tool: tool.to_string(),
-                        reason,
-                        arguments: arguments.clone(),
-                        tool_fingerprint: tool_fingerprint_for(name, cached, router),
-                    });
-                    let held_ms = t0.elapsed().as_millis() as u64;
-                    if !decision.is_approved() {
-                        // Governance audit: the gate reason and which non-approval outcome
-                        // (denied / no-response / unreachable), plus a content hash of the
-                        // exact call - never the raw args. Replaces the flat record_held so
-                        // the failure modes are no longer indistinguishable in the log.
-                        audit::record_decision(
-                            srv,
-                            tool,
-                            client,
-                            reason_str,
-                            decision_token(decision),
-                            &arguments,
-                            Some(held_ms),
-                        );
-                        return Some(refused_call_result(id, name, decision, reason_str));
-                    }
-                    // A human approved. Enforce content-binding before running: if the call
-                    // was mutated after approval, reject the stale approval (fail-closed)
-                    // rather than run bytes a human never actually saw.
-                    if let Some(stale) = content_binding_decision(&approved_args_hash, &arguments) {
-                        audit::record_decision(
-                            srv,
-                            tool,
-                            client,
-                            reason_str,
-                            decision_token(stale),
-                            &arguments,
-                            Some(held_ms),
-                        );
-                        return Some(refused_call_result(id, name, stale, reason_str));
-                    }
-                    // Approved calls are audited too, so the trail shows what actually ran,
-                    // not only what was blocked.
-                    audit::record_decision(
-                        srv,
-                        tool,
-                        client,
-                        reason_str,
-                        "approved",
-                        &arguments,
-                        Some(held_ms),
-                    );
-                    // Skip the agent-confirm step and route the call.
-                    confirmed = true;
-                }
-            }
-
-            // Per-call confirmation for destructive tools: intercept the first
-            // call with these arguments, store it, and return a preview. The
-            // agent calls toolport_confirm { token } to replay the stored call.
-            // This runs AFTER the placeholder guard (so a placeholder never
-            // gets a token) and BEFORE the actual route_call (so a destructive
-            // call never reaches the downstream server unconfirmed).
-            // Skip when `confirmed` is true: the call arrived via toolport_confirm
-            // and was already reviewed (prevents re-interception loop).
-            if reg.confirm_destructive && !confirmed {
-                // Resolve destructiveness robustly (cache, then live router, else
-                // fail-closed), so a cold/stale cache can't skip the confirm step for a
-                // destructive tool.
-                let dest = tool_is_destructive_fail_closed(name, cached, router);
-                if dest {
-                    let token = confirm.store(name.to_string(), arguments.clone(), client);
-                    let args_pretty = serde_json::to_string_pretty(&arguments).unwrap_or_default();
-                    let msg = format!(
-                        "⚠️ Destructive action intercepted.\n\nTool: {name}\nArguments:\n{args_pretty}\n\n\
-                         Review the arguments above carefully. If correct, call toolport_confirm \
-                         with token: {token}\n\
-                         The token expires in 60 seconds. The original arguments will be replayed \
-                         exactly."
-                    );
-                    // Held for confirmation, not a failure: record as held (ok), so the
-                    // confirm-destructive feature doesn't inflate the error rate.
-                    audit::record_held(srv, tool, client);
-                    return Some(success(
-                        id,
-                        json!({
-                            "content": [{ "type": "text", "text": msg }],
-                            "isError": true
-                        }),
-                    ));
-                }
-            }
-
-            // Live inspection (opt-in, off by default): capture the raw request
-            // args now, only when enabled, so the response can be paired with them
-            // below. When off, nothing is cloned and nothing is ever captured.
-            let inspect_args = if reg.live_inspect {
-                Some(arguments.clone())
-            } else {
-                None
-            };
-
-            let started = Instant::now();
-            match router.route_call_with_cancel(name, arguments, cancel.clone()) {
-                Ok(mut result) => {
-                    let ok = !result
-                        .get("isError")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let ms = started.elapsed().as_millis() as u64;
-                    // Capture the failure message (the result's text) before shaping
-                    // rewrites the content, so Activity can show why the call failed.
-                    let err = if ok {
-                        None
-                    } else {
-                        Some(content_text(&result))
-                    };
-                    audit::record_timed(srv, tool, ok, Some(ms), err.as_deref(), client);
-                    // Live inspection: capture the RAW result here, before content
-                    // defense and shaping rewrite it, so the inspector shows exactly
-                    // what the server returned. Only runs when live_inspect is on
-                    // (inspect_args is Some only then). Attributed to the same client
-                    // as the audit line.
-                    if let Some(req) = &inspect_args {
-                        inspect::record(client, srv, tool, req, &result, ok, ms);
-                    }
-                    // Content defense: scan this untrusted tool output for injection
-                    // and label any flagged text as data before it reaches the agent.
-                    if reg.content_defense_effective() {
-                        integrity::inspect_result(srv, tool, &mut result);
-                    }
-                    // Result-shaping: cap an oversized result, cache the full body, and
-                    // hand the model a head + a toolport_fetch_result cursor (lossless).
-                    // Per-server fidelity policy: a server's `resultBudget` overrides the
-                    // global default (Some(0) = never shape, for full-fidelity servers).
-                    let budget = reg
-                        .result_budgets
-                        .get(srv)
-                        .map(|&b| b as usize)
-                        .unwrap_or_else(shaping::budget);
-                    shaping::shape_result(&mut result, budget, client);
-
-                    // Recover from a downstream failure: point the model at
-                    // sibling list/get tools that can supply a missing/invalid
-                    // identifier. Appended after shaping so it's never truncated.
-                    if !ok {
-                        let hint = recovery_hint(cached, srv);
-                        if !hint.is_empty() {
-                            if let Some(arr) =
-                                result.get_mut("content").and_then(|c| c.as_array_mut())
-                            {
-                                arr.push(json!({ "type": "text", "text": hint.trim() }));
-                            }
-                        }
-                    }
-                    Some(success(id, result))
-                }
-                Err(e) => {
-                    let ms = started.elapsed().as_millis() as u64;
-                    audit::record_timed(srv, tool, false, Some(ms), Some(&e), client);
-                    // Live inspection: capture the failed call too, with the error
-                    // as the response body. Only when live_inspect is on.
-                    if let Some(req) = &inspect_args {
-                        inspect::record(client, srv, tool, req, &json!({ "error": e }), false, ms);
-                    }
-                    let recovery = recovery_hint(cached, srv);
-                    Some(success(
-                        id,
-                        json!({
-                            "content": [{ "type": "text", "text": format!("Toolport: {e}.{recovery}") }],
-                            "isError": true
-                        }),
-                    ))
-                }
-            }
+            Some(success(
+                id,
+                execute_call(
+                    reg,
+                    router,
+                    cached,
+                    client,
+                    allowed,
+                    cancel,
+                    Some(confirm),
+                    name.as_str(),
+                    arguments,
+                    confirmed,
+                ),
+            ))
         }
         "resources/list" => {
             let mut resources = router.aggregated_resources();
@@ -4698,6 +4930,9 @@ fn process_request(
         allowed,
         cancel,
         client,
+        // The same live Arc<Router> just cloned off the lock, so a code-mode script's
+        // downstream calls run against this request's consistent catalog snapshot.
+        Some(&router),
     )
 }
 
@@ -4834,6 +5069,9 @@ fn http_tool_defs(
             call_tool_def(),
             fetch_result_tool_def(),
         ];
+        if code_mode_enabled() {
+            tools.push(run_script_tool_def());
+        }
         if allow_agent {
             tools.push(enable_server_tool_def());
             tools.push(disable_server_tool_def());
@@ -4857,6 +5095,9 @@ fn http_tool_defs(
         grouped_tool_defs(allow_agent, confirm_destructive, &scoped)
     } else {
         let mut tools = vec![status_tool_def(), fetch_result_tool_def()];
+        if code_mode_enabled() {
+            tools.push(run_script_tool_def());
+        }
         tools.extend(catalog());
         tools
     }
@@ -7011,8 +7252,8 @@ mod tests {
             (approval::ApprovalDecision::StaleState, "stale_state", true),
         ];
         for (decision, token, retriable) in cases {
-            let v = refused_call_result(json!(1), "db__drop", decision, "destructive");
-            let result = &v["result"];
+            // Now returns the inner tool result directly (the caller wraps it).
+            let result = refused_call_result("db__drop", decision, "destructive");
             assert_eq!(result["isError"].as_bool(), Some(true), "{token} must fail closed");
             let sc = &result["structuredContent"];
             assert_eq!(sc["toolportDecision"].as_str(), Some(token));
@@ -7055,6 +7296,145 @@ mod tests {
             effective_profile(&reg, None, &env, Some("/elsewhere")),
             Some("Env".into())
         );
+    }
+
+    /// Code mode: a script that calls a downstream tool twice through `toolport.call()`
+    /// aggregates both results and returns ONE value; only that value comes back, and the
+    /// call count is reported for savings accounting.
+    #[test]
+    fn run_script_aggregates_downstream_calls() {
+        let reg = Registry::default();
+        let router = Arc::new(paging_router("hello".to_string()));
+        let args = json!({
+            "script": "var a = toolport.call('s__big', {}); \
+                       var b = toolport.call('s__big', {}); \
+                       return { name: a.structuredContent.user.name, \
+                                sum: a.structuredContent.user.age + b.structuredContent.user.age };"
+        });
+        let result = run_script_dispatch(&reg, Some(&router), &[], None, None, None, &args);
+        assert_eq!(result["isError"].as_bool(), Some(false));
+        assert_eq!(result["structuredContent"]["toolportScript"]["ok"], true);
+        assert_eq!(result["structuredContent"]["toolportScript"]["calls"], 2);
+        // The aggregate the script returned, not two intermediate tool results.
+        assert_eq!(result["structuredContent"]["result"]["name"], "Alice");
+        assert_eq!(result["structuredContent"]["result"]["sum"], 60);
+    }
+
+    /// The per-client scope guard applies to a call made INSIDE a script exactly as it does
+    /// to a direct call: a script can't reach a server the client isn't scoped to. This is
+    /// the security-critical property of routing script calls through `execute_call`.
+    #[test]
+    fn run_script_call_respects_client_scope() {
+        let reg = Registry::default();
+        let router = Arc::new(paging_router("hi".to_string()));
+        let mut allowed = std::collections::HashSet::new();
+        allowed.insert("other".to_string()); // NOT "s"
+        let args = json!({ "script": "return toolport.call('s__big', {});" });
+        let result =
+            run_script_dispatch(&reg, Some(&router), &[], Some("scoped"), Some(&allowed), None, &args);
+        // The script itself ran; the value it returned is the scope-denied tool result.
+        assert_eq!(result["structuredContent"]["toolportScript"]["ok"], true);
+        let call_result = &result["structuredContent"]["result"];
+        assert_eq!(call_result["isError"].as_bool(), Some(true));
+        assert!(call_result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not available to this client"));
+    }
+
+    /// Safety: a destructive tool called INSIDE a script fails closed when per-call
+    /// confirmation is on but human approval isn't. The agent-token replay handshake can't
+    /// complete in a single script round-trip, so rather than run an unconfirmed destructive
+    /// call, the call is refused - nothing destructive executes.
+    #[test]
+    fn run_script_destructive_call_fails_closed_without_confirmation() {
+        let mut reg = Registry::default();
+        reg.confirm_destructive = true;
+        let router = Arc::new(paging_router("x".to_string()));
+        // Mark the tool destructive via the cached catalog the fail-closed resolver checks.
+        let cached = vec![json!({ "name": "s__big", "annotations": { "destructiveHint": true } })];
+        let args = json!({ "script": "return toolport.call('s__big', {});" });
+        let result = run_script_dispatch(&reg, Some(&router), &cached, None, None, None, &args);
+        assert_eq!(result["structuredContent"]["toolportScript"]["ok"], true);
+        let call_result = &result["structuredContent"]["result"];
+        assert_eq!(call_result["isError"].as_bool(), Some(true));
+        assert!(call_result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("per-call confirmation"));
+    }
+
+    /// An empty/whitespace script is rejected before the engine runs.
+    #[test]
+    fn run_script_rejects_empty_script() {
+        let reg = Registry::default();
+        let router = Arc::new(paging_router("x".to_string()));
+        let result =
+            run_script_dispatch(&reg, Some(&router), &[], None, None, None, &json!({ "script": "   " }));
+        assert_eq!(result["isError"].as_bool(), Some(true));
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("non-empty"));
+    }
+
+    /// Without a shareable router (no code-mode-capable context), the dispatch is unavailable
+    /// rather than running against a missing catalog.
+    #[test]
+    fn run_script_without_router_is_unavailable() {
+        let reg = Registry::default();
+        let result =
+            run_script_dispatch(&reg, None, &[], None, None, None, &json!({ "script": "return 1;" }));
+        assert_eq!(result["isError"].as_bool(), Some(true));
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable"));
+    }
+
+    /// A syntactically broken script fails closed with an error result, never a panic, and
+    /// reports how many calls it managed before failing.
+    #[test]
+    fn run_script_reports_script_errors() {
+        let reg = Registry::default();
+        let router = Arc::new(paging_router("x".to_string()));
+        let args = json!({ "script": "this is not valid javascript )(" });
+        let result = run_script_dispatch(&reg, Some(&router), &[], None, None, None, &args);
+        assert_eq!(result["isError"].as_bool(), Some(true));
+        assert_eq!(result["structuredContent"]["toolportScript"]["ok"], false);
+    }
+
+    /// With `CONDUIT_CODE_MODE` unset (the default), the dispatch refuses `toolport_run_script`
+    /// so the capability is opt-in. (`handle_request` also passes no router Arc, a second
+    /// fail-closed.)
+    #[test]
+    fn run_script_is_refused_when_code_mode_disabled() {
+        let reg = Registry::default();
+        let router = routed_router("s", "tool");
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "toolport_run_script", "arguments": { "script": "return 1;" } }
+        });
+        let resp = handle_request(
+            &req,
+            &reg,
+            &router,
+            &[],
+            true,
+            None,
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resp["result"]["isError"].as_bool(), Some(true));
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("code mode is disabled"));
     }
 
     fn router() -> Router {

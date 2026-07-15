@@ -6,6 +6,7 @@ mod desktop;
 pub mod audit;
 pub mod catalog;
 pub mod clients;
+pub mod codemode;
 pub mod downstream;
 pub mod gateway_publish;
 pub mod inspect;
