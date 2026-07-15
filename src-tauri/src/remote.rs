@@ -6,6 +6,8 @@
 //! access token.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::downstream::{
     DownstreamServer, HttpTransport, RefreshFn, ServerRequestHandler, Transport,
@@ -15,6 +17,9 @@ use crate::{oauth, secrets};
 
 const STATE_KEY: &str = "__oauth_state__";
 pub const OAUTH_STATE_KEY: &str = STATE_KEY;
+/// Refresh before the exact deadline so the token cannot expire while an MCP
+/// request is in flight.
+const PROACTIVE_REFRESH_SKEW_SECS: u64 = 60;
 
 #[derive(Serialize, Deserialize)]
 struct OAuthState {
@@ -25,6 +30,48 @@ struct OAuthState {
     /// to. Optional for back-compat with states vaulted before this existed.
     #[serde(default)]
     resource: Option<String>,
+    /// Unix timestamp when Toolport received the latest token response.
+    /// Optional for states vaulted by older Toolport versions.
+    #[serde(default)]
+    issued_at: Option<u64>,
+    /// Unix access-token expiry derived from the provider's `expires_in`.
+    /// Optional because OAuth providers are allowed to omit the lifetime.
+    #[serde(default)]
+    expires_at: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RefreshDecision {
+    NotNeeded,
+    Refresh,
+    Reauthenticate,
+}
+
+struct RefreshedToken {
+    access_token: String,
+    expires_at: Option<u64>,
+}
+
+fn now_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn refresh_decision(state: &OAuthState, now: u64) -> RefreshDecision {
+    let Some(expires_at) = state.expires_at else {
+        // Backward-compatible and provider-compatible: without a known expiry,
+        // retain the existing reactive refresh on 401/403.
+        return RefreshDecision::NotNeeded;
+    };
+    if now.saturating_add(PROACTIVE_REFRESH_SKEW_SECS) < expires_at {
+        RefreshDecision::NotNeeded
+    } else if state.refresh_token.is_some() {
+        RefreshDecision::Refresh
+    } else {
+        RefreshDecision::Reauthenticate
+    }
 }
 
 /// Persist what's needed to refresh this server's token later.
@@ -34,12 +81,16 @@ pub fn store_oauth_state(
     client_id: &str,
     refresh_token: Option<String>,
     resource: Option<String>,
+    issued_at: u64,
+    expires_at: Option<u64>,
 ) -> Result<(), String> {
     let state = OAuthState {
         token_endpoint: token_endpoint.to_string(),
         client_id: client_id.to_string(),
         refresh_token,
         resource,
+        issued_at: Some(issued_at),
+        expires_at,
     };
     let json = serde_json::to_string(&state).map_err(|e| e.to_string())?;
     secrets::set_secret(server_id, STATE_KEY, &json)
@@ -50,9 +101,16 @@ fn load_state(server_id: &str) -> Option<OAuthState> {
         .and_then(|s| serde_json::from_str(&s).ok())
 }
 
+/// Remove refresh metadata when the user clears OAuth or replaces it with a
+/// manually pasted bearer token. Otherwise stale vaulted state could silently
+/// recreate a credential the user explicitly removed.
+pub fn clear_oauth_state(server_id: &str) -> Result<(), String> {
+    secrets::delete_secret(server_id, STATE_KEY)
+}
+
 /// Use the stored refresh token to mint a fresh access token, vault it, and
 /// return it.
-pub fn refresh_token(server_id: &str) -> Result<String, String> {
+fn refresh_token_with_expiry(server_id: &str) -> Result<RefreshedToken, String> {
     let state = load_state(server_id).ok_or("no stored OAuth state to refresh")?;
     let rt = state
         .refresh_token
@@ -78,11 +136,39 @@ pub fn refresh_token(server_id: &str) -> Result<String, String> {
         client_id: state.client_id,
         refresh_token: tokens.refresh_token.or(state.refresh_token),
         resource: state.resource,
+        issued_at: Some(tokens.issued_at),
+        expires_at: tokens.expires_at,
     };
-    if let Ok(json) = serde_json::to_string(&new_state) {
-        let _ = secrets::set_secret(server_id, STATE_KEY, &json);
+    let json = serde_json::to_string(&new_state).map_err(|e| e.to_string())?;
+    secrets::set_secret(server_id, STATE_KEY, &json)?;
+    Ok(RefreshedToken {
+        access_token: tokens.access_token,
+        expires_at: tokens.expires_at,
+    })
+}
+
+pub fn refresh_token(server_id: &str) -> Result<String, String> {
+    refresh_token_with_expiry(server_id).map(|token| token.access_token)
+}
+
+/// Refresh before the known expiry. A legacy/provider state with no expiry is a
+/// no-op and continues to use the 401/403 fallback. If the deadline is close but
+/// no refresh token exists, return an auth-classified error so the existing
+/// per-server "Needs sign-in" UI appears before a failed tool call.
+fn refresh_token_if_needed(server_id: &str) -> Result<Option<String>, String> {
+    let Some(state) = load_state(server_id) else {
+        return Ok(None);
+    };
+    match refresh_decision(&state, now_epoch_seconds()) {
+        RefreshDecision::NotNeeded => Ok(None),
+        RefreshDecision::Refresh => refresh_token(server_id)
+            .map(Some)
+            .map_err(|e| format!("OAuth token refresh failed; needs authentication: {e}")),
+        RefreshDecision::Reauthenticate => Err(
+            "OAuth access token expires soon and no refresh token is available; needs authentication"
+                .to_string(),
+        ),
     }
-    Ok(tokens.access_token)
 }
 
 pub fn is_auth_error(e: &str) -> bool {
@@ -125,7 +211,33 @@ fn authed_transport(
     }
     let refresh: Option<RefreshFn> = if token.is_some() {
         let sid = server_id.to_string();
-        Some(Box::new(move || refresh_token(&sid).ok()))
+        // Keep the proactive deadline in memory. This avoids a keychain read on
+        // every tool call while still updating the deadline after each refresh.
+        let refresh_at = load_state(server_id)
+            .and_then(|state| state.expires_at)
+            .map(|expires_at| expires_at.saturating_sub(PROACTIVE_REFRESH_SKEW_SECS));
+        let next_refresh_at = Mutex::new(refresh_at);
+        Some(Box::new(move |force| {
+            if !force {
+                let deadline = *next_refresh_at
+                    .lock()
+                    .map_err(|_| "OAuth refresh deadline lock poisoned".to_string())?;
+                match deadline {
+                    Some(refresh_at) if now_epoch_seconds() >= refresh_at => {}
+                    _ => return Ok(None),
+                }
+            }
+
+            let refreshed = refresh_token_with_expiry(&sid)
+                .map_err(|e| format!("OAuth token refresh failed; needs authentication: {e}"))?;
+            let deadline = refreshed
+                .expires_at
+                .map(|expires_at| expires_at.saturating_sub(PROACTIVE_REFRESH_SKEW_SECS));
+            *next_refresh_at
+                .lock()
+                .map_err(|_| "OAuth refresh deadline lock poisoned".to_string())? = deadline;
+            Ok(Some(refreshed.access_token))
+        }))
     } else {
         None
     };
@@ -222,8 +334,12 @@ pub fn connect_remote_with_handler(
     // Untrusted-provenance servers also get private/loopback refused at the resolver,
     // matching `guard_connect_target`'s pre-check but closing the DNS-rebind TOCTOU.
     let block_private = is_untrusted_source(server.source.as_deref());
-    let auth = secrets::get_secret(server_id, secrets::HTTP_AUTH_KEY)
+    let stored_auth = secrets::get_secret(server_id, secrets::HTTP_AUTH_KEY)
         .or_else(|| first_vaulted_secret(server));
+    let auth = match refresh_token_if_needed(server_id)? {
+        Some(fresh) => Some(fresh),
+        None => stored_auth,
+    };
     let mut transport = authed_transport(url, auth, server_id, block_private)?;
     if let Some(ref handler) = server_handler {
         transport.set_server_request_handler(handler.clone());
@@ -254,6 +370,57 @@ mod tests {
         assert!(is_auth_error("got 403 Forbidden"));
         assert!(!is_auth_error("HTTP 500: server error"));
         assert!(!is_auth_error("connection refused"));
+    }
+
+    fn oauth_state(expires_at: Option<u64>, refresh_token: Option<&str>) -> OAuthState {
+        OAuthState {
+            token_endpoint: "https://auth.example.com/token".into(),
+            client_id: "client".into(),
+            refresh_token: refresh_token.map(str::to_string),
+            resource: Some("https://mcp.example.com".into()),
+            issued_at: Some(1_000),
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn refresh_decision_uses_expiry_safety_window() {
+        assert_eq!(
+            refresh_decision(&oauth_state(Some(1_061), Some("refresh")), 1_000),
+            RefreshDecision::NotNeeded
+        );
+        assert_eq!(
+            refresh_decision(&oauth_state(Some(1_060), Some("refresh")), 1_000),
+            RefreshDecision::Refresh
+        );
+        assert_eq!(
+            refresh_decision(&oauth_state(Some(999), Some("refresh")), 1_000),
+            RefreshDecision::Refresh
+        );
+    }
+
+    #[test]
+    fn refresh_decision_requests_reauth_without_refresh_token() {
+        assert_eq!(
+            refresh_decision(&oauth_state(Some(1_060), None), 1_000),
+            RefreshDecision::Reauthenticate
+        );
+        assert_eq!(
+            refresh_decision(&oauth_state(None, None), 1_000),
+            RefreshDecision::NotNeeded
+        );
+    }
+
+    #[test]
+    fn oauth_state_from_older_versions_keeps_unknown_expiry() {
+        let state: OAuthState = serde_json::from_str(
+            r#"{"token_endpoint":"https://auth.example.com/token","client_id":"client","refresh_token":"refresh","resource":"https://mcp.example.com"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(state.issued_at, None);
+        assert_eq!(state.expires_at, None);
+        assert_eq!(refresh_decision(&state, 1_000), RefreshDecision::NotNeeded);
     }
 
     #[test]
