@@ -55,6 +55,8 @@ export function ShareDialog({ trigger, onImported }: Props) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [exported, setExported] = useState("");
+  const [debouncedName, setDebouncedName] = useState(name);
+  const [debouncedDescription, setDebouncedDescription] = useState(description);
   const [paste, setPaste] = useState("");
   const [copied, setCopied] = useState(false);
   const [busyAction, setBusyAction] = useState<
@@ -91,6 +93,15 @@ export function ShareDialog({ trigger, onImported }: Props) {
     servers.length === 0 || allSelected ? undefined : Array.from(selected);
 
   useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedName(name);
+      setDebouncedDescription(description);
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [name, description]);
+
+  useEffect(() => {
     if (!open) return;
     setShareLink(""); // the export changed, so any prior link is stale
     // Guard against out-of-order responses: this effect re-fires on every keystroke
@@ -98,7 +109,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
     // order. Without this, a slower earlier response could overwrite the preview with
     // stale content. Only the latest effect run is allowed to commit its result.
     let cancelled = false;
-    exportConfig(name, description, shareFilter)
+    exportConfig(debouncedName, debouncedDescription, shareFilter)
       .then((v) => {
         if (!cancelled) setExported(v);
       })
@@ -109,7 +120,7 @@ export function ShareDialog({ trigger, onImported }: Props) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, name, description, selected, servers]);
+  }, [open, debouncedName, debouncedDescription, selected, servers]);
 
   function onOpenChange(next: boolean) {
     setOpen(next);
