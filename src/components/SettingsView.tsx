@@ -3,6 +3,7 @@ import {
   Activity,
   Bot,
   Check,
+  ChevronRight,
   Copy,
   Eye,
   EyeOff,
@@ -30,6 +31,8 @@ import {
   httpBridgeStatus,
   listAllowedTools,
   listQuarantined,
+  listServerTools,
+  setProfileServerTools,
   releaseQuarantine,
   revokeAllowedTool,
   removeHttpClient,
@@ -47,7 +50,7 @@ import {
   type HttpBridgeStatus,
   type QuarantinedTool,
 } from "@/lib/api";
-import type { AllowedTool, FolderProfile, Registry } from "@/lib/types";
+import type { AllowedTool, FolderProfile, Profile, Registry } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -318,6 +321,130 @@ function PostureSummary({
   );
 }
 
+/** Tool-granular scope for one profile (SOU-189): per enabled server, expand to pick exactly
+ * which tools the profile exposes. All-checked = the whole server (no narrowing); unchecking
+ * writes an allow-list that tools/list, search, and the call guard all honor. Tools load
+ * lazily on expand. stdio clients (the per-profile router); the HTTP bridge is a follow-up. */
+function ProfileToolScope({
+  profile,
+  registry,
+  onRegistryChange,
+}: {
+  profile: Profile;
+  registry: Registry;
+  onRegistryChange: (r: Registry) => void;
+}) {
+  const serverName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of registry.servers) m.set(s.id, s.name);
+    return m;
+  }, [registry.servers]);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [toolsByServer, setToolsByServer] = useState<Record<string, string[]>>({});
+  const [loading, setLoading] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const scope = profile.toolScope ?? {};
+
+  async function expand(serverId: string) {
+    if (expanded === serverId) {
+      setExpanded(null);
+      return;
+    }
+    setExpanded(serverId);
+    if (!toolsByServer[serverId]) {
+      setLoading(serverId);
+      try {
+        const tools = await listServerTools(serverId);
+        setToolsByServer((m) => ({ ...m, [serverId]: tools.map((t) => t.name) }));
+      } catch (e) {
+        toastError(`Couldn't load ${serverName.get(serverId) ?? serverId} tools: ${e}`);
+      } finally {
+        setLoading(null);
+      }
+    }
+  }
+
+  async function toggleTool(serverId: string, tool: string, allTools: string[]) {
+    // Current in-scope set is the allow-list if present, else every tool.
+    const current = new Set(scope[serverId] ?? allTools);
+    if (current.has(tool)) current.delete(tool);
+    else current.add(tool);
+    // All selected -> clear the scope (whole server); otherwise persist the subset.
+    const next =
+      current.size >= allTools.length ? null : allTools.filter((t) => current.has(t));
+    setBusy(true);
+    try {
+      onRegistryChange(await setProfileServerTools(profile.id, serverId, next));
+    } catch (e) {
+      toastError(`Couldn't update tool scope: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const servers = profile.enabledServerIds.filter((id) => serverName.has(id));
+  if (servers.length === 0) return null;
+
+  return (
+    <div className="mt-1.5 flex flex-col gap-1">
+      {servers.map((serverId) => {
+        const allTools = toolsByServer[serverId];
+        const scoped = scope[serverId];
+        const badge = scoped
+          ? allTools
+            ? `${scoped.length} of ${allTools.length} tools`
+            : `${scoped.length} tools`
+          : "all tools";
+        const open = expanded === serverId;
+        return (
+          <div key={serverId} className="rounded border border-border/50 bg-muted/10">
+            <button
+              onClick={() => expand(serverId)}
+              className="flex w-full items-center gap-2 px-2 py-1.5 text-xs hover:bg-muted/30"
+            >
+              <ChevronRight
+                className={`size-3.5 shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+              />
+              <span className="font-medium">{serverName.get(serverId)}</span>
+              <span
+                className={`ml-auto ${scoped ? "text-info" : "text-muted-foreground"}`}
+              >
+                {badge}
+              </span>
+            </button>
+            {open && (
+              <div className="border-t border-border/40 px-2 py-1.5">
+                {loading === serverId ? (
+                  <p className="text-xs text-muted-foreground">Loading tools…</p>
+                ) : allTools && allTools.length > 0 ? (
+                  <div className="flex flex-col gap-1">
+                    {allTools.map((tool) => (
+                      <label key={tool} className="flex items-center gap-2 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={scoped ? scoped.includes(tool) : true}
+                          disabled={busy}
+                          onChange={() => toggleTool(serverId, tool, allTools)}
+                          className="size-3.5"
+                        />
+                        <code className="font-mono text-foreground/90">{tool}</code>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    No tools, or the server isn&apos;t reachable right now.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Global discovery + security policy. These apply to every client uniformly, so
  * they live here rather than in the per-server Playground. */
 export function SettingsView({ registry, onRegistryChange }: Props) {
@@ -548,8 +675,9 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
             Profiles
           </h2>
           <p className="text-xs text-muted-foreground">
-            A profile is a named subset of servers you can scope a client to. Here's what
-            each one exposes.
+            A profile is a named set of servers you can scope a client to. Expand a server
+            to narrow it to specific tools (a "FeatureSet"); leaving every tool checked
+            exposes the whole server.
           </p>
           <div className="flex flex-col divide-y rounded-lg border">
             {profiles.map((p) => {
@@ -577,6 +705,13 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
                     <p className="text-xs text-muted-foreground italic">
                       No servers in this profile.
                     </p>
+                  )}
+                  {registry && (
+                    <ProfileToolScope
+                      profile={p}
+                      registry={registry}
+                      onRegistryChange={onRegistryChange}
+                    />
                   )}
                 </div>
               );

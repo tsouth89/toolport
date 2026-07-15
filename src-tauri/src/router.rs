@@ -190,6 +190,11 @@ fn split_camel_lower(word: &str) -> Vec<String> {
 pub struct ToolPolicy {
     /// server id -> original tool names the user switched off.
     pub disabled: HashMap<String, HashSet<String>>,
+    /// server id -> the ONLY original tool names the active profile exposes (tool-granular
+    /// scoping / "FeatureSet"). A server present here allow-lists: every other tool on it is
+    /// hidden and blocked. A server ABSENT exposes all of its tools. Empty = no tool-granular
+    /// scoping, so this is fully backward compatible.
+    pub allow: HashMap<String, HashSet<String>>,
     /// Hide and block any tool annotated `destructiveHint: true`.
     pub deny_destructive: bool,
     /// Exposed (namespaced) tool names quarantined after a high-risk drift; hidden
@@ -213,6 +218,15 @@ impl ToolPolicy {
             .is_some_and(|set| set.contains(orig))
         {
             return Some("disabled");
+        }
+        // Tool-granular profile scope: if this server is narrowed to an allow-list, a tool
+        // not on it is outside the active profile's scope (hidden + blocked, same as disabled).
+        if self
+            .allow
+            .get(server_id)
+            .is_some_and(|set| !set.contains(orig))
+        {
+            return Some("outside the active profile's tool scope");
         }
         if self.deny_destructive && is_destructive(tool) {
             return Some("blocked by the destructive-tool policy");
@@ -1391,6 +1405,32 @@ mod tests {
         assert_eq!(names, vec!["db__list_tables"]);
         let err = router.route_call("db__drop_table", json!({})).unwrap_err();
         assert!(err.contains("destructive"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn tool_scope_allow_list_hides_and_blocks_non_listed_tools() {
+        // A profile's per-server allow-list ("FeatureSet"): the server exposes ONLY the
+        // listed tool; the rest are both hidden from the catalog and blocked on a direct call.
+        let mut allow = HashMap::new();
+        allow.insert("db".to_string(), HashSet::from(["echo".to_string()]));
+        let policy = ToolPolicy {
+            allow,
+            ..Default::default()
+        };
+        let mut router = Router::with_policy(policy);
+        router.add(mock_server("db"));
+
+        let names: Vec<String> = router
+            .aggregated_tools()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert_eq!(names, vec!["db__echo"], "only the allow-listed tool is exposed");
+
+        // Hidden, and also blocked on a direct call (not merely invisible).
+        let err = router.route_call("db__add", json!({})).unwrap_err();
+        assert!(err.contains("tool scope"), "unexpected: {err}");
+        assert!(router.route_call("db__echo", json!({})).is_ok());
     }
 
     #[test]
