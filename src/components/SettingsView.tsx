@@ -680,7 +680,9 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           <p className="text-xs text-muted-foreground">
             A profile is a named set of servers you can scope a client to. Expand a server
             to narrow it to specific tools (a "FeatureSet"); leaving every tool checked
-            exposes the whole server.
+            exposes the whole server. Tool narrowing applies to stdio clients (Claude
+            Desktop, Cursor, VS Code, and the like); HTTP-bridge clients still see the
+            whole server for now.
           </p>
           <div className="flex flex-col divide-y rounded-lg border">
             {profiles.map((p) => {
