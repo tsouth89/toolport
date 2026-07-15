@@ -690,11 +690,12 @@ impl Registry {
         }
     }
 
-    /// Set or clear a profile's tool allow-list for one server. `Some(non-empty list)` narrows
-    /// that server to exactly those ORIGINAL tool names; `None` or an empty list removes the
-    /// entry, restoring "all tools on that server". Idempotent. The UI sends the full desired
-    /// list, and sends `None` when every tool is selected so an unnarrowed profile stays empty
-    /// (backward compatible: no `tool_scope` written).
+    /// Set or clear a profile's tool allow-list for one server. `Some(list)` narrows that
+    /// server to exactly those ORIGINAL tool names (an EMPTY list is a real state: expose NO
+    /// tools on that server, enforced as block-all). `None` removes the entry, restoring "all
+    /// tools on that server". Idempotent. The UI sends `None` only when every tool is selected,
+    /// so an unnarrowed profile keeps an empty `tool_scope` (backward compatible), and sends
+    /// `Some(subset)` otherwise, distinguishing "all" (None) from "none" (empty list).
     pub fn set_profile_server_tools(
         &mut self,
         profile_id: &str,
@@ -707,10 +708,10 @@ impl Registry {
             .find(|p| p.id == profile_id)
             .ok_or_else(|| format!("No profile with id '{profile_id}'"))?;
         match tools {
-            Some(list) if !list.is_empty() => {
+            Some(list) => {
                 profile.tool_scope.insert(server_id.to_string(), list);
             }
-            _ => {
+            None => {
                 profile.tool_scope.remove(server_id);
             }
         }
@@ -1879,6 +1880,21 @@ mod tests {
         // Clearing restores all-allowed and leaves the map empty (backward compatible).
         r.set_profile_server_tools("default", &gh, None).unwrap();
         assert!(r.profile_allows_tool("default", &gh, "create_issue"));
+        assert!(r.profiles[0].tool_scope.is_empty());
+    }
+
+    #[test]
+    fn empty_allow_list_exposes_no_tools_distinct_from_clear() {
+        let mut r = Registry::default();
+        let gh = r.add_server(sample_server("github"));
+        // Some(empty) = expose NO tools on this server (not the same as "all tools").
+        r.set_profile_server_tools("default", &gh, Some(vec![])).unwrap();
+        assert!(!r.profile_allows_tool("default", &gh, "search"));
+        assert!(!r.profile_allows_tool("default", &gh, "anything"));
+        assert!(r.profiles[0].tool_scope.contains_key(&gh));
+        // None = clear the narrowing, back to all tools.
+        r.set_profile_server_tools("default", &gh, None).unwrap();
+        assert!(r.profile_allows_tool("default", &gh, "search"));
         assert!(r.profiles[0].tool_scope.is_empty());
     }
 

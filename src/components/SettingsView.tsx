@@ -369,9 +369,12 @@ function ProfileToolScope({
     const current = new Set(scope[serverId] ?? allTools);
     if (current.has(tool)) current.delete(tool);
     else current.add(tool);
-    // All selected -> clear the scope (whole server); otherwise persist the subset.
-    const next =
-      current.size >= allTools.length ? null : allTools.filter((t) => current.has(t));
+    // Every real tool selected -> clear the scope (whole server). Otherwise persist the
+    // checked subset (which may be empty = expose no tools). `.every` (not a size compare)
+    // so a stale entry from a since-removed tool can't fake an "all selected" state.
+    const next = allTools.every((t) => current.has(t))
+      ? null
+      : allTools.filter((t) => current.has(t));
     setBusy(true);
     try {
       onRegistryChange(await setProfileServerTools(profile.id, serverId, next));
