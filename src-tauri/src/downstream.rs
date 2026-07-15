@@ -1081,6 +1081,10 @@ fn container_escape_flag(args: &[String]) -> Option<&str> {
 /// (a blocking `read_line` on an unresponsive child would otherwise hang forever).
 pub struct StdioTransport {
     child: Child,
+    /// Windows Job Object that owns the complete launcher process tree. Closing
+    /// it terminates descendants that outlive an `npx`/`uvx` wrapper.
+    #[cfg(windows)]
+    job: Option<WindowsJob>,
     stdin: Arc<Mutex<ChildStdin>>,
     rx: Receiver<String>,
     /// Tail of the child's stderr, drained on a background thread. A server that
@@ -1102,6 +1106,165 @@ pub struct StdioTransport {
     /// Answers server-initiated JSON-RPC (e.g. `roots/list`) by forwarding to the
     /// upstream MCP client. Set by the gateway before the connect handshake.
     server_handler: Option<ServerRequestHandler>,
+}
+
+/// Owns a Windows Job Object configured to terminate every assigned process
+/// when the handle closes. Handles are stored as an integer so this RAII owner
+/// remains `Send`, matching [`Transport`], while still owning exactly one native
+/// handle.
+#[cfg(windows)]
+struct WindowsJob {
+    handle: usize,
+}
+
+#[cfg(windows)]
+impl WindowsJob {
+    /// Creates a Job Object that terminates all assigned processes when closed.
+    fn new() -> Result<Self, String> {
+        use std::mem::{size_of, zeroed};
+        use std::ptr;
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: null security/name pointers request a private, non-inheritable
+        // Job Object. `info` has the exact layout and byte size required by the
+        // selected information class.
+        unsafe {
+            let handle = CreateJobObjectW(ptr::null(), ptr::null());
+            if handle.is_null() {
+                return Err(format!(
+                    "failed to create Windows process Job Object: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const std::ffi::c_void,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+            {
+                let error = std::io::Error::last_os_error();
+                let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
+                return Err(format!(
+                    "failed to configure Windows process Job Object: {error}"
+                ));
+            }
+
+            Ok(Self {
+                handle: handle as usize,
+            })
+        }
+    }
+
+    /// Assigns a suspended child process to this Job Object.
+    fn assign(&self, child: &Child) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        // SAFETY: both handles remain valid for the duration of the call. The
+        // Child owns its process handle and this value owns the Job Object.
+        let assigned = unsafe {
+            AssignProcessToJobObject(
+                self.handle as windows_sys::Win32::Foundation::HANDLE,
+                child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            )
+        };
+        if assigned == 0 {
+            return Err(format!(
+                "failed to attach downstream process to Windows Job Object: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resumes the primary thread of a child created with `CREATE_SUSPENDED`.
+    fn resume(child: &Child) -> Result<(), String> {
+        use std::mem::size_of;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
+            TH32CS_SNAPTHREAD,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+        };
+
+        // SAFETY: the snapshot and thread handles are checked before use and
+        // closed on every path. A CREATE_SUSPENDED process has a primary thread
+        // before any of its code can execute.
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return Err(format!(
+                    "failed to enumerate suspended downstream process threads: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut entry = THREADENTRY32 {
+                dwSize: size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            let mut has_entry = Thread32First(snapshot, &mut entry);
+            while has_entry != 0 {
+                if entry.th32OwnerProcessID == child.id() {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if thread.is_null() {
+                        let error = std::io::Error::last_os_error();
+                        let _ = CloseHandle(snapshot);
+                        return Err(format!(
+                            "failed to open suspended downstream process thread: {error}"
+                        ));
+                    }
+
+                    let resume_result = ResumeThread(thread);
+                    let resume_error = (resume_result == u32::MAX)
+                        .then(std::io::Error::last_os_error);
+                    let _ = CloseHandle(thread);
+                    let _ = CloseHandle(snapshot);
+                    if let Some(error) = resume_error {
+                        return Err(format!(
+                            "failed to resume downstream process after Job Object assignment: {error}"
+                        ));
+                    }
+                    return Ok(());
+                }
+                has_entry = Thread32Next(snapshot, &mut entry);
+            }
+
+            let _ = CloseHandle(snapshot);
+        }
+
+        Err("failed to find suspended downstream process thread".to_string())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        if self.handle == 0 {
+            return;
+        }
+        let handle = self.handle as windows_sys::Win32::Foundation::HANDLE;
+        // SAFETY: this object exclusively owns `handle`. Explicit termination
+        // makes normal teardown immediate; KILL_ON_JOB_CLOSE is the crash-safe
+        // backstop when Rust destructors cannot run.
+        unsafe {
+            let _ = TerminateJobObject(handle, 1);
+            let _ = CloseHandle(handle);
+        }
+        self.handle = 0;
+    }
 }
 
 /// Tolerate a config that packed the whole invocation into `command` (e.g.
@@ -1257,11 +1420,20 @@ impl StdioTransport {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
+            use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+            cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
         }
+        #[cfg(windows)]
+        let job = WindowsJob::new()?;
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("failed to spawn '{command}': {e}"))?;
+        #[cfg(windows)]
+        if let Err(error) = job.assign(&child).and_then(|_| WindowsJob::resume(&child)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         let stdin = Arc::new(Mutex::new(child.stdin.take().ok_or("no child stdin")?));
         let stdout = child.stdout.take().ok_or("no child stdout")?;
         let stderr = child.stderr.take().ok_or("no child stderr")?;
@@ -1325,6 +1497,8 @@ impl StdioTransport {
 
         Ok(StdioTransport {
             child,
+            #[cfg(windows)]
+            job: Some(job),
             stdin,
             rx,
             stderr: stderr_buf,
@@ -1507,6 +1681,9 @@ impl Transport for StdioTransport {
 
 impl Drop for StdioTransport {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        drop(self.job.take());
+        #[cfg(not(windows))]
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -2107,6 +2284,89 @@ mod tests {
         screen_spawn_command, screen_spawn_env, CancelRegistry,
     };
     use serde_json::json;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_terminates_launcher_grandchild() {
+        use super::StdioTransport;
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+
+        fn process_is_running(pid: u32) -> bool {
+            // SAFETY: OpenProcess returns an owned handle for this check. It is
+            // always closed before returning.
+            unsafe {
+                let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+                if handle.is_null() {
+                    return false;
+                }
+                let state = WaitForSingleObject(handle, 0);
+                let _ = CloseHandle(handle);
+                state == WAIT_TIMEOUT
+            }
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let pid_file = std::env::temp_dir().join(format!(
+            "toolport-job-test-{}-{nonce}.pid",
+            std::process::id()
+        ));
+        let script_file = pid_file.with_extension("ps1");
+        let escaped_pid_file = pid_file.to_string_lossy().replace('\'', "''");
+        // The parent launches its descendant immediately. The production spawn
+        // path must assign the suspended parent before allowing this code to run.
+        let script = format!(
+            "$grandchild = Start-Process -FilePath 'powershell.exe' \
+               -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60') \
+               -WindowStyle Hidden -PassThru; \
+             [System.IO.File]::WriteAllText('{escaped_pid_file}', [string]$grandchild.Id); \
+             Wait-Process -Id $grandchild.Id"
+        );
+        std::fs::write(&script_file, script).expect("write launcher script");
+        let args = vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-File".to_string(),
+            script_file.to_string_lossy().into_owned(),
+        ];
+        let transport = StdioTransport::spawn("powershell.exe", &args, &[], None)
+            .expect("spawn Job Object-owned launcher");
+
+        let created_deadline = Instant::now() + Duration::from_secs(8);
+        while !pid_file.exists() && Instant::now() < created_deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let grandchild_pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("launcher should record its grandchild pid")
+            .trim()
+            .parse()
+            .expect("grandchild pid should be numeric");
+        assert!(
+            process_is_running(grandchild_pid),
+            "grandchild must be alive before the Job Object closes"
+        );
+
+        drop(transport);
+        let exit_deadline = Instant::now() + Duration::from_secs(5);
+        while process_is_running(grandchild_pid) && Instant::now() < exit_deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            !process_is_running(grandchild_pid),
+            "closing the Job Object must terminate launcher descendants"
+        );
+        let _ = std::fs::remove_file(pid_file);
+        let _ = std::fs::remove_file(script_file);
+    }
 
     #[test]
     fn expand_cwd_handles_tilde_and_env() {
