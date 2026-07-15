@@ -234,6 +234,9 @@ export interface SavingsSummary {
   listLoads: number;
   peakCatalog: number;
   sinceTs: number;
+  /** Downstream tool round-trips collapsed into single code-mode run_script calls.
+   * Absent in older savings logs written before code mode. */
+  roundTripsSaved?: number;
 }
 
 export interface AuthInfo {
