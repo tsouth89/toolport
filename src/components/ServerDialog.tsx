@@ -351,6 +351,10 @@ export function ServerDialog({
                 <SelectItem value="sse">sse (remote)</SelectItem>
               </SelectContent>
             </Select>
+
+            <p className="text-xs text-muted-foreground">
+              Use stdio for a local command, or http/sse for a remote URL.
+            </p>
           </div>
 
           {isStdio ? (
