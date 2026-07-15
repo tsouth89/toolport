@@ -1399,9 +1399,11 @@ export function ActivityView({
 
   // Live update (SOU-142): tool calls never touch the registry, so the parent's refreshKey
   // never bumps for them and the feed would sit frozen while an agent works. While Activity
-  // is open AND the window is visible, tick every few seconds so the call list + Live
-  // Inspector refetch the local logs in place (silent, no spinner). Visibility-guarded so a
-  // backgrounded app doesn't churn; mirrors how PendingApprovals polls.
+  // is mounted, tick every few seconds so the call list + Live Inspector refetch the local
+  // logs in place (silent, no spinner). Mirrors how PendingApprovals polls. The visibility
+  // check skips a tick when the webview reports the page hidden; it's best-effort (a desktop
+  // webview doesn't reliably flip visibilityState on minimize), but each tick is only a few
+  // cheap local-file reads, so continuing while minimized costs next to nothing.
   const [liveTick, setLiveTick] = useState(0);
   useEffect(() => {
     const id = setInterval(() => {
