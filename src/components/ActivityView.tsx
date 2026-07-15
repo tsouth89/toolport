@@ -856,6 +856,12 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
   const [open, setOpen] = useState(false);
   const pct = t.flatTokens > 0 ? Math.round((t.savedTokens / t.flatTokens) * 100) : 0;
   const hit = t.returned > 0;
+  const fallbackCount = t.fallbacks ?? t.ranking?.filter((r) => r.fallback).length ?? 0;
+  const resultSummary = fallbackCount
+    ? `${t.total} direct + ${fallbackCount} fallback`
+    : hit
+      ? `${t.returned} of ${t.total}`
+      : "no match";
   return (
     <div className="rounded-md border border-border/50 text-sm">
       <div
@@ -896,7 +902,7 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
           </span>
         )}
         <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
-          {hit ? `${t.returned} of ${t.total}` : "no match"}
+          {resultSummary}
         </span>
         <span className="shrink-0 text-xs text-muted-foreground">
           {new Date(t.ts).toLocaleTimeString()}
@@ -922,11 +928,13 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
                     <span className="min-w-0 truncate text-[11px] text-muted-foreground">
                       {r.pinned
                         ? "pinned prerequisite"
-                        : r.matched.length > 0
-                          ? `matched ${r.matched.join(", ")}`
-                          : t.mode === "semantic"
-                            ? "semantic match"
-                            : "—"}
+                        : r.fallback
+                          ? "fallback candidate"
+                          : r.matched.length > 0
+                            ? `matched ${r.matched.join(", ")}`
+                            : t.mode === "semantic"
+                              ? "semantic match"
+                              : "—"}
                     </span>
                   </div>
                 ))}

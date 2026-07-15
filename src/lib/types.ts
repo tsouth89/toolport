@@ -92,6 +92,8 @@ export interface SearchTrace {
   names: string[];
   returned: number;
   total: number;
+  /** Full count of appended recovery candidates. Absent on older traces. */
+  fallbacks?: number;
   /** Tool-definition tokens the returned schemas cost this turn (≈). */
   returnedTokens: number;
   /** Tool-definition tokens advertising the whole (scoped) catalog would cost (≈). */
@@ -117,6 +119,8 @@ export interface SearchTraceRank {
   matched: string[];
   /** A pinned prerequisite prepended ahead of the ranked matches, not a query hit. */
   pinned: boolean;
+  /** A zero-score recovery candidate appended because the direct search was weak. */
+  fallback?: boolean;
 }
 
 /** One exposed tool's verifiable identity: the model-visible alias joined back to its
