@@ -121,7 +121,7 @@ fn decision_entry(
     reason: &str,
     decision: &str,
     args_hash: &str,
-    duration_ms: Option<u64>,
+    held_ms: Option<u64>,
 ) -> Value {
     // `held` = the call was gated and did NOT run. An `approved` decision ran, so it is not
     // held (it must not inflate the held count); every non-approval was blocked, so it is.
@@ -137,8 +137,10 @@ fn decision_entry(
         "decision": decision,
         "argsHash": args_hash,
     });
-    if let Some(ms) = duration_ms {
-        entry["durationMs"] = json!(ms);
+    // The approval wait, recorded as `heldMs` (not `durationMs`) so a governance view can
+    // tell how long a human was asked apart from a call's downstream execution duration.
+    if let Some(ms) = held_ms {
+        entry["heldMs"] = json!(ms);
     }
     if let Some(c) = client.filter(|c| !c.is_empty()) {
         entry["client"] = json!(c);
@@ -156,7 +158,7 @@ pub fn record_decision(
     reason: &str,
     decision: &str,
     args: &Value,
-    duration_ms: Option<u64>,
+    held_ms: Option<u64>,
 ) {
     write_line(&decision_entry(
         server,
@@ -165,7 +167,7 @@ pub fn record_decision(
         reason,
         decision,
         &args_hash(args),
-        duration_ms,
+        held_ms,
     ));
 }
 
@@ -481,6 +483,7 @@ const CSV_COLUMNS: &[&str] = &[
     "decision",
     "argsHash",
     "durationMs",
+    "heldMs",
     "action",
     "error",
 ];
@@ -532,7 +535,7 @@ mod tests {
         })];
         let csv = to_csv(&entries);
         assert!(csv.starts_with(
-            "ts,server,tool,client,ok,held,kind,reason,decision,argsHash,durationMs,action,error\r\n"
+            "ts,server,tool,client,ok,held,kind,reason,decision,argsHash,durationMs,heldMs,action,error\r\n"
         ));
         assert!(csv.contains("\"gh\""));
         assert!(csv.contains("\"search\""));
@@ -679,7 +682,9 @@ mod tests {
         assert_eq!(e["reason"], "destructive");
         assert_eq!(e["decision"], "unreachable");
         assert_eq!(e["argsHash"], "deadbeef");
-        assert_eq!(e["durationMs"], 1234);
+        // The wait is `heldMs` (approval wait), not `durationMs` (downstream exec time).
+        assert_eq!(e["heldMs"], 1234);
+        assert!(e.get("durationMs").is_none());
         assert_eq!(e["client"], "claude");
         // Held (didn't run) but ok:true so it stays out of the error rate.
         assert_eq!(e["held"], true);
@@ -693,8 +698,8 @@ mod tests {
         assert_eq!(denied["reason"], "untrusted_source");
         // Unattributed call omits the client field entirely.
         assert!(denied.get("client").is_none());
-        // durationMs is optional.
-        assert!(denied.get("durationMs").is_none());
+        // heldMs is optional.
+        assert!(denied.get("heldMs").is_none());
 
         // An approved call RAN, so it is audited but not counted as held (still ok:true).
         let approved = decision_entry("s", "t", None, "destructive", "approved", "h", None);
