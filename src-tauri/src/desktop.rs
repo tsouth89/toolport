@@ -1945,8 +1945,10 @@ fn set_auth_token(
 
 #[tauri::command]
 fn clear_auth_token(state: State<RegistryState>, server_id: String) -> Result<(), String> {
-    secrets::delete_secret(&server_id, secrets::HTTP_AUTH_KEY)?;
+    // Remove refresh metadata first so a second-write failure cannot leave state
+    // that silently recreates the bearer token the user asked to delete.
     remote::clear_oauth_state(&server_id)?;
+    secrets::delete_secret(&server_id, secrets::HTTP_AUTH_KEY)?;
     bump_secrets_generation(state.inner());
     Ok(())
 }

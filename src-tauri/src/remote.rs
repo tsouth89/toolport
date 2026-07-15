@@ -20,6 +20,9 @@ pub const OAUTH_STATE_KEY: &str = STATE_KEY;
 /// Refresh before the exact deadline so the token cannot expire while an MCP
 /// request is in flight.
 const PROACTIVE_REFRESH_SKEW_SECS: u64 = 60;
+/// Avoid hammering a temporarily unavailable OAuth endpoint on every tool call
+/// while still retrying within the pre-expiry safety window.
+const PROACTIVE_REFRESH_RETRY_SECS: u64 = 15;
 
 #[derive(Serialize, Deserialize)]
 struct OAuthState {
@@ -129,8 +132,10 @@ fn refresh_token_with_expiry(server_id: &str) -> Result<RefreshedToken, String> 
         state.resource.as_deref(),
         block_private,
     )?;
-    secrets::set_secret(server_id, secrets::HTTP_AUTH_KEY, &tokens.access_token)?;
-    // Persist a rotated refresh token if the server issued one.
+    // Persist rotated refresh metadata first. If replacing the access token then
+    // fails, the next attempt still has the new refresh token and can recover;
+    // the reverse order could strand a new access token with an invalidated old
+    // refresh token after a second-write failure.
     let new_state = OAuthState {
         token_endpoint: state.token_endpoint,
         client_id: state.client_id,
@@ -141,6 +146,7 @@ fn refresh_token_with_expiry(server_id: &str) -> Result<RefreshedToken, String> 
     };
     let json = serde_json::to_string(&new_state).map_err(|e| e.to_string())?;
     secrets::set_secret(server_id, STATE_KEY, &json)?;
+    secrets::set_secret(server_id, secrets::HTTP_AUTH_KEY, &tokens.access_token)?;
     Ok(RefreshedToken {
         access_token: tokens.access_token,
         expires_at: tokens.expires_at,
@@ -161,9 +167,9 @@ fn refresh_token_if_needed(server_id: &str) -> Result<Option<String>, String> {
     };
     match refresh_decision(&state, now_epoch_seconds()) {
         RefreshDecision::NotNeeded => Ok(None),
-        RefreshDecision::Refresh => refresh_token(server_id)
-            .map(Some)
-            .map_err(|e| format!("OAuth token refresh failed; needs authentication: {e}")),
+        // The token may still be valid throughout the safety window. A transient
+        // refresh failure falls back to it; a real 401/403 forces another refresh.
+        RefreshDecision::Refresh => Ok(refresh_token(server_id).ok()),
         RefreshDecision::Reauthenticate => Err(
             "OAuth access token expires soon and no refresh token is available; needs authentication"
                 .to_string(),
@@ -228,8 +234,20 @@ fn authed_transport(
                 }
             }
 
-            let refreshed = refresh_token_with_expiry(&sid)
-                .map_err(|e| format!("OAuth token refresh failed; needs authentication: {e}"))?;
+            let refreshed = match refresh_token_with_expiry(&sid) {
+                Ok(refreshed) => refreshed,
+                Err(e) => {
+                    if !force {
+                        *next_refresh_at
+                            .lock()
+                            .map_err(|_| "OAuth refresh deadline lock poisoned".to_string())? =
+                            Some(now_epoch_seconds().saturating_add(PROACTIVE_REFRESH_RETRY_SECS));
+                    }
+                    return Err(format!(
+                        "OAuth token refresh failed; needs authentication: {e}"
+                    ));
+                }
+            };
             let deadline = refreshed
                 .expires_at
                 .map(|expires_at| expires_at.saturating_sub(PROACTIVE_REFRESH_SKEW_SECS));

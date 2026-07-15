@@ -1536,8 +1536,8 @@ fn ids_match(got: Option<&Value>, wanted: Option<&Value>) -> bool {
 
 /// A callback that can proactively mint a fresh token before expiry or force a
 /// refresh after a 401/403. `force = false` returns `Ok(None)` when the current
-/// token is still fresh. Errors are surfaced as a per-server authentication
-/// failure instead of sending a request with a token known to be expired.
+/// token is still fresh. A proactive error may fall back to the current token;
+/// a forced error is surfaced as a per-server authentication failure.
 pub type RefreshFn = Box<dyn Fn(bool) -> Result<Option<String>, String> + Send + Sync>;
 
 /// Screen resolved socket addresses against the SSRF policy, fail-closed: returns
@@ -1611,11 +1611,10 @@ pub struct HttpTransport {
     next_id: i64,
     /// Raw bearer token (without the "Bearer " prefix), if the server needs auth.
     auth: Option<String>,
-    /// Called once on a 401/403 to mint a fresh token (an OAuth refresh). Returns
-    /// the new raw token; the request is then retried with it. `None` = no refresh
-    /// available, so an auth failure surfaces as before. This is what lets a long-
-    /// running gateway recover from a short-lived access token expiring mid-session
-    /// instead of 401ing until the server is manually reconnected.
+    /// Called before each POST to refresh a token nearing expiry, and forced once
+    /// after a 401/403 to recover from an already-expired token. A proactive
+    /// `None` or error keeps the current token; a forced refresh must return a new
+    /// raw token or the authentication failure is surfaced.
     refresh: Option<RefreshFn>,
     server_handler: Option<ServerRequestHandler>,
 }
@@ -1680,24 +1679,64 @@ impl HttpTransport {
         Ok(true)
     }
 
+    /// Try to replace a token nearing expiry. Failure here is non-fatal because
+    /// the current token may remain valid throughout the safety window; a real
+    /// 401/403 will force one refresh attempt below.
+    fn refresh_before_send(&mut self) {
+        if let Some(refresh) = &self.refresh {
+            if let Ok(Some(token)) = refresh(false) {
+                self.auth = Some(token);
+            }
+        }
+    }
+
+    fn force_refresh_after_auth_error(&mut self, code: u16) -> Result<(), TransportError> {
+        match self.refresh.as_ref().expect("refresh callback checked")(true) {
+            Ok(Some(token)) => {
+                self.auth = Some(token);
+                Ok(())
+            }
+            Ok(None) => Err(TransportError::Fatal(format!(
+                "HTTP {code} (needs authentication): token refresh returned no token"
+            ))),
+            Err(e) => Err(TransportError::Fatal(format!(
+                "HTTP {code} (needs authentication): token refresh failed: {e}"
+            ))),
+        }
+    }
+
     /// POST JSON-RPC without waiting for a response body (inline replies mid-SSE).
     fn send_post_no_response(&mut self, body: &Value) -> Result<(), TransportError> {
         let payload = body.to_string();
-        let mut req = self
-            .inline_agent
-            .post(&self.url)
-            .set("Content-Type", "application/json")
-            .set("Accept", "application/json, text/event-stream")
-            .set("MCP-Protocol-Version", PROTOCOL_VERSION);
-        if let Some(sid) = &self.session_id {
-            req = req.set("Mcp-Session-Id", sid);
-        }
-        if let Some(token) = &self.auth {
-            req = req.set("Authorization", &bearer_header(token));
-        }
-        let resp = req
-            .send_string(&payload)
-            .map_err(|e| TransportError::Fatal(e.to_string()))?;
+        self.refresh_before_send();
+        let mut refreshed = false;
+        let resp = loop {
+            let mut req = self
+                .inline_agent
+                .post(&self.url)
+                .set("Content-Type", "application/json")
+                .set("Accept", "application/json, text/event-stream")
+                .set("MCP-Protocol-Version", PROTOCOL_VERSION);
+            if let Some(sid) = &self.session_id {
+                req = req.set("Mcp-Session-Id", sid);
+            }
+            if let Some(token) = &self.auth {
+                req = req.set("Authorization", &bearer_header(token));
+            }
+            match req.send_string(&payload) {
+                Ok(resp) => break resp,
+                Err(ureq::Error::Status(code, resp))
+                    if (code == 401 || code == 403)
+                        && !refreshed
+                        && self.refresh.is_some() =>
+                {
+                    let _ = read_capped(resp, 8 * 1024);
+                    refreshed = true;
+                    self.force_refresh_after_auth_error(code)?;
+                }
+                Err(e) => return Err(TransportError::Fatal(e.to_string())),
+            }
+        };
         if let Some(sid) = resp.header("Mcp-Session-Id") {
             self.session_id = Some(sid.to_string());
         }
@@ -1760,17 +1799,7 @@ impl HttpTransport {
         // Refresh shortly before the known expiry, including before initialize.
         // The callback keeps the deadline in memory, so this is a cheap no-op on
         // ordinary calls and only touches vaulted OAuth state when refresh is due.
-        if let Some(refresh) = &self.refresh {
-            match refresh(false) {
-                Ok(Some(token)) => self.auth = Some(token),
-                Ok(None) => {}
-                Err(e) => {
-                    return Err(TransportError::Fatal(format!(
-                        "needs authentication: proactive token refresh failed: {e}"
-                    )))
-                }
-            }
-        }
+        self.refresh_before_send();
 
         // Token refresh is handled internally (it doesn't sleep, so no lock
         // contention). Only 429 and transport-retry signals bubble up as
@@ -1810,22 +1839,8 @@ impl HttpTransport {
                 {
                     let _ = read_capped(r, 8 * 1024);
                     refreshed = true;
-                    match self.refresh.as_ref().expect("refresh callback checked")(true) {
-                        Ok(Some(tok)) => {
-                            self.auth = Some(tok);
-                            continue;
-                        }
-                        Ok(None) => {
-                            return Err(TransportError::Fatal(format!(
-                                "HTTP {code} (needs authentication): token refresh returned no token"
-                            )))
-                        }
-                        Err(e) => {
-                            return Err(TransportError::Fatal(format!(
-                                "HTTP {code} (needs authentication): token refresh failed: {e}"
-                            )))
-                        }
-                    }
+                    self.force_refresh_after_auth_error(code)?;
+                    continue;
                 }
                 Err(ureq::Error::Status(code, r)) => {
                     let detail: String = read_capped(r, 64 * 1024).chars().take(200).collect();
@@ -2269,10 +2284,11 @@ mod tests {
 
     #[test]
     fn http_sse_answers_inline_server_request_before_final_response() {
-        use super::{HttpTransport, ServerRequestHandler, Transport};
+        use super::{HttpTransport, RefreshFn, ServerRequestHandler, Transport};
         use serde_json::Value;
         use std::io::{Read, Write};
         use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2301,6 +2317,9 @@ mod tests {
 
             let mut inline = listener.accept().unwrap().0;
             let inline_headers = read_http_headers(&mut inline);
+            assert!(String::from_utf8_lossy(&inline_headers)
+                .to_ascii_lowercase()
+                .contains("authorization: bearer fresh"));
             let mut body = String::new();
             if let Some(len) = content_length(&inline_headers) {
                 let mut raw = vec![0u8; len];
@@ -2359,7 +2378,18 @@ mod tests {
             }
         });
         let url = format!("http://127.0.0.1:{port}/");
-        let mut t = HttpTransport::new(&url);
+        let refresh_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&refresh_calls);
+        let refresh: Option<RefreshFn> = Some(Box::new(move |force| {
+            assert!(!force);
+            if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                Ok(Some("fresh".to_string()))
+            } else {
+                Ok(None)
+            }
+        }));
+        let mut t =
+            HttpTransport::with_auth_refresh(&url, Some("stale".to_string()), refresh);
         t.set_server_request_handler(handler);
         let result = t
             .post(
@@ -2368,6 +2398,7 @@ mod tests {
             )
             .expect("inline reply should unblock the SSE stream");
         server_handle.join().unwrap();
+        assert_eq!(refresh_calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             result
                 .and_then(|v| v.get("result").cloned())
@@ -2927,6 +2958,104 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
         assert_eq!(*seen_auth.lock().unwrap(), "Bearer fresh");
+    }
+
+    #[test]
+    fn post_uses_current_token_when_proactive_refresh_fails() {
+        use super::{HttpTransport, RefreshFn};
+        use std::sync::{Arc, Mutex};
+
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let seen_auth = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&seen_auth);
+        let handle = std::thread::spawn(move || {
+            let req = server.recv().unwrap();
+            *captured.lock().unwrap() = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let ct =
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap();
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+            let _ = req.respond(tiny_http::Response::from_string(body).with_header(ct));
+        });
+
+        let refresh: Option<RefreshFn> = Some(Box::new(|force| {
+            assert!(!force);
+            Err("temporary OAuth endpoint failure".to_string())
+        }));
+        let url = format!("http://127.0.0.1:{port}/");
+        let mut transport =
+            HttpTransport::with_auth_refresh(&url, Some("still-valid".to_string()), refresh);
+
+        let result = transport.post(
+            &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }),
+            true,
+        );
+        handle.join().unwrap();
+
+        assert!(result.is_ok());
+        assert_eq!(*seen_auth.lock().unwrap(), "Bearer still-valid");
+    }
+
+    #[test]
+    fn inline_post_refreshes_token_and_retries_on_401() {
+        use super::{HttpTransport, RefreshFn};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let retry_auth = Arc::new(Mutex::new(String::new()));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (captured, hit_count) = (Arc::clone(&retry_auth), Arc::clone(&hits));
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let req = server.recv().unwrap();
+                if hit_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let _ = req.respond(
+                        tiny_http::Response::from_string("unauthorized").with_status_code(401),
+                    );
+                } else {
+                    *captured.lock().unwrap() = req
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("Authorization"))
+                        .map(|h| h.value.as_str().to_string())
+                        .unwrap_or_default();
+                    let _ = req.respond(
+                        tiny_http::Response::from_string("{}").with_status_code(202),
+                    );
+                }
+            }
+        });
+
+        let refresh: Option<RefreshFn> = Some(Box::new(|force| {
+            if force {
+                Ok(Some("fresh".to_string()))
+            } else {
+                Ok(None)
+            }
+        }));
+        let url = format!("http://127.0.0.1:{port}/");
+        let mut transport =
+            HttpTransport::with_auth_refresh(&url, Some("stale".to_string()), refresh);
+
+        transport
+            .send_post_no_response(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "result": { "roots": [] }
+            }))
+            .expect("inline reply should refresh and retry");
+        handle.join().unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(*retry_auth.lock().unwrap(), "Bearer fresh");
     }
 
     #[test]
