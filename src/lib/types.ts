@@ -359,6 +359,10 @@ export interface Profile {
   id: string;
   name: string;
   enabledServerIds: string[];
+  /** Tool-granular scope ("FeatureSet"): server id -> the only tool names this profile
+   * exposes on that server. A server absent = all its tools; empty/absent = server-granular
+   * only. Enforced in tools/list, search, and the call guard. */
+  toolScope?: Record<string, string[]>;
 }
 
 /** A folder -> profile auto-routing mapping (SOU-188): a client whose reported project

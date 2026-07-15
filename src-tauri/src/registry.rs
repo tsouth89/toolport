@@ -136,6 +136,15 @@ pub struct Profile {
     pub name: String,
     #[serde(default)]
     pub enabled_server_ids: Vec<String>,
+    /// Optional tool-granular scoping (the "FeatureSet" layer): a per-server allow-list of
+    /// the ORIGINAL tool names this profile exposes. A server present here exposes ONLY the
+    /// listed tools; a server ABSENT exposes all of its tools, exactly as before. An empty
+    /// map means the profile is server-granular only, so this is fully backward compatible.
+    /// Keyed by server id -> original tool names (like `pinned_tools`), so a `tool_override`
+    /// rename can't slip a tool past the scope. Enforced everywhere the server scope is:
+    /// tools/list, search, and the call guard.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tool_scope: HashMap<String, Vec<String>>,
 }
 
 /// Maps a project folder to a profile, so the gateway can auto-scope a client to the right
@@ -478,6 +487,7 @@ impl Default for Registry {
                 id: DEFAULT_PROFILE_ID.to_string(),
                 name: "Default".to_string(),
                 enabled_server_ids: Vec::new(),
+                tool_scope: HashMap::new(),
             }],
             active_profile_id: Some(DEFAULT_PROFILE_ID.to_string()),
             deny_destructive: false,
@@ -575,6 +585,8 @@ impl Registry {
         }
         for profile in &mut self.profiles {
             profile.enabled_server_ids.retain(|sid| sid != id);
+            // Drop any tool-scope allow-list for the removed server so it can't orphan.
+            profile.tool_scope.remove(id);
         }
         Ok(())
     }
@@ -659,6 +671,51 @@ impl Registry {
             .find(|s| s.id == server_id)
             .map(|s| !s.disabled_tools.iter().any(|t| t == tool))
             .unwrap_or(true)
+    }
+
+    /// Whether a profile exposes a given tool (tool-granular scoping / "FeatureSet"). Default-
+    /// allow: if the profile has no `tool_scope` allow-list for `server_id`, every tool on
+    /// that server is exposed (server-granular behavior, unchanged). If it does, ONLY the
+    /// listed tools are. Layered UNDER the server scope, so it only narrows within a profile's
+    /// enabled servers. `tool` is the ORIGINAL tool name (as `route_of` yields it). An unknown
+    /// profile ref imposes no extra tool restriction here (the server scope already blocks it).
+    pub fn profile_allows_tool(&self, profile_ref: &str, server_id: &str, tool: &str) -> bool {
+        let id = self.resolve_profile_id(profile_ref);
+        match self.profiles.iter().find(|p| p.id == id) {
+            Some(p) => match p.tool_scope.get(server_id) {
+                Some(allowed) => allowed.iter().any(|t| t == tool),
+                None => true,
+            },
+            None => true,
+        }
+    }
+
+    /// Set or clear a profile's tool allow-list for one server. `Some(list)` narrows that
+    /// server to exactly those ORIGINAL tool names (an EMPTY list is a real state: expose NO
+    /// tools on that server, enforced as block-all). `None` removes the entry, restoring "all
+    /// tools on that server". Idempotent. The UI sends `None` only when every tool is selected,
+    /// so an unnarrowed profile keeps an empty `tool_scope` (backward compatible), and sends
+    /// `Some(subset)` otherwise, distinguishing "all" (None) from "none" (empty list).
+    pub fn set_profile_server_tools(
+        &mut self,
+        profile_id: &str,
+        server_id: &str,
+        tools: Option<Vec<String>>,
+    ) -> Result<(), String> {
+        let profile = self
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| format!("No profile with id '{profile_id}'"))?;
+        match tools {
+            Some(list) => {
+                profile.tool_scope.insert(server_id.to_string(), list);
+            }
+            None => {
+                profile.tool_scope.remove(server_id);
+            }
+        }
+        Ok(())
     }
 
     /// Pin or unpin a tool as a lazy-discovery prerequisite (by ORIGINAL tool name).
@@ -807,6 +864,7 @@ impl Registry {
             id: id.clone(),
             name: name.to_string(),
             enabled_server_ids: Vec::new(),
+            tool_scope: HashMap::new(),
         });
         id
     }
@@ -1799,6 +1857,74 @@ mod tests {
         assert_eq!(r.profile_for_root("/home/me/workspace"), None);
         // Empty root never matches.
         assert_eq!(r.profile_for_root(""), None);
+    }
+
+    #[test]
+    fn tool_scope_narrows_a_profile_to_specific_tools() {
+        let mut r = Registry::default();
+        let gh = r.add_server(sample_server("github"));
+        let db = r.add_server(sample_server("postgres"));
+        // Default-allow: no scope -> every tool exposed on every server.
+        assert!(r.profile_allows_tool("default", &gh, "search"));
+        assert!(r.profile_allows_tool("default", &db, "query"));
+
+        // Narrow github to only `search`; postgres untouched.
+        r.set_profile_server_tools("default", &gh, Some(vec!["search".into()]))
+            .unwrap();
+        assert!(r.profile_allows_tool("default", &gh, "search"));
+        assert!(!r.profile_allows_tool("default", &gh, "create_issue")); // not allow-listed
+        assert!(r.profile_allows_tool("default", &db, "query")); // no scope on db -> all allowed
+        // Resolves by profile NAME too, like the other scope lookups.
+        assert!(!r.profile_allows_tool("Default", &gh, "create_issue"));
+
+        // Clearing restores all-allowed and leaves the map empty (backward compatible).
+        r.set_profile_server_tools("default", &gh, None).unwrap();
+        assert!(r.profile_allows_tool("default", &gh, "create_issue"));
+        assert!(r.profiles[0].tool_scope.is_empty());
+    }
+
+    #[test]
+    fn empty_allow_list_exposes_no_tools_distinct_from_clear() {
+        let mut r = Registry::default();
+        let gh = r.add_server(sample_server("github"));
+        // Some(empty) = expose NO tools on this server (not the same as "all tools").
+        r.set_profile_server_tools("default", &gh, Some(vec![])).unwrap();
+        assert!(!r.profile_allows_tool("default", &gh, "search"));
+        assert!(!r.profile_allows_tool("default", &gh, "anything"));
+        assert!(r.profiles[0].tool_scope.contains_key(&gh));
+        // None = clear the narrowing, back to all tools.
+        r.set_profile_server_tools("default", &gh, None).unwrap();
+        assert!(r.profile_allows_tool("default", &gh, "search"));
+        assert!(r.profiles[0].tool_scope.is_empty());
+    }
+
+    #[test]
+    fn removing_a_server_drops_its_tool_scope() {
+        let mut r = Registry::default();
+        let gh = r.add_server(sample_server("github"));
+        r.set_profile_server_tools("default", &gh, Some(vec!["search".into()]))
+            .unwrap();
+        assert!(!r.profiles[0].tool_scope.is_empty());
+        r.remove_server(&gh).unwrap();
+        assert!(
+            r.profiles[0].tool_scope.is_empty(),
+            "tool_scope must not orphan a removed server"
+        );
+    }
+
+    #[test]
+    fn tool_scope_omitted_from_json_when_empty() {
+        // Back-compat: a profile with no tool scope serializes without the field.
+        let r = Registry::default();
+        assert!(!serde_json::to_string(&r).unwrap().contains("toolScope"));
+    }
+
+    #[test]
+    fn unknown_profile_ref_imposes_no_extra_tool_restriction() {
+        // The server scope already fails an unknown profile closed; this must not add a
+        // second, confusing block, so it is default-allow for an unresolved profile.
+        let r = Registry::default();
+        assert!(r.profile_allows_tool("nope", "github", "anything"));
     }
 
     #[test]

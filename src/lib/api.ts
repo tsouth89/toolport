@@ -657,6 +657,20 @@ export function setActiveProfile(id: string): Promise<Registry> {
   return invoke<Registry>("set_active_profile", { id });
 }
 
+/** Set (or clear with `null`) a profile's tool-granular scope for one server (SOU-189):
+ * the only original tool names that profile exposes on that server. `null`/empty = all. */
+export function setProfileServerTools(
+  profileId: string,
+  serverId: string,
+  tools: string[] | null,
+): Promise<Registry> {
+  return invoke<Registry>("set_profile_server_tools", {
+    profileId,
+    serverId,
+    tools,
+  });
+}
+
 /** Replace the folder -> profile auto-routing mappings (SOU-188). */
 export function setFolderProfiles(mappings: FolderProfile[]): Promise<Registry> {
   return invoke<Registry>("set_folder_profiles", { mappings });

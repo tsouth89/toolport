@@ -3412,8 +3412,25 @@ fn build_router(
             disabled.insert(s.id.clone(), s.disabled_tools.iter().cloned().collect());
         }
     }
+    // Tool-granular profile scope (SOU-189): the active profile's per-server tool allow-list.
+    // Baked into this per-profile router so tools/list, search, and the call guard all honor
+    // it with no per-request threading. Applies to the stdio (per-profile) router only; the
+    // shared HTTP-bridge router serves many profiles, so its tool-scope is a per-request
+    // follow-up (stdio-first, same line as folder routing).
+    let mut allow = std::collections::HashMap::new();
+    if !http_mode {
+        let pid = profile
+            .map(|p| reg.resolve_profile_id(p))
+            .unwrap_or_else(|| reg.active_profile_id());
+        if let Some(prof) = reg.profiles.iter().find(|p| p.id == pid) {
+            for (server_id, tools) in &prof.tool_scope {
+                allow.insert(server_id.clone(), tools.iter().cloned().collect());
+            }
+        }
+    }
     let policy = ToolPolicy {
         disabled,
+        allow,
         deny_destructive: reg.deny_destructive_effective(),
         // Hide already-quarantined tools from the first build (the set persists across
         // restarts); newly detected drift is added during the integrity check below.

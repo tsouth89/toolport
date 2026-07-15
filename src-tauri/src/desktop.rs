@@ -635,6 +635,22 @@ fn set_folder_profiles(
     Ok(reg)
 }
 
+/// Set (or clear) a profile's tool-granular scope for one server (SOU-189). `tools = Some(list)`
+/// narrows that server to exactly those original tool names within the profile; `None` (or an
+/// empty list) clears it, restoring all tools on that server. Returns the saved registry.
+#[tauri::command]
+fn set_profile_server_tools(
+    state: State<RegistryState>,
+    profile_id: String,
+    server_id: String,
+    tools: Option<Vec<String>>,
+) -> Result<Registry, String> {
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_profile_server_tools(&profile_id, &server_id, tools)
+    })?;
+    Ok(reg)
+}
+
 /// Write a server set into a client's config (backs up first). Not yet called by
 /// the UI; reserved for bulk operations.
 #[tauri::command]
@@ -2764,6 +2780,7 @@ pub fn run() {
             delete_profile,
             set_active_profile,
             set_folder_profiles,
+            set_profile_server_tools,
             write_to_client,
             install_gateway,
             uninstall_gateway,
@@ -3324,6 +3341,7 @@ mod tests {
             id: "default".into(),
             name: "Default".into(),
             enabled_server_ids: vec!["gh".into()],
+            tool_scope: Default::default(),
         }];
         let mut baselines = BTreeMap::new();
         let bl = |fp: &str, fs: u64, lc: u64| integrity::ToolBaseline {
