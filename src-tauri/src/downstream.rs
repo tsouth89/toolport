@@ -1119,6 +1119,7 @@ struct WindowsJob {
 
 #[cfg(windows)]
 impl WindowsJob {
+    /// Creates a Job Object that terminates all assigned processes when closed.
     fn new() -> Result<Self, String> {
         use std::mem::{size_of, zeroed};
         use std::ptr;
@@ -1161,6 +1162,7 @@ impl WindowsJob {
         }
     }
 
+    /// Assigns a suspended child process to this Job Object.
     fn assign(&self, child: &Child) -> Result<(), String> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
@@ -1180,6 +1182,67 @@ impl WindowsJob {
             ));
         }
         Ok(())
+    }
+
+    /// Resumes the primary thread of a child created with `CREATE_SUSPENDED`.
+    fn resume(child: &Child) -> Result<(), String> {
+        use std::mem::size_of;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
+            TH32CS_SNAPTHREAD,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+        };
+
+        // SAFETY: the snapshot and thread handles are checked before use and
+        // closed on every path. A CREATE_SUSPENDED process has a primary thread
+        // before any of its code can execute.
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return Err(format!(
+                    "failed to enumerate suspended downstream process threads: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut entry = THREADENTRY32 {
+                dwSize: size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            let mut has_entry = Thread32First(snapshot, &mut entry);
+            while has_entry != 0 {
+                if entry.th32OwnerProcessID == child.id() {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if thread.is_null() {
+                        let error = std::io::Error::last_os_error();
+                        let _ = CloseHandle(snapshot);
+                        return Err(format!(
+                            "failed to open suspended downstream process thread: {error}"
+                        ));
+                    }
+
+                    let resume_result = ResumeThread(thread);
+                    let resume_error = (resume_result == u32::MAX)
+                        .then(std::io::Error::last_os_error);
+                    let _ = CloseHandle(thread);
+                    let _ = CloseHandle(snapshot);
+                    if let Some(error) = resume_error {
+                        return Err(format!(
+                            "failed to resume downstream process after Job Object assignment: {error}"
+                        ));
+                    }
+                    return Ok(());
+                }
+                has_entry = Thread32Next(snapshot, &mut entry);
+            }
+
+            let _ = CloseHandle(snapshot);
+        }
+
+        Err("failed to find suspended downstream process thread".to_string())
     }
 }
 
@@ -1357,7 +1420,8 @@ impl StdioTransport {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
+            use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+            cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
         }
         #[cfg(windows)]
         let job = WindowsJob::new()?;
@@ -1365,7 +1429,7 @@ impl StdioTransport {
             .spawn()
             .map_err(|e| format!("failed to spawn '{command}': {e}"))?;
         #[cfg(windows)]
-        if let Err(error) = job.assign(&child) {
+        if let Err(error) = job.assign(&child).and_then(|_| WindowsJob::resume(&child)) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(error);
@@ -2255,12 +2319,10 @@ mod tests {
         ));
         let script_file = pid_file.with_extension("ps1");
         let escaped_pid_file = pid_file.to_string_lossy().replace('\'', "''");
-        // The short delay gives the parent process time to be assigned before it
-        // launches its descendant. The parent then waits so both remain alive
-        // until closing the Job Object terminates the tree.
+        // The parent launches its descendant immediately. The production spawn
+        // path must assign the suspended parent before allowing this code to run.
         let script = format!(
-            "Start-Sleep -Milliseconds 300; \
-             $grandchild = Start-Process -FilePath 'powershell.exe' \
+            "$grandchild = Start-Process -FilePath 'powershell.exe' \
                -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60') \
                -WindowStyle Hidden -PassThru; \
              [System.IO.File]::WriteAllText('{escaped_pid_file}', [string]$grandchild.Id); \
