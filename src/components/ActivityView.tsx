@@ -1397,6 +1397,22 @@ export function ActivityView({
     }
   }
 
+  // Live update (SOU-142): tool calls never touch the registry, so the parent's refreshKey
+  // never bumps for them and the feed would sit frozen while an agent works. While Activity
+  // is open AND the window is visible, tick every few seconds so the call list + Live
+  // Inspector refetch the local logs in place (silent, no spinner). Visibility-guarded so a
+  // backgrounded app doesn't churn; mirrors how PendingApprovals polls.
+  const [liveTick, setLiveTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") setLiveTick((t) => t + 1);
+    }, 3000);
+    return () => clearInterval(id);
+  }, []);
+  // Combined so panels refetch on either a registry change or a live tick. Both counters
+  // only increase, so the sum always changes when either does (no collisions).
+  const liveKey = refreshKey + liveTick;
+
   useEffect(() => {
     let alive = true;
     getAuditLog(200)
@@ -1422,7 +1438,7 @@ export function ActivityView({
     return () => {
       alive = false;
     };
-  }, [refreshKey, reloadTick]);
+  }, [liveKey, reloadTick]);
 
   // Export the full retained audit log. The save dialog offers CSV and JSON; the
   // chosen extension picks the format. CSV is formula-injection-safe in the backend.
@@ -1495,9 +1511,9 @@ export function ActivityView({
           reference panels (discovery / identities / inspector) collapsed below it so they
           don't stack into a wall on first load. */}
       {savings && savings.tokensSaved > 0 ? <SavingsBanner savings={savings} /> : null}
-      <DiscoveryTraces refreshKey={refreshKey} />
-      <ToolIdentities refreshKey={refreshKey} />
-      {registry?.liveInspect ? <LiveInspector refreshKey={refreshKey} /> : null}
+      <DiscoveryTraces refreshKey={liveKey} />
+      <ToolIdentities refreshKey={liveKey} />
+      {registry?.liveInspect ? <LiveInspector refreshKey={liveKey} /> : null}
     </>
   );
 
