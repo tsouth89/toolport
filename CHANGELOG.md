@@ -6,6 +6,92 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+### Improved
+
+**Lazy discovery recovers from weak and zero-match searches.** The gateway now detects
+low-confidence lexical or hybrid rankings, preserves the ranked tools, and adds a bounded,
+server-diverse fallback menu from the caller's scoped catalog. Exact searches stay compact,
+and no-match responses explain how to enumerate every tool on a known server without adding
+another default meta-tool.
+
+## [1.8.0] - 2026-07-13
+
+The safer-control release: per-client discovery modes and broader API coverage, backed by
+stronger client isolation, config integrity, and gateway resource bounds.
+
+### Added
+
+**Choose discovery mode per client.** Each connected AI client can now use `full`, `lazy`,
+or `grouped` discovery without forcing the same mode on every other client. The choice is
+stored with the client and takes effect on its next gateway start. (#309)
+
+**Full-API catalog options for Stripe, Vercel, Cloudflare, and Clerk.** Curated overlays make
+the vendors' broader official MCP surfaces available while preserving Toolport's setup and
+credential guidance. (#308)
+
+**Clear local activity data from Settings.** Audit, savings, inspection, and search-trace
+history can now be removed together, with the security documentation updated to describe
+the HTTP gateway and local retention accurately. (#310)
+
+### Security
+
+**Scoped clients no longer see metadata for renamed tools outside their profile.** Tool
+ownership is resolved through the router instead of inferred from the exposed tool name,
+closing a cross-client catalog leak. (#305)
+
+**Spawned MCP servers no longer inherit Toolport control secrets.** Gateway-only environment
+variables, including the file-vault key and HTTP bearer token, are stripped before every
+downstream launch. (#298)
+
+**The spawn screener closes more launcher and interpreter bypasses.** Clustered eval flags,
+remote deno/bun sources, versioned interpreter names, `data:` URLs, and additional wrapper
+commands are screened before execution. (#299)
+
+**Gateway flood and oversized-input paths are bounded.** HTTP requests above the in-flight
+cap receive an immediate retryable response, search queries are capped before ranking, and
+stdio request frames are limited to 16 MiB without losing the next valid frame.
+(#316, #317, #318)
+
+**Release and container workflows are harder to tamper with.** Third-party actions are pinned
+to immutable commits, Docker permissions are narrowed, and credentials are not persisted in
+the checkout used for signed builds. (#304)
+
+### Fixed
+
+**Config writes stop losing valid state.** Cross-process registry mutations are serialized,
+team re-sync preserves enablement across profiles, and an unparseable client config is never
+silently replaced. (#303, #307)
+
+**Client setup removes stale duplicate Toolport gateways.** Install, repair, and uninstall now
+recognize legacy names and gateway commands across JSON, TOML, and YAML clients, leaving one
+canonical entry while preserving unrelated servers. (#315)
+
+**Updates reliably move clients to the new gateway binary.** Versioned and older manual
+gateway processes are stopped during update so clients respawn the current build. (#289)
+
+**Desktop failures recover instead of leaving a blank window.** A top-level error boundary
+adds a reload path, and Cancel, Playground, and bulk-import flows no longer keep stale state
+or perform the wrong follow-up action. (#306)
+
+**Teams onboarding handles approval links and empty new-team configs.** Approval-gated join
+links resume after sign-in, and a first config pull returning 404 is treated as an empty team
+rather than a failed join. (#285, #291)
+
+**Activity notices and tool-count copy match the current product.** Tool-less security events
+receive useful labels, and discovery messaging reflects the current 4-7 meta-tool surface.
+(#302, #314)
+
+### Quality
+
+Component-level regression coverage now protects the error boundary, bulk-import review,
+server dialogs, and external-link guard alongside the existing Rust gateway suite.
+(#300, #312)
+
+### Thanks
+
+Thanks to @sapunyangkut for improving tool-less Activity security notices (#302), and to
+@tapheret2 for the external-link guard regression coverage carried into this release (#300).
+
 ## [1.7.2] - 2026-07-11
 
 The Teams stability release: two separate freezes when joining a team, plus import,

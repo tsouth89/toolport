@@ -15,5 +15,5 @@ Dialogue: 0,0:00:00.30,0:00:04.80,Cap,,0,0,0,,{\c&H99D334&}One local gateway{\c&
 Dialogue: 0,0:00:05.20,0:00:10.40,Cap,,0,0,0,,Add a server from the {\c&H99D334&}catalog{\c&HFFFFFF&}
 Dialogue: 0,0:00:10.80,0:00:15.80,Cap,,0,0,0,,Set up {\c&H99D334&}once{\c&HFFFFFF&}. Keys stay in your OS keychain.
 Dialogue: 0,0:00:16.30,0:00:22.80,Cap,,0,0,0,,Connect it to {\c&H99D334&}every AI tool{\c&HFFFFFF&}
-Dialogue: 0,0:00:23.30,0:00:28.80,Cap,,0,0,0,,Your agent loads {\c&H99D334&}3 tools{\c&HFFFFFF&}, not hundreds
+Dialogue: 0,0:00:23.30,0:00:28.80,Cap,,0,0,0,,Your agent loads {\c&H99D334&}a handful{\c&HFFFFFF&}, not hundreds
 Dialogue: 0,0:00:29.20,0:00:35.90,Cap,,0,0,0,,Then it {\c&H99D334&}just works{\c&HFFFFFF&}, in every client

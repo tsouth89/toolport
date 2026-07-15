@@ -83,6 +83,7 @@ const SettingsView = lazy(() =>
 );
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/Callout";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -683,83 +684,88 @@ function App() {
 
           <ScrollArea className="min-h-0 flex-1">
             <div className="p-6">
-              <Suspense
-                fallback={
-                  <div className="flex flex-col gap-2">
-                    {Array.from({ length: 6 }).map((_, i) => (
-                      <Skeleton key={i} className="h-11 w-full rounded-lg" />
-                    ))}
-                  </div>
-                }
+              <ErrorBoundary
+                resetKey={`${view}:${selectedClient?.id ?? ""}`}
+                fallback={(err, retry) => <ViewCrash error={err} onRetry={retry} />}
               >
-                {view === "activity" ? (
-                  <ActivityView refreshKey={activityKey} registry={registry} />
-                ) : view === "catalog" ? (
-                  <CatalogView registry={registry} onAdded={setRegistry} />
-                ) : view === "playground" ? (
-                  <PlaygroundView registry={registry} onRegistryChange={setRegistry} />
-                ) : view === "teams" ? (
-                  <TeamsView registry={registry} onRegistryChange={setRegistry} />
-                ) : view === "settings" ? (
-                  <SettingsView registry={registry} onRegistryChange={setRegistry} />
-                ) : selectedClient ? (
-                  <ClientDetail
-                    client={selectedClient}
-                    registry={registry}
-                    onChanged={load}
-                    onRegistryChange={setRegistry}
-                  />
-                ) : loading && registry === null ? (
-                  <div className="flex flex-col gap-2">
-                    {Array.from({ length: 6 }).map((_, i) => (
-                      <Skeleton key={i} className="h-11 w-full rounded-lg" />
-                    ))}
-                  </div>
-                ) : error ? (
-                  <ErrorState message={error} />
-                ) : servers.length === 0 ? (
-                  <EmptyState
-                    importable={importable}
-                    onImport={handleImport}
-                    onBrowseCatalog={() => selectView("catalog")}
-                  />
-                ) : visible.length === 0 ? (
-                  <div className="py-16 text-center text-sm text-muted-foreground">
-                    No servers match "{query}".
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-5">
-                    <StatusBar
-                      total={servers.length}
-                      connected={connectedCount}
-                      attention={attentionCount}
-                      disabled={servers.length - enabledCount}
+                <Suspense
+                  fallback={
+                    <div className="flex flex-col gap-2">
+                      {Array.from({ length: 6 }).map((_, i) => (
+                        <Skeleton key={i} className="h-11 w-full rounded-lg" />
+                      ))}
+                    </div>
+                  }
+                >
+                  {view === "activity" ? (
+                    <ActivityView refreshKey={activityKey} registry={registry} />
+                  ) : view === "catalog" ? (
+                    <CatalogView registry={registry} onAdded={setRegistry} />
+                  ) : view === "playground" ? (
+                    <PlaygroundView registry={registry} onRegistryChange={setRegistry} />
+                  ) : view === "teams" ? (
+                    <TeamsView registry={registry} onRegistryChange={setRegistry} />
+                  ) : view === "settings" ? (
+                    <SettingsView registry={registry} onRegistryChange={setRegistry} />
+                  ) : selectedClient ? (
+                    <ClientDetail
+                      client={selectedClient}
+                      registry={registry}
+                      onChanged={load}
+                      onRegistryChange={setRegistry}
                     />
-                    <ServerGroup
-                      title="Needs attention"
-                      dot="bg-warning"
-                      count={grouped.attention.length}
-                    >
-                      {grouped.attention.map(serverRow)}
-                    </ServerGroup>
-                    <ServerGroup
-                      title="Active"
-                      dot="bg-success"
-                      count={grouped.active.length}
-                    >
-                      {grouped.active.map(serverRow)}
-                    </ServerGroup>
-                    <ServerGroup
-                      title="Disabled"
-                      dot="bg-muted-foreground/40"
-                      count={grouped.disabled.length}
-                      defaultCollapsed
-                    >
-                      {grouped.disabled.map(serverRow)}
-                    </ServerGroup>
-                  </div>
-                )}
-              </Suspense>
+                  ) : loading && registry === null ? (
+                    <div className="flex flex-col gap-2">
+                      {Array.from({ length: 6 }).map((_, i) => (
+                        <Skeleton key={i} className="h-11 w-full rounded-lg" />
+                      ))}
+                    </div>
+                  ) : error ? (
+                    <ErrorState message={error} />
+                  ) : servers.length === 0 ? (
+                    <EmptyState
+                      importable={importable}
+                      onImport={handleImport}
+                      onBrowseCatalog={() => selectView("catalog")}
+                    />
+                  ) : visible.length === 0 ? (
+                    <div className="py-16 text-center text-sm text-muted-foreground">
+                      No servers match "{query}".
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-5">
+                      <StatusBar
+                        total={servers.length}
+                        connected={connectedCount}
+                        attention={attentionCount}
+                        disabled={servers.length - enabledCount}
+                      />
+                      <ServerGroup
+                        title="Needs attention"
+                        dot="bg-warning"
+                        count={grouped.attention.length}
+                      >
+                        {grouped.attention.map(serverRow)}
+                      </ServerGroup>
+                      <ServerGroup
+                        title="Active"
+                        dot="bg-success"
+                        count={grouped.active.length}
+                      >
+                        {grouped.active.map(serverRow)}
+                      </ServerGroup>
+                      <ServerGroup
+                        title="Disabled"
+                        dot="bg-muted-foreground/40"
+                        count={grouped.disabled.length}
+                        defaultCollapsed
+                      >
+                        {grouped.disabled.map(serverRow)}
+                      </ServerGroup>
+                    </div>
+                  )}
+                </Suspense>
+              </ErrorBoundary>
             </div>
           </ScrollArea>
         </main>
@@ -941,6 +947,28 @@ function EmptyState({
           Browse catalog
         </Button>
       )}
+    </div>
+  );
+}
+
+function ViewCrash({ error, onRetry }: { error: Error; onRetry: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 py-24 text-center">
+      <TriangleAlert className="size-10 text-warning" />
+      <div>
+        <p className="font-medium">Something went wrong in this view</p>
+        <p className="max-w-md text-sm text-muted-foreground">
+          The rest of Toolport is still running. Try again, or reload the window if it
+          keeps happening.
+        </p>
+        <p className="mt-2 font-mono text-xs text-muted-foreground/70">{error.message}</p>
+      </div>
+      <div className="flex gap-2">
+        <Button variant="outline" onClick={onRetry}>
+          Try again
+        </Button>
+        <Button onClick={() => window.location.reload()}>Reload</Button>
+      </div>
     </div>
   );
 }

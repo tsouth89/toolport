@@ -20,6 +20,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -52,6 +53,88 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+const MAX_SEARCH_QUERY_CHARS: usize = 512;
+const MAX_SEARCH_QUERY_TOKENS: usize = 64;
+const MAX_STDIO_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoundedLine {
+    Eof,
+    Line(String),
+    TooLong,
+}
+
+/// Read one newline-delimited stdio frame without allowing an upstream client to
+/// grow an unbounded String. An oversized frame is fully drained so the caller can
+/// safely continue with the next request instead of parsing a trailing fragment.
+fn read_bounded_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> std::io::Result<BoundedLine> {
+    let mut bytes = Vec::new();
+    let read = reader
+        .by_ref()
+        .take(max_bytes as u64 + 2)
+        .read_until(b'\n', &mut bytes)?;
+    if read == 0 {
+        return Ok(BoundedLine::Eof);
+    }
+
+    let terminated = bytes.last() == Some(&b'\n');
+    let mut content_len = bytes.len() - usize::from(terminated);
+    if terminated && content_len > 0 && bytes[content_len - 1] == b'\r' {
+        content_len -= 1;
+    }
+
+    if content_len > max_bytes {
+        if !terminated {
+            loop {
+                let buffered = reader.fill_buf()?;
+                if buffered.is_empty() {
+                    break;
+                }
+                if let Some(newline) = buffered.iter().position(|b| *b == b'\n') {
+                    reader.consume(newline + 1);
+                    break;
+                }
+                let len = buffered.len();
+                reader.consume(len);
+            }
+        }
+        return Ok(BoundedLine::TooLong);
+    }
+
+    bytes.truncate(content_len);
+    String::from_utf8(bytes)
+        .map(BoundedLine::Line)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+}
+
+/// Validate the model-authored search query in one short-circuiting pass before
+/// it reaches lexical ranking or the optional embedding endpoint. The ranker
+/// splits on whitespace too, so this token bound matches the work it performs.
+fn validate_search_query(query: &str) -> Result<(), &'static str> {
+    let mut chars = 0;
+    let mut tokens = 0;
+    let mut in_token = false;
+
+    for ch in query.chars() {
+        chars += 1;
+        if chars > MAX_SEARCH_QUERY_CHARS {
+            return Err("Toolport: search query exceeds the 512-character limit.");
+        }
+
+        if ch.is_whitespace() {
+            in_token = false;
+        } else if !in_token {
+            tokens += 1;
+            if tokens > MAX_SEARCH_QUERY_TOKENS {
+                return Err("Toolport: search query exceeds the 64-token limit.");
+            }
+            in_token = true;
+        }
+    }
+
+    Ok(())
+}
+
 fn status_tool_def() -> Value {
     json!({
         "name": "toolport_status",
@@ -60,10 +143,11 @@ fn status_tool_def() -> Value {
     })
 }
 
-/// The two meta-tools that power lazy discovery: search then call. In lazy mode
-/// these (plus toolport_status) are the ONLY tools advertised, so the client's
-/// context holds a handful of tool defs instead of hundreds - the model discovers
-/// the real tool on demand and dispatches through `toolport_call_tool`.
+/// The core meta-tools that power lazy discovery. In lazy mode the gateway advertises
+/// status, search, call, and fetch-result, plus only the optional controls the user has
+/// enabled. The client's context holds a handful of tool defs instead of hundreds -
+/// the model discovers the real tool on demand and dispatches through
+/// `toolport_call_tool`.
 ///
 /// The description leads with a directive plus GENERIC capability examples (email,
 /// payments, deployments, ...) so the model treats Toolport as the front door for any
@@ -88,13 +172,15 @@ fn search_tool_def() -> Value {
             that server's tools. If the result says more tools matched than were shown, narrow with \
             `server` or raise `limit` before concluding a capability is missing - many servers expose \
             a generic API bridge (a single write/create tool), so search by capability, not just an \
-            exact operation name. toolport_status lists every server prefix and its tool count. Large \
+            exact operation name. toolport_status lists every server prefix and its tool count. \
+            Low-confidence searches automatically include a bounded set of fallback candidates; if \
+            nothing matches directly, the response explains how to enumerate a known server. Large \
             input schemas may be omitted from broad results (flagged schemaOmitted) to keep responses \
             small - search a tool's exact name to get its full schema.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Keywords describing the capability you need (e.g. \"list emails\", \"create payment\", \"recent deployments\"). Empty lists tools (use with `server`)." },
+                "query": { "type": "string", "maxLength": MAX_SEARCH_QUERY_CHARS, "description": "Keywords describing the capability you need (e.g. \"list emails\", \"create payment\", \"recent deployments\"). Empty lists tools (use with `server`). Maximum 512 characters / 64 whitespace-separated tokens." },
                 "server": { "type": "string", "description": "Optional: limit to this server, by name/prefix (e.g. \"resend\")." },
                 "limit": { "type": "integer", "description": "Max results (default 25, up to 200).", "default": 25 }
             },
@@ -219,8 +305,9 @@ fn disable_server_tool_def() -> Value {
 // there is no new execution surface. Enabled per-client via the env var; grouped
 // implies not-lazy (the lazy resolver only returns true for `=lazy`).
 
-/// The three tool-discovery modes. Resolved once at gateway start (env or registry)
-/// and cached in `DISCOVERY_MODE`.
+/// The three tool-discovery modes. Resolved from env + the registry (including a
+/// per-client override) and cached in `DISCOVERY_MODE`, which the registry watcher
+/// refreshes on every change so a mode edit applies live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiscoveryMode {
     Lazy,
@@ -228,28 +315,88 @@ enum DiscoveryMode {
     Full,
 }
 
-static DISCOVERY_MODE: std::sync::OnceLock<DiscoveryMode> = std::sync::OnceLock::new();
+impl DiscoveryMode {
+    fn as_u8(self) -> u8 {
+        match self {
+            DiscoveryMode::Lazy => 0,
+            DiscoveryMode::Grouped => 1,
+            DiscoveryMode::Full => 2,
+        }
+    }
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => DiscoveryMode::Grouped,
+            2 => DiscoveryMode::Full,
+            _ => DiscoveryMode::Lazy,
+        }
+    }
+    /// The name used in the registry, env, and status output.
+    fn as_str(self) -> &'static str {
+        match self {
+            DiscoveryMode::Lazy => "lazy",
+            DiscoveryMode::Grouped => "grouped",
+            DiscoveryMode::Full => "full",
+        }
+    }
+}
 
-/// Resolve the discovery mode: an explicit `CONDUIT_DISCOVERY` env var wins (per
-/// client), otherwise the registry's `discovery_mode` override, otherwise its
-/// `lazy_discovery` bool. A SET-but-unrecognized env value maps to `Full`, matching
-/// the pre-3-way behavior (env was `== "lazy"` ? lazy : not-lazy) so nothing regresses.
-fn resolve_discovery_mode() -> DiscoveryMode {
+/// The live discovery mode. Mutable (not a `OnceLock`) so the watcher can refresh it when
+/// the registry's per-client override changes; `discovery_mode()` reads it lock-free.
+static DISCOVERY_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn set_discovery_mode(mode: DiscoveryMode) {
+    DISCOVERY_MODE.store(mode.as_u8(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Parse a registry / per-client override mode string; `None` for empty, `inherit`, or an
+/// unrecognized value (so it falls through to the next precedence level).
+fn parse_mode(s: &str) -> Option<DiscoveryMode> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "grouped" => Some(DiscoveryMode::Grouped),
+        "full" => Some(DiscoveryMode::Full),
+        "lazy" => Some(DiscoveryMode::Lazy),
+        _ => None,
+    }
+}
+
+/// Resolve this client's discovery mode from a loaded registry + env. See
+/// [`resolve_mode_from`] for the precedence.
+fn discovery_mode_for(reg: &Registry, client_id: Option<&str>) -> DiscoveryMode {
     let env = std::env::var("CONDUIT_DISCOVERY").ok();
-    let reg = registry::load_resolved().ok();
+    let client_mode = client_id.and_then(|id| reg.client_discovery_mode(id));
     resolve_mode_from(
         env.as_deref(),
-        reg.as_ref().and_then(|r| r.discovery_mode.as_deref()),
-        reg.as_ref().map(|r| r.lazy_discovery).unwrap_or(true),
+        client_mode,
+        reg.discovery_mode.as_deref(),
+        reg.lazy_discovery,
     )
 }
 
-/// Pure precedence: env override, then the registry's `discovery_mode`, then its
-/// `lazy_discovery` bool. A SET env value that isn't lazy/grouped resolves to Full
-/// (exactly the old `env == "lazy" ? lazy : not-lazy`); an unrecognized registry
-/// override is ignored (falls through to the bool).
+/// Resolve from disk for the gateway bootstrap (before the watcher takes over the live
+/// updates), keyed by this client's `CONDUIT_CLIENT_ID`.
+fn resolve_discovery_mode() -> DiscoveryMode {
+    let client_id = std::env::var("CONDUIT_CLIENT_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    match registry::load_resolved().ok() {
+        Some(reg) => discovery_mode_for(&reg, client_id.as_deref()),
+        None => resolve_mode_from(
+            std::env::var("CONDUIT_DISCOVERY").ok().as_deref(),
+            None,
+            None,
+            true,
+        ),
+    }
+}
+
+/// Pure precedence: an explicit `CONDUIT_DISCOVERY` env var (hand-set in a client's config)
+/// wins, then the per-client override (`registry.client_discovery[client_id]`), then the
+/// registry's global `discovery_mode`, then its `lazy_discovery` bool. A SET env value that
+/// isn't lazy/grouped resolves to Full (exactly the old `env == "lazy" ? lazy : not-lazy`);
+/// an unrecognized per-client/global override is ignored (falls through).
 fn resolve_mode_from(
     env: Option<&str>,
+    client_mode: Option<&str>,
     registry_mode: Option<&str>,
     lazy_discovery: bool,
 ) -> DiscoveryMode {
@@ -260,13 +407,11 @@ fn resolve_mode_from(
             _ => DiscoveryMode::Full,
         };
     }
-    if let Some(m) = registry_mode {
-        match m.trim().to_ascii_lowercase().as_str() {
-            "grouped" => return DiscoveryMode::Grouped,
-            "full" => return DiscoveryMode::Full,
-            "lazy" => return DiscoveryMode::Lazy,
-            _ => {}
-        }
+    if let Some(m) = client_mode.and_then(parse_mode) {
+        return m;
+    }
+    if let Some(m) = registry_mode.and_then(parse_mode) {
+        return m;
     }
     if lazy_discovery {
         DiscoveryMode::Lazy
@@ -278,7 +423,7 @@ fn resolve_mode_from(
 /// The resolved mode. Defaults to `Lazy` before `main` sets it (only unit tests, which
 /// don't run `main` and test the grouped helpers directly, ever observe that default).
 fn discovery_mode() -> DiscoveryMode {
-    DISCOVERY_MODE.get().copied().unwrap_or(DiscoveryMode::Lazy)
+    DiscoveryMode::from_u8(DISCOVERY_MODE.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// True when this gateway runs in grouped discovery mode (see [`grouped_tool_defs`]).
@@ -458,8 +603,11 @@ fn set_server_enabled_via_agent(
         .or_else(|| reg.active_profile_id.clone())
         .ok_or_else(|| "Toolport: no active profile to change.".to_string())?;
 
-    // Load fresh so a concurrent edit in the app isn't clobbered, and re-check the
-    // opt-in on that fresh copy (the user may have just turned it off).
+    // Hold the cross-process registry lock across the whole load-modify-save so a concurrent
+    // app or team-sync write can't land between our read and our save and be reverted
+    // (SOU-23). Held until this function returns. Also re-check the opt-in on the fresh copy
+    // (the user may have just turned it off).
+    let _lock = registry::lock_at(path).map_err(|e| format!("Toolport: {e}"))?;
     let mut fresh = registry::load_from(path)
         .map_err(|e| format!("Toolport: could not read the registry ({e})."))?;
     if !fresh.allow_agent_control {
@@ -585,6 +733,27 @@ const DESC_W: f64 = 1.0;
 /// over a longer sibling that merely contains the same words. Small: it only tips
 /// near-ties toward the more specific tool, never overrides a stronger keyword signal.
 const NAME_SPECIFICITY_W: f64 = 0.35;
+/// Below these normalized scores the ranker has too little evidence to hide the
+/// rest of the scoped catalog. Hybrid scores are already normalized to 0..=1;
+/// lexical scores are normalized against an ideal all-name-hit score below.
+const LOW_CONFIDENCE_LEXICAL_RATIO: f64 = 0.55;
+const LOW_CONFIDENCE_HYBRID_SCORE: f64 = 0.45;
+/// A weak search should give the calling model enough descriptions to recover,
+/// while staying far below the normal 25-result/default context budget.
+const LOW_CONFIDENCE_MIN_RESULTS: usize = 12;
+
+struct SearchOutcome {
+    matches: Vec<Value>,
+    /// Number of candidates with a positive lexical or hybrid score.
+    total: usize,
+    /// The active ranker did not have enough evidence to treat its top result as
+    /// authoritative. The handler uses this to avoid the "call it now" directive.
+    low_confidence: bool,
+    /// Number of zero-score catalog candidates appended as a recovery menu.
+    broadened: usize,
+    /// Direct ranked results returned before recovery candidates were appended.
+    direct_returned: usize,
+}
 
 /// Split a camelCase/PascalCase word into lowercased pieces ("listProjects" -> [list, projects]).
 fn split_camel(word: &str) -> Vec<String> {
@@ -801,7 +970,8 @@ fn search_catalog(
     server: Option<&str>,
     limit: usize,
 ) -> (Vec<Value>, usize) {
-    search_catalog_with(cached, query, server, limit, None)
+    let outcome = search_catalog_with(cached, query, server, limit, None);
+    (outcome.matches, outcome.total)
 }
 
 /// As `search_catalog`, with optional semantic re-ranking. When `sem` is None or
@@ -813,7 +983,7 @@ fn search_catalog_with(
     server: Option<&str>,
     limit: usize,
     sem: Option<&semantic::SemanticConfig>,
-) -> (Vec<Value>, usize) {
+) -> SearchOutcome {
     use std::collections::HashMap;
     let q = query.to_lowercase();
     let terms: Vec<&str> = q.split_whitespace().filter(|t| !t.is_empty()).collect();
@@ -831,10 +1001,12 @@ fn search_catalog_with(
         .collect();
 
     // Select an ordered set of tool refs (ranking happens here; projection below).
-    let (selected, total): (Vec<&Value>, usize) = if terms.is_empty() {
+    let (selected, total, low_confidence, broadened, direct_returned) = if terms.is_empty() {
         // Empty query: list the pool. With `server` set this enumerates that server.
         let total = pool.len();
-        (pool.into_iter().take(limit).collect(), total)
+        let selected: Vec<&Value> = pool.iter().take(limit).copied().collect();
+        let direct_returned = selected.len();
+        (selected, total, false, 0, direct_returned)
     } else {
         // Tokenize each tool and compute document frequencies, so IDF can weight a
         // rare token (e.g. "products", "teams") far above a common one (e.g. "list",
@@ -901,9 +1073,9 @@ fn search_catalog_with(
                     let explained = name_set
                         .iter()
                         .filter(|nt| {
-                            q_tokens.iter().any(|qt| {
-                                qt == *nt || synonym_group(qt).contains(&nt.as_str())
-                            })
+                            q_tokens
+                                .iter()
+                                .any(|qt| qt == *nt || synonym_group(qt).contains(&nt.as_str()))
                         })
                         .count();
                     let coverage = explained as f64 / name_set.len() as f64;
@@ -915,7 +1087,9 @@ fn search_catalog_with(
 
         // Blended (semantic) ranking when configured and embeddings succeed; else
         // pure lexical (positive scores only, highest first), identical to before.
-        let ranked: Vec<(f64, &Value)> = semantic_rerank(sem, query, &lex).unwrap_or_else(|| {
+        let semantic_ranked = semantic_rerank(sem, query, &lex);
+        let used_semantic = semantic_ranked.is_some();
+        let ranked: Vec<(f64, &Value)> = semantic_ranked.unwrap_or_else(|| {
             let mut s: Vec<(f64, &Value)> =
                 lex.iter().filter(|(sc, _)| *sc > 0.0).cloned().collect();
             s.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -923,15 +1097,43 @@ fn search_catalog_with(
         });
         let total = ranked.len();
 
+        let low_confidence = match ranked.first() {
+            None => true,
+            Some((top_score, _)) if used_semantic => *top_score < LOW_CONFIDENCE_HYBRID_SCORE,
+            Some((top_score, _)) => {
+                // Normalize the raw lexical score against an ideal result where
+                // every meaningful query token hits a tool name. Missing query
+                // terms still contribute to the denominator, which is exactly the
+                // weak-evidence case that should broaden.
+                let ideal_idf: f64 = q_tokens
+                    .iter()
+                    .map(|qt| {
+                        let matched_idf = std::iter::once(qt.as_str())
+                            .chain(synonym_group(qt).iter().copied())
+                            .filter(|candidate| df.contains_key(candidate))
+                            .map(idf)
+                            .fold(0.0_f64, f64::max);
+                        if matched_idf > 0.0 {
+                            matched_idf
+                        } else {
+                            idf(qt)
+                        }
+                    })
+                    .sum();
+                let ideal = NAME_W * ideal_idf * (1.0 + NAME_SPECIFICITY_W);
+                ideal <= f64::EPSILON || *top_score / ideal < LOW_CONFIDENCE_LEXICAL_RATIO
+            }
+        };
+
         // Scoped to a server: take the top `limit`. Unscoped: cap per server so one
         // server with many matching tools can't crowd the others out of the window.
-        let selected: Vec<&Value> = if server_filter.is_some() {
-            ranked.into_iter().take(limit).map(|(_, t)| t).collect()
+        let mut selected: Vec<&Value> = if server_filter.is_some() {
+            ranked.iter().take(limit).map(|(_, t)| *t).collect()
         } else {
             let cap = (limit / 3).max(4);
             let mut per: HashMap<String, usize> = HashMap::new();
             let mut out = Vec::new();
-            for (_, t) in ranked {
+            for (_, t) in &ranked {
                 if out.len() >= limit {
                     break;
                 }
@@ -940,14 +1142,61 @@ fn search_catalog_with(
                     continue;
                 }
                 *c += 1;
-                out.push(t);
+                out.push(*t);
             }
             out
         };
-        (selected, total)
+        let direct_returned = selected.len();
+
+        // A weak score should not make every zero-score candidate invisible. Add
+        // a small recovery menu from the caller's already-scoped pool, preserving
+        // ranked order and the same cross-server diversity cap used above.
+        let target = limit.min(LOW_CONFIDENCE_MIN_RESULTS).min(pool.len());
+        if low_confidence && selected.len() < target {
+            let mut seen: std::collections::HashSet<String> = selected
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+                .collect();
+            let visible_servers = pool
+                .iter()
+                .map(|tool| tool_prefix(tool))
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                .max(1);
+            let cap = target.div_ceil(visible_servers).max(4);
+            let mut per: HashMap<String, usize> = HashMap::new();
+            for tool in &selected {
+                *per.entry(tool_prefix(tool)).or_insert(0) += 1;
+            }
+            for tool in &pool {
+                if selected.len() >= target {
+                    break;
+                }
+                let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+                if !seen.insert(name.to_string()) {
+                    continue;
+                }
+                if server_filter.is_none() {
+                    let count = per.entry(tool_prefix(tool)).or_insert(0);
+                    if *count >= cap {
+                        continue;
+                    }
+                    *count += 1;
+                }
+                selected.push(*tool);
+            }
+        }
+        let broadened = selected.len().saturating_sub(direct_returned);
+        (selected, total, low_confidence, broadened, direct_returned)
     };
 
-    (project_budgeted(&selected), total)
+    SearchOutcome {
+        matches: project_budgeted(&selected),
+        total,
+        low_confidence,
+        broadened,
+        direct_returned,
+    }
 }
 
 /// Blend embedding similarity into the lexical scores. Returns None when semantic
@@ -1173,6 +1422,10 @@ fn enabled_summary(
             }
         }
     }
+    // The discovery mode this client is actually resolved to (env > per-client override >
+    // global), so `toolport_status` answers "why am I seeing meta-tools vs the full
+    // catalog?" and confirms a per-client override took effect.
+    out.push_str(&format!("\nDiscovery mode: {}\n", discovery_mode().as_str()));
     out.push_str(&savings_line());
     out
 }
@@ -1275,6 +1528,9 @@ struct PendingCall {
     name: String,
     /// The exact arguments from the preview call (serialized for replay).
     arguments: Value,
+    /// The registered HTTP client that created this confirmation. `None` covers
+    /// stdio and the legacy unscoped HTTP bearer, which each have one shared caller.
+    owner: Option<String>,
     /// When this entry was created (for expiry).
     created: Instant,
 }
@@ -1305,8 +1561,8 @@ impl ConfirmGuard {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Store a pending call and return its confirmation token.
-    fn store(&self, name: String, arguments: Value) -> String {
+    /// Store a pending call for one client and return its confirmation token.
+    fn store(&self, name: String, arguments: Value, owner: Option<&str>) -> String {
         let mut pending = self.pending();
         // Evict expired entries to prevent unbounded growth.
         let cutoff = Instant::now() - CONFIRM_TTL;
@@ -1317,19 +1573,28 @@ impl ConfirmGuard {
             PendingCall {
                 name,
                 arguments,
+                owner: owner.map(str::to_string),
                 created: Instant::now(),
             },
         );
         token
     }
 
-    /// Consume a confirmation token, returning the stored call if valid.
-    /// Returns None if the token doesn't exist or has expired.
-    fn take(&self, token: &str) -> Option<(String, Value)> {
-        let entry = self.pending().remove(token)?;
+    /// Consume a confirmation token only for the client that created it. A
+    /// wrong-client attempt does not consume the entry, so it cannot deny the
+    /// rightful owner. Returns None when the token is missing, expired, or owned
+    /// by a different client; callers intentionally expose the same error for all.
+    fn take(&self, token: &str, owner: Option<&str>) -> Option<(String, Value)> {
+        let mut pending = self.pending();
+        let entry = pending.get(token)?;
         if entry.created.elapsed() > CONFIRM_TTL {
-            return None; // expired
+            pending.remove(token);
+            return None;
         }
+        if entry.owner.as_deref() != owner {
+            return None;
+        }
+        let entry = pending.remove(token)?;
         Some((entry.name, entry.arguments))
     }
 }
@@ -1527,11 +1792,22 @@ fn tool_fingerprint_for(name: &str, cached: &[Value], router: &Router) -> Option
     lookup(&router.aggregated_tools()).or_else(|| lookup(cached))
 }
 
-/// Keep only tools whose server prefix is in `allowed`. `None` = no scoping
-/// (every tool passes). A meta-tool (no `server__` namespace, e.g.
-/// `toolport_search_tools`) is always kept, since it isn't owned by any
-/// downstream server. Scopes a registered HTTP client's view to its servers.
-fn scope_tools(tools: &[Value], allowed: Option<&std::collections::HashSet<String>>) -> Vec<Value> {
+/// Keep only tools a scoped client may see. `None` = no scoping (every tool passes).
+/// A meta-tool (no owning downstream server, e.g. `toolport_search_tools`) is always
+/// kept. A downstream tool is kept only if its REAL server is in `allowed`.
+///
+/// `route_of` resolves an exposed name to its owning server id via the router's route
+/// map. Using it (not just the `server__` prefix) is what stops a tool renamed via a
+/// `ToolOverride` to a non-namespaced name (e.g. `deploy`) from being mistaken for a
+/// meta-tool and leaked to every scoped client. When the router can't resolve the name (a
+/// cold cache before downstream servers are indexed), only KNOWN gateway meta-tools and
+/// in-scope `help_<server>` tools are kept; an unknown bare name is dropped (fail-closed)
+/// rather than assumed to be a meta-tool.
+fn scope_tools(
+    tools: &[Value],
+    allowed: Option<&std::collections::HashSet<String>>,
+    route_of: impl Fn(&str) -> Option<String>,
+) -> Vec<Value> {
     match allowed {
         None => tools.to_vec(),
         Some(set) => tools
@@ -1539,12 +1815,7 @@ fn scope_tools(tools: &[Value], allowed: Option<&std::collections::HashSet<Strin
             .filter(|t| {
                 t.get("name")
                     .and_then(|n| n.as_str())
-                    .map(|n| {
-                        let srv = server_of_tool(n);
-                        // A meta-tool has no namespace (server_of_tool returns the
-                        // whole name); always keep it. Otherwise gate on the server.
-                        srv == n || set.contains(srv)
-                    })
+                    .map(|n| tool_in_scope(n, set, &route_of))
                     .unwrap_or(false)
             })
             .cloned()
@@ -1552,47 +1823,171 @@ fn scope_tools(tools: &[Value], allowed: Option<&std::collections::HashSet<Strin
     }
 }
 
-/// Resolve an HTTP bearer to (authorized, scope). `Some(allowed)` = authorized,
-/// where `allowed` is the set of server prefixes the client may see (`None` =
-/// the full connected set). The outer `None` = unauthorized. Pure given the
-/// registry + tokens, so the auth/scope policy is unit-testable.
+/// Whether a client scoped to `allowed` may see the exposed tool `name`. See
+/// [`scope_tools`] for how `route_of` is resolved and why the `server__` prefix is only a
+/// fallback.
+fn tool_in_scope(
+    name: &str,
+    allowed: &std::collections::HashSet<String>,
+    route_of: &impl Fn(&str) -> Option<String>,
+) -> bool {
+    match route_of(name) {
+        // Authoritative: gate on the real server, sanitized to the same prefix form
+        // `allowed` stores. Catches override-renamed names and ids containing `__`.
+        Some(server_id) => allowed.contains(sanitize_segment(&server_id).as_str()),
+        // The router can't resolve the name (a cold/stale cache before downstream servers
+        // are indexed). Recognize gateway-generated tools by name rather than assuming any
+        // bare name is a meta-tool - that assumption would leak a downstream tool renamed
+        // (via an override) to a bare name during that window.
+        None => {
+            if is_fixed_meta_tool(name) {
+                // Gateway meta-tools are owned by no server; always visible.
+                true
+            } else if let Some(server) = grouped_help_target(name) {
+                // A grouped `help_<server>` browse tool: gate on its target server.
+                allowed.contains(server)
+            } else {
+                // A namespaced tool the router hasn't indexed yet: gate on its `server__`
+                // prefix (fail-closed). A bare name that is neither a known meta-tool nor a
+                // help tool is unattributable (most likely an override-renamed downstream
+                // tool) - drop it rather than leak it.
+                let prefix = server_of_tool(name);
+                prefix != name && allowed.contains(prefix)
+            }
+        }
+    }
+}
+
+/// The fixed gateway meta-tools, owned by no downstream server. Grouped `help_<server>`
+/// browse tools are NOT here - they're server-scoped and handled via `grouped_help_target`.
+fn is_fixed_meta_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "toolport_status"
+            | "toolport_search_tools"
+            | "toolport_call_tool"
+            | "toolport_confirm"
+            | "toolport_fetch_result"
+            | "toolport_enable_server"
+            | "toolport_disable_server"
+    )
+}
+
+/// Stable authorization context bound to an MCP Streamable-HTTP session. The
+/// identity distinguishes registered and legacy/open callers; the effective
+/// scope makes a live client re-scope invalidate its existing sessions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct McpSessionOwner {
+    identity: String,
+    /// `None` is the full connected set; `Some` is a sorted, deduplicated set of
+    /// sanitized server ids, matching [`resolve_http_scope`].
+    scope: Option<Vec<String>>,
+}
+
+/// Per-request HTTP attribution. The audit label stays human-readable while the
+/// session owner uses a stable id and effective scope for authorization checks.
+struct HttpCaller {
+    audit_label: Option<String>,
+    session_owner: McpSessionOwner,
+}
+
+/// Resolve authorization, routing scope, audit attribution, and MCP session
+/// ownership together so those security decisions cannot drift apart.
+fn resolve_http_caller(
+    reg: &Registry,
+    env_token: Option<&str>,
+    provided: Option<&str>,
+    allow_insecure_open: bool,
+) -> Option<(Option<std::collections::HashSet<String>>, HttpCaller)> {
+    let owner_scope = |allowed: &Option<std::collections::HashSet<String>>| {
+        allowed.as_ref().map(|set| {
+            let mut ids: Vec<String> = set.iter().cloned().collect();
+            ids.sort();
+            ids
+        })
+    };
+
+    // Legacy single token: sees the full connected set (back-compat).
+    if let (Some(expected), Some(actual)) = (env_token, provided) {
+        if ct_eq(expected.as_bytes(), actual.as_bytes()) {
+            let allowed = None;
+            return Some((
+                allowed,
+                HttpCaller {
+                    audit_label: None,
+                    session_owner: McpSessionOwner {
+                        identity: format!("legacy:{}", registry::sha256_hex(actual)),
+                        scope: None,
+                    },
+                },
+            ));
+        }
+    }
+
+    // A registered client is scoped to its profile (empty profile = full set).
+    if let Some(client) = provided.and_then(|token| reg.http_client_for_token(token)) {
+        let allowed = if client.profile.trim().is_empty() {
+            None
+        } else {
+            Some(
+                reg
+                .enabled_servers_for(&client.profile)
+                .iter()
+                .map(|server| sanitize_segment(&server.id))
+                .collect(),
+            )
+        };
+        let audit_label = Some(if client.label.trim().is_empty() {
+            client.id.clone()
+        } else {
+            client.label.clone()
+        });
+        return Some((
+            allowed.clone(),
+            HttpCaller {
+                audit_label,
+                session_owner: McpSessionOwner {
+                    identity: format!("client:{}", client.id),
+                    scope: owner_scope(&allowed),
+                },
+            },
+        ));
+    }
+
+    // No auth configured at all: reachable only when startup explicitly allowed
+    // `--insecure-loopback`; keep the request resolver usable for that escape hatch.
+    if allow_insecure_open && env_token.is_none() && reg.http_clients.is_empty() {
+        return Some((
+            None,
+            HttpCaller {
+                audit_label: None,
+                session_owner: McpSessionOwner {
+                    identity: "open".to_string(),
+                    scope: None,
+                },
+            },
+        ));
+    }
+
+    None
+}
+
+/// Test-facing projection of the combined resolver's authorization/scope result.
+#[cfg(test)]
 fn resolve_http_scope(
     reg: &Registry,
     env_token: Option<&str>,
     provided: Option<&str>,
+    allow_insecure_open: bool,
 ) -> Option<Option<std::collections::HashSet<String>>> {
-    use std::collections::HashSet;
-    // Legacy single token: sees the full connected set (back-compat).
-    if let (Some(t), Some(p)) = (env_token, provided) {
-        if ct_eq(p.as_bytes(), t.as_bytes()) {
-            return Some(None);
-        }
-    }
-    // A registered client is scoped to its profile (empty profile = full set).
-    if let Some(p) = provided {
-        if let Some(client) = reg.http_client_for_token(p) {
-            if client.profile.trim().is_empty() {
-                return Some(None);
-            }
-            let set: HashSet<String> = reg
-                .enabled_servers_for(&client.profile)
-                .iter()
-                .map(|s| sanitize_segment(&s.id))
-                .collect();
-            return Some(Some(set));
-        }
-    }
-    // No auth configured at all: open, preserving the loopback default.
-    if env_token.is_none() && reg.http_clients.is_empty() {
-        return Some(None);
-    }
-    None
+    resolve_http_caller(reg, env_token, provided, allow_insecure_open).map(|(allowed, _)| allowed)
 }
 
 /// The audit label for a registered HTTP client's bearer: its `label`, or its `id`
 /// when the label is blank. `None` when the token isn't a registered client (legacy
-/// single-token, open loopback, or the local stdio app), so those calls stay
+/// single-token, explicitly insecure loopback, or the local stdio app), so those calls stay
 /// unattributed in the audit log rather than mislabeled. Pure, so it's unit-testable.
+#[cfg(test)]
 fn http_client_label(reg: &Registry, provided: Option<&str>) -> Option<String> {
     let client = reg.http_client_for_token(provided?)?;
     Some(if client.label.trim().is_empty() {
@@ -1719,6 +2114,95 @@ fn request_human_decision(mut req: approval::ApprovalRequest) -> approval::Appro
             }
         },
     }
+}
+
+/// The stable machine token for a HITL decision, shared by the audit record and the
+/// agent-facing envelope so both name the outcome the same way. `Approved` is included for
+/// the audit path (approved calls are logged too); the refusal envelope never sees it.
+fn decision_token(decision: approval::ApprovalDecision) -> &'static str {
+    match decision {
+        approval::ApprovalDecision::Approved => "approved",
+        approval::ApprovalDecision::Denied => "denied",
+        approval::ApprovalDecision::Unreachable => "unreachable",
+        approval::ApprovalDecision::StaleState => "stale_state",
+        // A human was asked but didn't answer in the fail-closed window.
+        approval::ApprovalDecision::Timeout => "no_response",
+    }
+}
+
+/// Content-binding gate: after a human approves a *specific* call, the bytes that RUN must
+/// equal the bytes APPROVED. Returns `StaleState` when the canonical `argsHash` of `current`
+/// differs from `approved_hash` (the call was mutated after approval), else `None` so the
+/// call may proceed. In today's synchronous path the approved and executed arguments are the
+/// same value, so this is a defense-in-depth invariant; it is also the enforcement seam a
+/// decoupled approval (session re-use, or a code-mode script that approves then replays with
+/// different arguments) must clear before its effect runs. Fail-closed: any mismatch blocks.
+fn content_binding_decision(
+    approved_hash: &str,
+    current: &Value,
+) -> Option<approval::ApprovalDecision> {
+    if audit::args_hash(current) == approved_hash {
+        None
+    } else {
+        Some(approval::ApprovalDecision::StaleState)
+    }
+}
+
+/// Build the agent-facing envelope for a call the gateway refused to run. Carries a
+/// machine-readable `toolportDecision` + gate `reason` (+ a `retriable` hint) in
+/// `structuredContent` so an agent - or a code-mode script inspecting the result - can pick
+/// the right recovery (retry after approval, re-form the call, or abandon) instead of
+/// blind-retrying a flat error string. Every non-approval is fail-closed (`isError: true`).
+fn refused_call_result(
+    id: Value,
+    name: &str,
+    decision: approval::ApprovalDecision,
+    reason_str: &str,
+) -> Value {
+    let token = decision_token(decision);
+    let (retriable, why) = match decision {
+        approval::ApprovalDecision::Denied => {
+            (false, format!("the call to {name} was denied by a human reviewer"))
+        }
+        approval::ApprovalDecision::Unreachable => (
+            true,
+            format!(
+                "the call to {name} could not be approved because the Toolport approval service \
+                 was unreachable (is the Toolport app running?)"
+            ),
+        ),
+        approval::ApprovalDecision::StaleState => (
+            true,
+            format!(
+                "the call to {name} changed after it was approved, so the stale approval was \
+                 rejected"
+            ),
+        ),
+        _ => (
+            true,
+            format!("the call to {name} was not approved in time (the Toolport app may be closed)"),
+        ),
+    };
+    let guidance = match decision {
+        approval::ApprovalDecision::StaleState => {
+            " Re-form the exact call and get it approved again, then retry."
+        }
+        approval::ApprovalDecision::Denied => "",
+        _ => " Ask the user to approve it in the Toolport app, then retry.",
+    };
+    success(
+        id,
+        json!({
+            "content": [{ "type": "text", "text":
+                format!("Toolport: {why}, so it did not run.{guidance}") }],
+            "isError": true,
+            "structuredContent": {
+                "toolportDecision": token,
+                "reason": reason_str,
+                "retriable": retriable,
+            }
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -1848,7 +2332,9 @@ fn handle_request_with_cancel(
                 } else {
                     cached
                 };
-                let scoped = scope_tools(catalog, allowed);
+                let scoped = scope_tools(catalog, allowed, |n| {
+                    router.route_of(n).map(|(s, _)| s.to_string())
+                });
                 let tools =
                     grouped_tool_defs(reg.allow_agent_control, reg.confirm_destructive, &scoped);
                 // Savings vs. advertising the whole (scoped) catalog + status.
@@ -1883,7 +2369,9 @@ fn handle_request_with_cancel(
             } else {
                 cached.to_vec()
             };
-            tools.extend(scope_tools(&catalog, allowed));
+            tools.extend(scope_tools(&catalog, allowed, |n| {
+                router.route_of(n).map(|(s, _)| s.to_string())
+            }));
             gtrace(&format!(
                 "tools/list -> {} tools (cache={})",
                 tools.len(),
@@ -1973,7 +2461,7 @@ fn handle_request_with_cancel(
                         }),
                     ));
                 }
-                match confirm.take(token) {
+                match confirm.take(token, client) {
                     Some((confirmed_name, confirmed_args)) => {
                         name = confirmed_name;
                         arguments = confirmed_args;
@@ -2006,6 +2494,15 @@ fn handle_request_with_cancel(
                     .get("query")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                if let Err(message) = validate_search_query(query) {
+                    return Some(success(
+                        id,
+                        json!({
+                            "content": [{ "type": "text", "text": message }],
+                            "isError": true
+                        }),
+                    ));
+                }
                 let server = arguments.get("server").and_then(|v| v.as_str());
                 let limit = arguments
                     .get("limit")
@@ -2023,7 +2520,9 @@ fn handle_request_with_cancel(
                 };
                 // Scope the searchable catalog to the client's allowed servers
                 // (a no-op when unscoped), so search can't surface out-of-scope tools.
-                let scoped = scope_tools(base, allowed);
+                let scoped = scope_tools(base, allowed, |n| {
+                    router.route_of(n).map(|(s, _)| s.to_string())
+                });
                 let source: &[Value] = &scoped;
                 // Semantic re-ranking if the user has configured it (off by default;
                 // falls back to lexical on any failure).
@@ -2034,8 +2533,12 @@ fn handle_request_with_cancel(
                     s.model.clone(),
                     s.blend,
                 );
-                let (mut matches, total) =
-                    search_catalog_with(source, query, server, limit, Some(&sem_cfg));
+                let outcome = search_catalog_with(source, query, server, limit, Some(&sem_cfg));
+                let mut matches = outcome.matches;
+                let total = outcome.total;
+                let low_confidence = outcome.low_confidence;
+                let broadened = outcome.broadened;
+                let direct_returned = outcome.direct_returned;
                 let scope = server
                     .filter(|s| !s.trim().is_empty())
                     .map(|s| format!(" on \"{s}\""))
@@ -2061,7 +2564,10 @@ fn handle_request_with_cancel(
                     }
                     s.repeats
                 };
-                let escalate = repeats >= SEARCH_REPEAT_LIMIT && !matches.is_empty();
+                // Never force a weak match into a call. Repeated low-confidence
+                // searches need recovery guidance, not the anti-thrash shortcut.
+                let escalate =
+                    repeats >= SEARCH_REPEAT_LIMIT && !matches.is_empty() && !low_confidence;
                 if escalate {
                     matches.truncate(1); // only the best match, no distractions
                 }
@@ -2101,7 +2607,7 @@ fn handle_request_with_cancel(
                 }
                 // Tell the agent when results were truncated, so a buried tool isn't
                 // mistaken for a missing capability.
-                let more = if total > matches.len() && !escalate {
+                let more = if total > direct_returned && !escalate {
                     format!(
                         " Showing {} of {}; narrow with the `server` filter (e.g. server: \
                          \"{}\") or raise `limit` (up to 200) before concluding a capability \
@@ -2135,10 +2641,36 @@ fn handle_request_with_cancel(
                 } else {
                     String::new()
                 };
-                let lead = if matches.is_empty() {
+                let exhaustive_hint = match server.filter(|s| !s.trim().is_empty()) {
+                    Some(server) => format!(
+                        "For an exhaustive listing on this server, search again with an empty query \
+                         and server \"{server}\"."
+                    ),
+                    None => "If you know the target server, search again with an empty query and its \
+                             `server` prefix; otherwise call toolport_status to see the available prefixes."
+                        .to_string(),
+                };
+                let lead = if low_confidence && total == 0 && !matches.is_empty() {
                     format!(
-                        "No tools matched{scope}. Try different keywords, or call toolport_status to \
-                         see the connected servers and their tool counts."
+                        "No direct tools matched{scope}. Showing {} bounded fallback candidate(s) \
+                         from the caller's scoped catalog so you can inspect their descriptions; do \
+                         not assume the first candidate is correct. {exhaustive_hint}{pin_note}{schema_note}",
+                        matches.len().saturating_sub(pins_added)
+                    )
+                } else if matches.is_empty() {
+                    format!("No tools matched{scope}. {exhaustive_hint}")
+                } else if low_confidence {
+                    let broad_note = if broadened > 0 {
+                        format!(" Added {broadened} fallback candidate(s) from the scoped catalog.")
+                    } else {
+                        " The direct result set was already broad enough for inspection."
+                            .to_string()
+                    };
+                    format!(
+                        "Search confidence is low{scope}: found {total} direct match(es) and returned \
+                         {} candidate(s).{broad_note} Inspect the descriptions before choosing a tool; \
+                         do not assume the first candidate is correct. {exhaustive_hint}{pin_note}{more}{schema_note}",
+                        matches.len().saturating_sub(pins_added)
                     )
                 } else if escalate {
                     // Behavioral loop-breaker: the model keeps re-searching the same need
@@ -2185,6 +2717,8 @@ fn handle_request_with_cancel(
                             "rank": i + 1,
                             "matched": explain_match(query, m),
                             "pinned": i < pins_added,
+                            "fallback": i >= pins_added + direct_returned
+                                && i < pins_added + direct_returned + broadened,
                         })
                     })
                     .collect();
@@ -2200,6 +2734,7 @@ fn handle_request_with_cancel(
                     &returned_names,
                     matches.len(),
                     total,
+                    broadened,
                     savings::estimate_tokens(&matches),
                     savings::estimate_tokens(source),
                     escalate,
@@ -2306,14 +2841,28 @@ fn handle_request_with_cancel(
                 // fail-closed (an unknown tool must not skip the human gate).
                 let is_dest = tool_is_destructive_fail_closed(name, cached, router);
                 // Untrusted provenance = the same shared/registry signal the SSRF guard
-                // uses. Match the server the way its tools are prefixed (sanitized id).
+                // uses. Match on the REAL server id from `route_of` (not the sanitized
+                // prefix): two ids that sanitize alike would otherwise read the wrong
+                // server's trust flag and could skip this gate.
                 let untrusted = reg
                     .servers
                     .iter()
-                    .find(|s| sanitize_segment(&s.id) == srv)
+                    .find(|s| s.id == server_id)
                     .map(|s| matches!(s.source.as_deref(), Some("shared") | Some("registry")))
                     .unwrap_or(false);
                 if let Some(reason) = approval::gate_reason(true, is_dest, untrusted) {
+                    // The gate reason names WHY a human was asked; shared by the audit record
+                    // and the agent-facing envelope on every outcome (approved included).
+                    let reason_str = match reason {
+                        approval::ApprovalReason::Destructive => "destructive",
+                        approval::ApprovalReason::UntrustedSource => "untrusted_source",
+                        approval::ApprovalReason::DestructiveAndUntrusted => {
+                            "destructive_and_untrusted"
+                        }
+                    };
+                    // The exact call being approved, content-bound: the bytes that RUN must
+                    // hash-match these. Captured before the (blocking) human decision.
+                    let approved_args_hash = audit::args_hash(&arguments);
                     let t0 = std::time::Instant::now();
                     let decision = request_human_decision(approval::ApprovalRequest {
                         token: String::new(),
@@ -2327,45 +2876,48 @@ fn handle_request_with_cancel(
                     });
                     let held_ms = t0.elapsed().as_millis() as u64;
                     if !decision.is_approved() {
-                        let why = match decision {
-                            approval::ApprovalDecision::Denied => "was denied by a human reviewer",
-                            approval::ApprovalDecision::Unreachable => {
-                                "could not be approved because the Toolport approval service was \
-                                 unreachable (is the Toolport app running?)"
-                            }
-                            _ => "was not approved in time (the Toolport app may be closed)",
-                        };
                         // Governance audit: the gate reason and which non-approval outcome
                         // (denied / no-response / unreachable), plus a content hash of the
                         // exact call - never the raw args. Replaces the flat record_held so
-                        // the three failure modes are no longer indistinguishable in the log.
-                        let reason_str = match reason {
-                            approval::ApprovalReason::Destructive => "destructive",
-                            approval::ApprovalReason::UntrustedSource => "untrusted_source",
-                            approval::ApprovalReason::DestructiveAndUntrusted => {
-                                "destructive_and_untrusted"
-                            }
-                        };
-                        let decision_str = match decision {
-                            approval::ApprovalDecision::Denied => "denied",
-                            approval::ApprovalDecision::Unreachable => "unreachable",
-                            _ => "no_response",
-                        };
+                        // the failure modes are no longer indistinguishable in the log.
                         audit::record_decision(
-                            srv, tool, client, reason_str, decision_str, &arguments, Some(held_ms),
+                            srv,
+                            tool,
+                            client,
+                            reason_str,
+                            decision_token(decision),
+                            &arguments,
+                            Some(held_ms),
                         );
-                        return Some(success(
-                            id,
-                            json!({
-                                "content": [{ "type": "text", "text": format!(
-                                    "Toolport: the call to {name} {why}, so it did not run. \
-                                     Ask the user to approve it in the Toolport app, then retry."
-                                ) }],
-                                "isError": true
-                            }),
-                        ));
+                        return Some(refused_call_result(id, name, decision, reason_str));
                     }
-                    // A human approved: skip the agent-confirm step and route the call.
+                    // A human approved. Enforce content-binding before running: if the call
+                    // was mutated after approval, reject the stale approval (fail-closed)
+                    // rather than run bytes a human never actually saw.
+                    if let Some(stale) = content_binding_decision(&approved_args_hash, &arguments) {
+                        audit::record_decision(
+                            srv,
+                            tool,
+                            client,
+                            reason_str,
+                            decision_token(stale),
+                            &arguments,
+                            Some(held_ms),
+                        );
+                        return Some(refused_call_result(id, name, stale, reason_str));
+                    }
+                    // Approved calls are audited too, so the trail shows what actually ran,
+                    // not only what was blocked.
+                    audit::record_decision(
+                        srv,
+                        tool,
+                        client,
+                        reason_str,
+                        "approved",
+                        &arguments,
+                        Some(held_ms),
+                    );
+                    // Skip the agent-confirm step and route the call.
                     confirmed = true;
                 }
             }
@@ -2384,7 +2936,7 @@ fn handle_request_with_cancel(
                 // destructive tool.
                 let dest = tool_is_destructive_fail_closed(name, cached, router);
                 if dest {
-                    let token = confirm.store(name.to_string(), arguments.clone());
+                    let token = confirm.store(name.to_string(), arguments.clone(), client);
                     let args_pretty = serde_json::to_string_pretty(&arguments).unwrap_or_default();
                     let msg = format!(
                         "⚠️ Destructive action intercepted.\n\nTool: {name}\nArguments:\n{args_pretty}\n\n\
@@ -3054,6 +3606,14 @@ fn watch_registry(
                 }
             };
             last = current;
+            // Refresh the live discovery mode from the freshly-loaded registry: a per-client
+            // override edit (`client_discovery`) may be the only change, and it isn't
+            // router-relevant, so resolve it here before the rebuild fast-path can `continue`.
+            let new_mode = discovery_mode_for(&new_reg, client_id.as_deref());
+            if new_mode != discovery_mode() {
+                eprintln!("toolport: discovery mode -> {}", new_mode.as_str());
+            }
+            set_discovery_mode(new_mode);
             // A team-metadata-only rewrite (usage watermark, sync version/etag, role) from
             // the desktop sync loop changes nothing the router depends on. Update the stored
             // copy but skip the rebuild, so a routine sync never re-spawns every stdio server
@@ -3343,8 +3903,11 @@ thread_local! {
 
 /// Per-session state for streamable-HTTP MCP (POST responses + GET listen stream).
 struct McpSession {
+    /// The authenticated HTTP identity and effective scope that initialized this
+    /// session. `None` is used only by direct unit-test callers.
+    owner: Option<McpSessionOwner>,
     last_seen: Mutex<Instant>,
-    outbound: Mutex<VecDeque<String>>,
+    outbound: Mutex<VecDeque<McpOutboundMessage>>,
     closed: AtomicBool,
     listener_active: AtomicBool,
     wait: (Mutex<()>, Condvar),
@@ -3353,9 +3916,17 @@ struct McpSession {
     next_upstream_id: AtomicI64,
 }
 
+struct McpOutboundMessage {
+    json: String,
+    /// Present for server-to-client JSON-RPC requests so a timed-out request can
+    /// be removed before a later SSE listener accidentally receives it.
+    request_id: Option<String>,
+}
+
 impl McpSession {
-    fn new() -> Self {
+    fn new(owner: Option<McpSessionOwner>) -> Self {
         Self {
+            owner,
             last_seen: Mutex::new(Instant::now()),
             outbound: Mutex::new(VecDeque::new()),
             closed: AtomicBool::new(false),
@@ -3395,7 +3966,13 @@ impl McpSession {
                 return Err(e.to_string());
             }
         };
-        self.push_message(json_str);
+        if !self.push_message(json_str, Some(id_key.clone())) {
+            self.upstream_pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id_key);
+            return Err("upstream MCP client outbound queue is full".to_string());
+        }
         let resp = match rx.recv_timeout(timeout) {
             Ok(v) => v,
             Err(_) => {
@@ -3403,6 +3980,7 @@ impl McpSession {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&id_key);
+                self.remove_queued_request(&id_key);
                 return Err("upstream MCP client did not answer".to_string());
             }
         };
@@ -3456,12 +4034,25 @@ impl McpSession {
         self.wait.1.notify_all();
     }
 
-    fn push_message(&self, json: String) {
+    fn push_message(&self, json: String, request_id: Option<String>) -> bool {
+        let mut outbound = self
+            .outbound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if outbound.len() >= MCP_SESSION_OUTBOUND_MAX {
+            return false;
+        }
+        outbound.push_back(McpOutboundMessage { json, request_id });
+        drop(outbound);
+        self.wait.1.notify_all();
+        true
+    }
+
+    fn remove_queued_request(&self, request_id: &str) {
         self.outbound
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(json);
-        self.wait.1.notify_all();
+            .retain(|msg| msg.request_id.as_deref() != Some(request_id));
     }
 
     fn next_sse_chunk(&self, timeout: Duration) -> Option<Vec<u8>> {
@@ -3480,7 +4071,7 @@ impl McpSession {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .pop_front()
             {
-                return Some(mcp_sse_body(&msg).into_bytes());
+                return Some(mcp_sse_body(&msg.json).into_bytes());
             }
             let result = self
                 .wait
@@ -3546,6 +4137,8 @@ impl Drop for McpSseReader {
 const MCP_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Upper bound on concurrent MCP sessions to avoid unbounded memory growth.
 const MCP_SESSION_MAX: usize = 4096;
+/// Maximum undelivered server-to-client messages retained by one MCP session.
+const MCP_SESSION_OUTBOUND_MAX: usize = 256;
 /// SSE comment frames on idle `GET /mcp` listen streams.
 const MCP_SSE_KEEPALIVE: Duration = Duration::from_secs(30);
 
@@ -3557,9 +4150,12 @@ fn new_mcp_session_id() -> String {
 }
 
 /// Mint a new MCP session after TTL cleanup. Returns 503 when at capacity.
-fn mint_mcp_session(state: &GatewayState) -> Result<String, HttpOut> {
+fn mint_mcp_session(
+    state: &GatewayState,
+    owner: Option<&McpSessionOwner>,
+) -> Result<String, HttpOut> {
     let sid = new_mcp_session_id();
-    let session = Arc::new(McpSession::new());
+    let session = Arc::new(McpSession::new(owner.cloned()));
     let mut sessions = state
         .mcp_sessions
         .lock()
@@ -3582,8 +4178,11 @@ fn mcp_push_server_message(state: &GatewayState, session_id: &str, msg: &Value) 
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(sess) = sessions.get(session_id) {
-        sess.push_message(json);
-        true
+        let queued = sess.push_message(json, request_id_key(msg));
+        if !queued {
+            eprintln!("toolport: MCP session outbound queue full; server message dropped");
+        }
+        queued
     } else {
         false
     }
@@ -4185,7 +4784,17 @@ fn http_tool_defs(
         // Grouped: the meta-tools plus a per-server help_<server> browse tool. Scope
         // the catalog to this client FIRST so the help tools (which read as meta-tools
         // to the later scope pass) can't leak an out-of-scope server's browse entry.
-        let scoped = scope_tools(&catalog(), allowed);
+        // Resolve `catalog()` (which may itself lock the router) BEFORE locking the router
+        // here, so the two locks never nest.
+        let cat = catalog();
+        let router = state
+            .router
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let scoped = scope_tools(&cat, allowed, |n| {
+            router.route_of(n).map(|(s, _)| s.to_string())
+        });
+        drop(router);
         grouped_tool_defs(allow_agent, confirm_destructive, &scoped)
     } else {
         let mut tools = vec![status_tool_def(), fetch_result_tool_def()];
@@ -4203,7 +4812,15 @@ fn openapi_spec(
 ) -> Value {
     // Scope the advertised tools to the client's allowed servers (no-op when
     // unscoped), so a registered client's spec never lists out-of-scope tools.
-    let defs = scope_tools(&http_tool_defs(state, allowed), allowed);
+    let all_defs = http_tool_defs(state, allowed);
+    let router = state
+        .router
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let defs = scope_tools(&all_defs, allowed, |n| {
+        router.route_of(n).map(|(s, _)| s.to_string())
+    });
+    drop(router);
     // The gateway's error envelope is always `{ "error": "<message>" }`; point
     // every non-2xx response at the shared Error schema so a client can model it.
     let err_resp = |desc: &str| {
@@ -4389,6 +5006,7 @@ impl HttpOut {
 fn mcp_require_session(
     state: &GatewayState,
     session_hdr: Option<&str>,
+    owner: Option<&McpSessionOwner>,
 ) -> Result<(String, Arc<McpSession>), HttpOut> {
     let Some(sid) = session_hdr.map(str::trim).filter(|s| !s.is_empty()) else {
         return Err(HttpOut::json_err(
@@ -4404,11 +5022,13 @@ fn mcp_require_session(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     sessions.retain(|_, s| !s.is_expired() && !s.closed.load(Ordering::SeqCst));
-    match sessions.get(sid) {
+    match sessions.get(sid).filter(|session| session.owner.as_ref() == owner) {
         Some(sess) => {
             sess.touch();
             Ok((sid.to_string(), Arc::clone(sess)))
         }
+        // Missing, expired, and wrong-owner sessions deliberately share one
+        // response so callers cannot probe whether another client's id exists.
         None => Err(HttpOut::json_err(
             404,
             "unknown or expired Mcp-Session-Id; re-initialize",
@@ -4482,6 +5102,7 @@ fn handle_mcp_http(
     accept: Option<&str>,
     allowed: Option<&std::collections::HashSet<String>>,
     client: Option<&str>,
+    session_owner: Option<&McpSessionOwner>,
 ) -> HttpOut {
     let prefer_sse = mcp_prefers_sse(accept);
     match method {
@@ -4489,7 +5110,7 @@ fn handle_mcp_http(
             if !mcp_prefers_sse(accept) {
                 return HttpOut::json_err(406, "Accept must include text/event-stream");
             }
-            match mcp_require_session(state, session_hdr) {
+            match mcp_require_session(state, session_hdr, session_owner) {
                 Ok((sid, session)) => {
                     if !session.try_begin_listen() {
                         return HttpOut::json_err(
@@ -4502,7 +5123,7 @@ fn handle_mcp_http(
                 Err(e) => e,
             }
         }
-        "DELETE" => match mcp_require_session(state, session_hdr) {
+        "DELETE" => match mcp_require_session(state, session_hdr, session_owner) {
             Ok((sid, session)) => {
                 session.close();
                 state
@@ -4542,21 +5163,21 @@ fn handle_mcp_http(
                 if let Some(existing) = session_hdr.map(str::trim).filter(|s| !s.is_empty()) {
                     // Client re-sent a session on initialize: accept if still live,
                     // otherwise mint a fresh one (spec: start over without the old id).
-                    match mcp_require_session(state, Some(existing)) {
+                    match mcp_require_session(state, Some(existing), session_owner) {
                         Ok((sid, _)) => sid,
-                        Err(_) => match mint_mcp_session(state) {
+                        Err(_) => match mint_mcp_session(state, session_owner) {
                             Ok(sid) => sid,
                             Err(e) => return e,
                         },
                     }
                 } else {
-                    match mint_mcp_session(state) {
+                    match mint_mcp_session(state, session_owner) {
                         Ok(sid) => sid,
                         Err(e) => return e,
                     }
                 }
             } else {
-                match mcp_require_session(state, session_hdr) {
+                match mcp_require_session(state, session_hdr, session_owner) {
                     Ok((sid, _)) => sid,
                     Err(e) => return e,
                 }
@@ -4640,8 +5261,10 @@ fn handle_http(
     session_hdr: Option<&str>,
     accept: Option<&str>,
     allowed: Option<&std::collections::HashSet<String>>,
-    client: Option<&str>,
+    caller: Option<&HttpCaller>,
 ) -> HttpOut {
+    let client = caller.and_then(|value| value.audit_label.as_deref());
+    let session_owner = caller.map(|value| &value.session_owner);
     if method == "OPTIONS" {
         return HttpOut::new(204, "text/plain", String::new());
     }
@@ -4649,7 +5272,16 @@ fn handle_http(
     // Streamable-HTTP MCP endpoint (same port as OpenAPI).
     if path == "/mcp" || path.starts_with("/mcp?") {
         return handle_mcp_http(
-            state, guard, confirm, method, body, session_hdr, accept, allowed, client,
+            state,
+            guard,
+            confirm,
+            method,
+            body,
+            session_hdr,
+            accept,
+            allowed,
+            client,
+            session_owner,
         );
     }
 
@@ -4676,7 +5308,16 @@ fn handle_http(
             // Don't let OpenAPI POST swallow /mcp if path matching drifted.
             if name == "mcp" {
                 return handle_mcp_http(
-                    state, guard, confirm, method, body, session_hdr, accept, allowed, client,
+                    state,
+                    guard,
+                    confirm,
+                    method,
+                    body,
+                    session_hdr,
+                    accept,
+                    allowed,
+                    client,
+                    session_owner,
                 );
             }
             let args: Value = if body.trim().is_empty() {
@@ -4716,19 +5357,493 @@ fn handle_http(
 }
 
 /// Run the blocking HTTP/OpenAPI server. Binds 127.0.0.1 by default (local
-/// only); set `CONDUIT_HTTP_HOST=0.0.0.0` to expose it (unauthenticated, so
-/// only on a trusted network).
+/// only); set `CONDUIT_HTTP_HOST=0.0.0.0` to expose it. Every bind requires a
+/// bearer token unless loopback is explicitly started with `--insecure-loopback`.
 /// Cap on an inbound HTTP request body. Tool arguments are tiny; this just stops
 /// an unauthenticated caller from forcing the gateway to buffer a huge body.
 const MAX_HTTP_BODY: u64 = 4 * 1024 * 1024;
 
-/// Cap on concurrently-handled gateway requests. HTTP and stdio both use this
-/// worker backstop so their concurrency semantics do not drift. Past this many,
-/// new requests are handled inline (serially) rather than spawning without bound.
-/// Sized well above any realistic local concurrency: the approval broker caps
-/// simultaneous holds at 64, and non-held calls finish in milliseconds, so this
-/// backstop is only ever a flood guard.
+/// Bound the pre-routing socket work that `tiny_http` otherwise performs before
+/// yielding a request. Headers and bodies each get an absolute deadline, so a
+/// client cannot keep a connection alive forever by dripping one byte at a time.
+const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+const MAX_HTTP_PENDING_READS: usize = 64;
+const MAX_HTTP_CHUNK_WIRE_BYTES: usize = MAX_HTTP_BODY as usize + MAX_HTTP_HEADER_BYTES;
+const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy)]
+struct HttpReadDeadlines {
+    header: Duration,
+    body: Duration,
+}
+
+impl Default for HttpReadDeadlines {
+    fn default() -> Self {
+        Self {
+            header: HTTP_HEADER_READ_TIMEOUT,
+            body: HTTP_BODY_READ_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HttpIngressError {
+    Timeout,
+    HeaderTooLarge,
+    BodyTooLarge,
+    BadRequest,
+    ExpectationFailed,
+}
+
+impl HttpIngressError {
+    fn response(&self) -> (u16, &'static str, &'static str) {
+        match self {
+            Self::Timeout => (408, "Request Timeout", "request read deadline exceeded"),
+            Self::HeaderTooLarge => (
+                431,
+                "Request Header Fields Too Large",
+                "request headers are too large",
+            ),
+            Self::BodyTooLarge => (413, "Content Too Large", "request body is too large"),
+            Self::BadRequest => (400, "Bad Request", "malformed HTTP request"),
+            Self::ExpectationFailed => (417, "Expectation Failed", "unsupported expectation"),
+        }
+    }
+}
+
+enum HttpBodyFraming {
+    None,
+    ContentLength(usize),
+    Chunked,
+}
+
+struct ParsedHttpHead {
+    forwarded: Vec<u8>,
+    framing: HttpBodyFraming,
+    send_continue: bool,
+}
+
+fn find_http_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|offset| offset + 4)
+}
+
+fn parse_http_head(bytes: &[u8]) -> Result<ParsedHttpHead, HttpIngressError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| HttpIngressError::BadRequest)?;
+    let mut lines = text.split("\r\n");
+    let request_line = lines
+        .next()
+        .filter(|line| !line.is_empty())
+        .ok_or(HttpIngressError::BadRequest)?;
+    if request_line.split_ascii_whitespace().count() != 3 {
+        return Err(HttpIngressError::BadRequest);
+    }
+
+    let mut forwarded = Vec::with_capacity(bytes.len() + 24);
+    forwarded.extend_from_slice(request_line.as_bytes());
+    forwarded.extend_from_slice(b"\r\n");
+    let mut content_length: Option<usize> = None;
+    let mut transfer_encoding: Option<String> = None;
+    let mut send_continue = false;
+
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, value) = line.split_once(':').ok_or(HttpIngressError::BadRequest)?;
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() {
+            return Err(HttpIngressError::BadRequest);
+        }
+
+        if name.eq_ignore_ascii_case("Connection") {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("Content-Length") {
+            let parsed = value
+                .parse::<usize>()
+                .map_err(|_| HttpIngressError::BadRequest)?;
+            if content_length.is_some_and(|existing| existing != parsed) {
+                return Err(HttpIngressError::BadRequest);
+            }
+            content_length = Some(parsed);
+        } else if name.eq_ignore_ascii_case("Transfer-Encoding") {
+            if transfer_encoding.is_some() {
+                return Err(HttpIngressError::BadRequest);
+            }
+            transfer_encoding = Some(value.to_ascii_lowercase());
+        } else if name.eq_ignore_ascii_case("Expect") {
+            if !value.eq_ignore_ascii_case("100-continue") {
+                return Err(HttpIngressError::ExpectationFailed);
+            }
+            send_continue = true;
+            continue;
+        }
+
+        forwarded.extend_from_slice(line.as_bytes());
+        forwarded.extend_from_slice(b"\r\n");
+    }
+
+    if content_length.unwrap_or(0) > MAX_HTTP_BODY as usize {
+        return Err(HttpIngressError::BodyTooLarge);
+    }
+    let framing = match (content_length, transfer_encoding) {
+        (Some(_), Some(_)) => return Err(HttpIngressError::BadRequest),
+        (Some(length), None) => HttpBodyFraming::ContentLength(length),
+        (None, Some(encoding)) if encoding.trim().eq_ignore_ascii_case("chunked") => {
+            HttpBodyFraming::Chunked
+        }
+        (None, Some(_)) => return Err(HttpIngressError::BadRequest),
+        (None, None) => HttpBodyFraming::None,
+    };
+
+    // The ingress handles one request per public connection. Forcing the private
+    // hop closed after its response keeps framing simple without changing any
+    // public HTTP semantics; clients transparently reconnect for their next call.
+    forwarded.extend_from_slice(b"Connection: close\r\n\r\n");
+    Ok(ParsedHttpHead {
+        forwarded,
+        framing,
+        send_continue,
+    })
+}
+
+fn read_before_deadline(
+    stream: &mut TcpStream,
+    target: &mut Vec<u8>,
+    deadline: Instant,
+) -> Result<usize, HttpIngressError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(HttpIngressError::Timeout)?
+        .max(Duration::from_millis(1));
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(|_| HttpIngressError::BadRequest)?;
+    let mut chunk = [0u8; 8192];
+    match stream.read(&mut chunk) {
+        Ok(0) => Err(HttpIngressError::BadRequest),
+        Ok(read) => {
+            target.extend_from_slice(&chunk[..read]);
+            Ok(read)
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            Err(HttpIngressError::Timeout)
+        }
+        Err(_) => Err(HttpIngressError::BadRequest),
+    }
+}
+
+#[derive(Default)]
+struct ChunkedHttpBodyScan {
+    offset: usize,
+    decoded: usize,
+    trailer_start: Option<usize>,
+    trailer_search_from: usize,
+}
+
+fn chunked_http_trailer_end(body: &[u8], scan: &mut ChunkedHttpBodyScan) -> Option<usize> {
+    let trailer_start = scan.trailer_start?;
+    if body.get(trailer_start..trailer_start + 2) == Some(b"\r\n") {
+        return Some(trailer_start + 2);
+    }
+
+    let search_from = scan.trailer_search_from.max(trailer_start);
+    if let Some(end) = body
+        .get(search_from..)?
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+    {
+        return Some(search_from + end + 4);
+    }
+    // Preserve the final three bytes because the delimiter may straddle reads.
+    scan.trailer_search_from = body.len().saturating_sub(3).max(trailer_start);
+    None
+}
+
+fn chunked_http_body_end(
+    body: &[u8],
+    scan: &mut ChunkedHttpBodyScan,
+) -> Result<Option<usize>, HttpIngressError> {
+    if scan.trailer_start.is_some() {
+        return Ok(chunked_http_trailer_end(body, scan));
+    }
+
+    let mut offset = scan.offset;
+    let mut decoded = scan.decoded;
+    loop {
+        let Some(line_end_rel) = body[offset..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+        else {
+            return Ok(None);
+        };
+        if line_end_rel > 1024 {
+            return Err(HttpIngressError::BadRequest);
+        }
+        let line_end = offset + line_end_rel;
+        let size_text = std::str::from_utf8(&body[offset..line_end])
+            .map_err(|_| HttpIngressError::BadRequest)?;
+        let size = usize::from_str_radix(size_text.split(';').next().unwrap_or("").trim(), 16)
+            .map_err(|_| HttpIngressError::BadRequest)?;
+        let data_start = line_end + 2;
+        decoded = decoded
+            .checked_add(size)
+            .ok_or(HttpIngressError::BodyTooLarge)?;
+        if decoded > MAX_HTTP_BODY as usize {
+            return Err(HttpIngressError::BodyTooLarge);
+        }
+
+        if size == 0 {
+            scan.trailer_start = Some(data_start);
+            scan.trailer_search_from = data_start;
+            return Ok(chunked_http_trailer_end(body, scan));
+        }
+
+        let data_end = data_start
+            .checked_add(size)
+            .ok_or(HttpIngressError::BodyTooLarge)?;
+        let chunk_end = data_end
+            .checked_add(2)
+            .ok_or(HttpIngressError::BodyTooLarge)?;
+        if body.len() < chunk_end {
+            return Ok(None);
+        }
+        if body.get(data_end..chunk_end) != Some(b"\r\n") {
+            return Err(HttpIngressError::BadRequest);
+        }
+        offset = chunk_end;
+        scan.offset = offset;
+        scan.decoded = decoded;
+    }
+}
+
+fn read_deadline_http_request(
+    stream: &mut TcpStream,
+    deadlines: HttpReadDeadlines,
+) -> Result<Vec<u8>, HttpIngressError> {
+    let header_deadline = Instant::now() + deadlines.header;
+    let mut received = Vec::new();
+    let header_end = loop {
+        read_before_deadline(stream, &mut received, header_deadline)?;
+        if let Some(end) = find_http_header_end(&received) {
+            if end > MAX_HTTP_HEADER_BYTES {
+                return Err(HttpIngressError::HeaderTooLarge);
+            }
+            break end;
+        }
+        if received.len() > MAX_HTTP_HEADER_BYTES {
+            return Err(HttpIngressError::HeaderTooLarge);
+        }
+    };
+
+    let parsed = parse_http_head(&received[..header_end - 2])?;
+    if parsed.send_continue {
+        stream
+            .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+            .map_err(|_| HttpIngressError::BadRequest)?;
+    }
+    let mut request = parsed.forwarded;
+    let mut body = received.split_off(header_end);
+    let body_deadline = Instant::now() + deadlines.body;
+
+    match parsed.framing {
+        HttpBodyFraming::None => {}
+        HttpBodyFraming::ContentLength(length) => {
+            while body.len() < length {
+                read_before_deadline(stream, &mut body, body_deadline)?;
+                if body.len() > MAX_HTTP_BODY as usize {
+                    return Err(HttpIngressError::BodyTooLarge);
+                }
+            }
+            request.extend_from_slice(&body[..length]);
+        }
+        HttpBodyFraming::Chunked => {
+            let mut scan = ChunkedHttpBodyScan::default();
+            loop {
+                // Permit ordinary chunk framing overhead while bounding the total wire
+                // buffer as well as the decoded body size checked by the parser.
+                if body.len() > MAX_HTTP_CHUNK_WIRE_BYTES {
+                    return Err(HttpIngressError::BodyTooLarge);
+                }
+                if let Some(end) = chunked_http_body_end(&body, &mut scan)? {
+                    request.extend_from_slice(&body[..end]);
+                    break;
+                }
+                read_before_deadline(stream, &mut body, body_deadline)?;
+            }
+        }
+    }
+    let _ = stream.set_read_timeout(None);
+    Ok(request)
+}
+
+fn write_ingress_response(stream: &mut TcpStream, status: u16, reason: &str, message: &str) {
+    // Rejection responses can run on the shared accept thread, so a peer that
+    // stops reading must not be able to stall new connections indefinitely.
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let body = serde_json::json!({ "error": message }).to_string();
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+fn proxy_deadline_http_connection(
+    mut client: TcpStream,
+    backend: SocketAddr,
+    deadlines: HttpReadDeadlines,
+    pending_read: InflightGuard,
+) {
+    let request = match read_deadline_http_request(&mut client, deadlines) {
+        Ok(request) => request,
+        Err(err) => {
+            let _ = client.set_read_timeout(None);
+            let (status, reason, message) = err.response();
+            write_ingress_response(&mut client, status, reason, message);
+            drop(pending_read);
+            return;
+        }
+    };
+    // Only incomplete reads count against the slow-client cap. Completed requests
+    // move to the existing gateway in-flight cap, so long approvals and SSE streams
+    // do not consume all of the pre-routing slots.
+    drop(pending_read);
+
+    let mut upstream = match TcpStream::connect_timeout(&backend, Duration::from_secs(2)) {
+        Ok(stream) => stream,
+        Err(_) => {
+            write_ingress_response(
+                &mut client,
+                503,
+                "Service Unavailable",
+                "gateway unavailable",
+            );
+            return;
+        }
+    };
+    if upstream.write_all(&request).is_err() {
+        write_ingress_response(
+            &mut client,
+            503,
+            "Service Unavailable",
+            "gateway unavailable",
+        );
+        return;
+    }
+    let _ = upstream.shutdown(Shutdown::Write);
+    let _ = std::io::copy(&mut upstream, &mut client);
+}
+
+struct HttpIngressGuard {
+    close: Arc<AtomicBool>,
+    accept_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for HttpIngressGuard {
+    fn drop(&mut self) {
+        self.close.store(true, Ordering::Release);
+        if let Some(thread) = self.accept_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn bind_deadline_http_server<A: ToSocketAddrs>(
+    addr: A,
+    deadlines: HttpReadDeadlines,
+) -> Result<
+    (tiny_http::Server, HttpIngressGuard, SocketAddr),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let listener = TcpListener::bind(addr)?;
+    listener.set_nonblocking(true)?;
+    let public_addr = listener.local_addr()?;
+    let backend_listener = if public_addr.is_ipv6() {
+        TcpListener::bind(("::1", 0))?
+    } else {
+        TcpListener::bind(("127.0.0.1", 0))?
+    };
+    let backend_addr = backend_listener.local_addr()?;
+    let server = tiny_http::Server::from_listener(backend_listener, None)?;
+    let close = Arc::new(AtomicBool::new(false));
+    let accept_close = Arc::clone(&close);
+    let connections = Arc::new(AtomicUsize::new(0));
+    let accept_thread = std::thread::spawn(move || {
+        while !accept_close.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut client, _)) => {
+                    if accept_close.load(Ordering::Acquire) {
+                        break;
+                    }
+                    // The listener is nonblocking so the guard can shut it down.
+                    // Windows propagates that mode to accepted sockets; restore a
+                    // blocking stream so the explicit read deadlines govern it.
+                    if client.set_nonblocking(false).is_err() {
+                        write_ingress_response(
+                            &mut client,
+                            503,
+                            "Service Unavailable",
+                            "gateway unavailable",
+                        );
+                        continue;
+                    }
+                    let Some(guard) = try_acquire_inflight(&connections, MAX_HTTP_PENDING_READS)
+                    else {
+                        write_ingress_response(
+                            &mut client,
+                            503,
+                            "Service Unavailable",
+                            "gateway busy; retry later",
+                        );
+                        continue;
+                    };
+                    std::thread::spawn(move || {
+                        proxy_deadline_http_connection(client, backend_addr, deadlines, guard);
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => {
+                    glog(&format!("HTTP deadline ingress accept failed: {err}"));
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok((
+        server,
+        HttpIngressGuard {
+            close,
+            accept_thread: Some(accept_thread),
+        },
+        public_addr,
+    ))
+}
+
+/// Cap on concurrently-handled HTTP gateway requests. Requests above the cap are
+/// rejected immediately so a slow request can never block the listener's accept
+/// loop. Sized well above any realistic local concurrency: the approval broker
+/// caps simultaneous holds at 64, and non-held calls finish in milliseconds, so
+/// this backstop is only ever a flood guard.
 const MAX_HTTP_INFLIGHT: usize = 256;
+
+/// Stdio keeps its historical inline fallback once its worker cap is reached.
+/// Unlike HTTP, this cannot stall a socket accept loop, and it keeps stdin
+/// processing bounded without dropping a protocol request.
+const MAX_STDIO_INFLIGHT: usize = 256;
 
 /// Parse a `Bearer <token>` Authorization value. Pure, so it's unit-testable.
 fn parse_bearer(auth_value: &str) -> Option<&str> {
@@ -4763,6 +5878,27 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+const INSECURE_LOOPBACK_FLAG: &str = "--insecure-loopback";
+
+/// Whether the operator explicitly requested the local unauthenticated escape hatch.
+fn insecure_loopback_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == INSECURE_LOOPBACK_FLAG)
+}
+
+/// Startup admission policy. The escape hatch is never valid for a non-loopback bind.
+fn http_bind_is_authorized(loopback: bool, auth_configured: bool, insecure_loopback: bool) -> bool {
+    auth_configured || http_allows_insecure_open(loopback, auth_configured, insecure_loopback)
+}
+
+/// Activate the open-listener fallback only when the escape hatch was required at startup.
+fn http_allows_insecure_open(
+    loopback: bool,
+    auth_configured: bool,
+    insecure_loopback: bool,
+) -> bool {
+    loopback && insecure_loopback && !auth_configured
+}
+
 fn serve_http(state: GatewayState, port: u16) {
     let host = std::env::var("CONDUIT_HTTP_HOST")
         .ok()
@@ -4777,19 +5913,37 @@ fn serve_http(state: GatewayState, port: u16) {
         .filter(|t| !t.is_empty());
 
     let loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
-    // Fail closed: a non-loopback endpoint runs the user's credentials for
-    // anyone who can reach the port, so refuse to bind one without a token.
-    if !loopback && token.is_none() {
-        eprintln!(
-            "toolport-gateway: refusing to bind {host}:{port} without CONDUIT_HTTP_TOKEN. \
-             A non-loopback HTTP endpoint would be unauthenticated. Set a token, or bind 127.0.0.1."
-        );
+    let registered_clients = state
+        .registry
+        .lock()
+        .map(|reg| !reg.http_clients.is_empty())
+        .unwrap_or(false);
+    let auth_configured = token.is_some() || registered_clients;
+    let args: Vec<String> = std::env::args().collect();
+    let insecure_loopback = insecure_loopback_requested(&args);
+    let allow_insecure_open =
+        http_allows_insecure_open(loopback, auth_configured, insecure_loopback);
+
+    if !http_bind_is_authorized(loopback, auth_configured, insecure_loopback) {
+        if loopback {
+            eprintln!(
+                "toolport-gateway: refusing to bind {host}:{port} without HTTP authentication. \
+                 Set CONDUIT_HTTP_TOKEN, configure a registered HTTP client, or explicitly pass \
+                 {INSECURE_LOOPBACK_FLAG} to accept unauthenticated local access."
+            );
+        } else {
+            eprintln!(
+                "toolport-gateway: refusing to bind {host}:{port} without HTTP authentication. \
+                 Set CONDUIT_HTTP_TOKEN or configure a registered HTTP client. \
+                 {INSECURE_LOOPBACK_FLAG} is valid only for loopback binds."
+            );
+        }
         std::process::exit(1);
     }
-    if token.is_none() {
+    if allow_insecure_open {
         eprintln!(
-            "toolport-gateway: WARNING - HTTP endpoint has no token; any local process (including a \
-             web page open in your browser) can call your tools. Set CONDUIT_HTTP_TOKEN to require auth."
+            "toolport-gateway: WARNING - {INSECURE_LOOPBACK_FLAG} enabled; any local process \
+             (including a web page open in your browser) can call your tools."
         );
     }
 
@@ -4805,31 +5959,50 @@ fn serve_http(state: GatewayState, port: u16) {
     // like Open WebUI try ::1 and don't fall back to 127.0.0.1, so an IPv4-only
     // listener makes `http://localhost:<port>` fail even though 127.0.0.1 works.
     if host == "127.0.0.1" {
-        if let Ok(server6) = tiny_http::Server::http(("::1", port)) {
-            let (state6, token6, search6, confirm6) =
-                (state.clone(), token.clone(), search.clone(), confirm.clone());
-            std::thread::spawn(move || serve_http_loop(server6, state6, token6, search6, confirm6));
+        if let Ok((server6, ingress6, _)) =
+            bind_deadline_http_server(("::1", port), HttpReadDeadlines::default())
+        {
+            let (state6, token6, search6, confirm6) = (
+                state.clone(),
+                token.clone(),
+                search.clone(),
+                confirm.clone(),
+            );
+            std::thread::spawn(move || {
+                let _ingress = ingress6;
+                serve_http_loop(
+                    server6,
+                    state6,
+                    token6,
+                    search6,
+                    confirm6,
+                    allow_insecure_open,
+                )
+            });
             glog(&format!(
                 "HTTP/OpenAPI also listening on http://[::1]:{port}"
             ));
         }
     }
 
-    let server = match tiny_http::Server::http((host.as_str(), port)) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("toolport-gateway: could not bind HTTP {host}:{port}: {e}");
-            std::process::exit(1);
-        }
-    };
+    let (server, _ingress, _) =
+        match bind_deadline_http_server((host.as_str(), port), HttpReadDeadlines::default()) {
+            Ok(bound) => bound,
+            Err(e) => {
+                eprintln!("toolport-gateway: could not bind HTTP {host}:{port}: {e}");
+                std::process::exit(1);
+            }
+        };
     glog(&format!(
-        "HTTP mode on http://{host}:{port} (OpenAPI + MCP /mcp, auth={})",
-        token.is_some()
+        "HTTP mode on http://{host}:{port} (OpenAPI + MCP /mcp, auth={}, header_timeout={}s, body_timeout={}s)",
+        auth_configured,
+        HTTP_HEADER_READ_TIMEOUT.as_secs(),
+        HTTP_BODY_READ_TIMEOUT.as_secs()
     ));
     eprintln!(
         "toolport-gateway: HTTP on http://localhost:{port}  (OpenAPI /openapi.json, MCP POST /mcp)"
     );
-    serve_http_loop(server, state, token, search, confirm);
+    serve_http_loop(server, state, token, search, confirm, allow_insecure_open);
 }
 
 /// The accept loop for one listener. Each accepted request is handed to its own
@@ -4846,10 +6019,10 @@ impl Drop for InflightGuard {
     }
 }
 
-fn try_acquire_inflight(inflight: &Arc<AtomicUsize>) -> Option<InflightGuard> {
+fn try_acquire_inflight(inflight: &Arc<AtomicUsize>, limit: usize) -> Option<InflightGuard> {
     let mut current = inflight.load(Ordering::Relaxed);
     loop {
-        if current >= MAX_HTTP_INFLIGHT {
+        if current >= limit {
             return None;
         }
         match inflight.compare_exchange_weak(
@@ -4864,14 +6037,14 @@ fn try_acquire_inflight(inflight: &Arc<AtomicUsize>) -> Option<InflightGuard> {
     }
 }
 
-fn spawn_or_run_inflight<F>(
+fn spawn_or_run_stdio_inflight<F>(
     inflight: &Arc<AtomicUsize>,
     job: F,
 ) -> Option<std::thread::JoinHandle<()>>
 where
     F: FnOnce() + Send + 'static,
 {
-    let Some(guard) = try_acquire_inflight(inflight) else {
+    let Some(guard) = try_acquire_inflight(inflight, MAX_STDIO_INFLIGHT) else {
         job();
         return None;
     };
@@ -4947,19 +6120,66 @@ fn serve_http_loop(
     token: Option<String>,
     search: Arc<SearchGuard>,
     confirm: Arc<ConfirmGuard>,
+    allow_insecure_open: bool,
 ) {
-    let inflight = Arc::new(AtomicUsize::new(0));
+    serve_http_loop_with_inflight(
+        server,
+        state,
+        token,
+        search,
+        confirm,
+        allow_insecure_open,
+        Arc::new(AtomicUsize::new(0)),
+    );
+}
+
+fn serve_http_loop_with_inflight(
+    server: tiny_http::Server,
+    state: GatewayState,
+    token: Option<String>,
+    search: Arc<SearchGuard>,
+    confirm: Arc<ConfirmGuard>,
+    allow_insecure_open: bool,
+    inflight: Arc<AtomicUsize>,
+) {
     for request in server.incoming_requests() {
+        let Some(guard) = try_acquire_inflight(&inflight, MAX_HTTP_INFLIGHT) else {
+            respond_http_overloaded(request);
+            continue;
+        };
         let (state, token, search, confirm) = (
             state.clone(),
             token.clone(),
             Arc::clone(&search),
             Arc::clone(&confirm),
         );
-        let _ = spawn_or_run_inflight(&inflight, move || {
-            handle_connection(request, &state, &token, &search, &confirm);
+        std::thread::spawn(move || {
+            let _permit = guard;
+            handle_connection(
+                request,
+                &state,
+                &token,
+                &search,
+                &confirm,
+                allow_insecure_open,
+            );
         });
     }
+}
+
+fn respond_http_overloaded(request: tiny_http::Request) {
+    let body = serde_json::json!({ "error": "gateway busy; retry later" }).to_string();
+    let mut response = tiny_http::Response::from_string(body).with_status_code(503);
+    for (name, value) in [
+        (b"Content-Type".as_slice(), b"application/json".as_slice()),
+        (b"Retry-After".as_slice(), b"1".as_slice()),
+        (b"Access-Control-Allow-Origin".as_slice(), b"*".as_slice()),
+    ] {
+        if let Ok(header) = tiny_http::Header::from_bytes(name, value) {
+            response = response.with_header(header);
+        }
+    }
+    let _ = request.respond(response);
 }
 
 /// Handle one accepted HTTP request end to end: parse, CORS, auth/scope, dispatch,
@@ -4971,6 +6191,7 @@ fn handle_connection(
     token: &Option<String>,
     search: &SearchGuard,
     confirm: &ConfirmGuard,
+    allow_insecure_open: bool,
 ) {
         let method = request.method().to_string().to_uppercase();
         let url = request.url().to_string();
@@ -5018,7 +6239,8 @@ fn handle_connection(
         // Auth + scope gate: resolve the bearer to (authorized, allowed-servers).
         // OPTIONS is the data-less preflight, always allowed and unscoped. Else the
         // registry decides: the legacy env token (full connected set), a registered
-        // HTTP client (its profile's servers), or open when no auth is configured.
+        // HTTP client (its profile's servers), or open only when startup explicitly
+        // accepted `--insecure-loopback`.
         // A bad/missing token is rejected before we read the body or route.
         let provided = request
             .headers()
@@ -5026,7 +6248,7 @@ fn handle_connection(
             .find(|h| h.field.equiv("Authorization"))
             .map(|h| h.value.as_str().to_string());
         let provided_tok = provided.as_deref().and_then(parse_bearer);
-        let mut client_label: Option<String> = None;
+        let mut caller: Option<HttpCaller> = None;
         let scope: Option<Option<std::collections::HashSet<String>>> = if method == "OPTIONS" {
             Some(None)
         } else {
@@ -5034,10 +6256,20 @@ fn handle_connection(
                 .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // Resolve the client's audit label from the same token, so every call it
-            // makes can be attributed to it in the audit log.
-            client_label = http_client_label(&reg, provided_tok);
-            resolve_http_scope(&reg, token.as_deref(), provided_tok)
+            // Resolve authorization, routing scope, audit attribution, and MCP
+            // session ownership from one token lookup and one effective allow-set.
+            match resolve_http_caller(
+                &reg,
+                token.as_deref(),
+                provided_tok,
+                allow_insecure_open,
+            ) {
+                Some((allowed, resolved_caller)) => {
+                    caller = Some(resolved_caller);
+                    Some(allowed)
+                }
+                None => None,
+            }
         };
 
         let out: HttpOut = if cross_site && method != "OPTIONS" {
@@ -5065,7 +6297,7 @@ fn handle_connection(
                             session_hdr.as_deref(),
                             accept_hdr.as_deref(),
                             allowed.as_ref(),
-                            client_label.as_deref(),
+                            caller.as_ref(),
                         )
                     }))
                     .unwrap_or_else(|_| HttpOut::json_err(500, "internal error"))
@@ -5165,7 +6397,7 @@ fn main() {
     // gateway (e.g. Antigravity). Resolved once and cached; `lazy` is derived so its
     // behavior is unchanged, and grouped mode reads the same cached value.
     let mode = resolve_discovery_mode();
-    let _ = DISCOVERY_MODE.set(mode);
+    set_discovery_mode(mode);
     let lazy = matches!(mode, DiscoveryMode::Lazy);
     // Per-client scoping: this gateway exposes only the named profile's servers.
     // This is only the bootstrap value - once the registry loads below, the live
@@ -5404,14 +6636,19 @@ fn main() {
     let stdio_inflight = Arc::new(AtomicUsize::new(0));
     let stdout_broken = Arc::new(AtomicBool::new(false));
     let mut stdio_workers = Vec::new();
-    for line in stdin.lock().lines() {
+    let mut stdin = stdin.lock();
+    loop {
         reap_finished_workers(&mut stdio_workers);
         if stdout_broken.load(Ordering::SeqCst) {
             break;
         }
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
+        let line = match read_bounded_line(&mut stdin, MAX_STDIO_LINE_BYTES) {
+            Ok(BoundedLine::Line(line)) => line,
+            Ok(BoundedLine::TooLong) => {
+                glog("ignored oversized stdio request (>16 MiB)");
+                continue;
+            }
+            Ok(BoundedLine::Eof) | Err(_) => break,
         };
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -5467,7 +6704,7 @@ fn main() {
                 stdout_broken_for_worker,
             );
         };
-        if let Some(handle) = spawn_or_run_inflight(&stdio_inflight, job) {
+        if let Some(handle) = spawn_or_run_stdio_inflight(&stdio_inflight, job) {
             stdio_workers.push(handle);
         }
     }
@@ -5675,6 +6912,56 @@ mod tests {
         assert_eq!(d, approval::ApprovalDecision::Unreachable);
     }
 
+    /// The audit record and the agent-facing envelope must name every outcome the same way,
+    /// so a governance view and a recovering agent never disagree about what happened.
+    #[test]
+    fn decision_token_names_every_outcome() {
+        assert_eq!(decision_token(approval::ApprovalDecision::Approved), "approved");
+        assert_eq!(decision_token(approval::ApprovalDecision::Denied), "denied");
+        assert_eq!(decision_token(approval::ApprovalDecision::Timeout), "no_response");
+        assert_eq!(decision_token(approval::ApprovalDecision::Unreachable), "unreachable");
+        assert_eq!(decision_token(approval::ApprovalDecision::StaleState), "stale_state");
+    }
+
+    /// Content-binding: identical arguments pass (the approved call runs); any change to the
+    /// arguments after approval yields StaleState, so the stale approval never runs.
+    #[test]
+    fn content_binding_matches_only_identical_args() {
+        let approved = audit::args_hash(&json!({ "table": "users", "hard": true }));
+        // Same content, different key order -> canonical hash matches -> allowed.
+        assert!(content_binding_decision(&approved, &json!({ "hard": true, "table": "users" }))
+            .is_none());
+        // Mutated after approval (different value) -> StaleState, fail-closed.
+        assert_eq!(
+            content_binding_decision(&approved, &json!({ "table": "orders", "hard": true })),
+            Some(approval::ApprovalDecision::StaleState)
+        );
+    }
+
+    /// The refusal envelope is machine-readable: a code-mode script (or any agent) can read
+    /// `structuredContent.toolportDecision` + `retriable` to pick a recovery instead of
+    /// blind-retrying a flat error string. Every non-approval stays `isError: true`.
+    #[test]
+    fn refused_call_result_carries_typed_decision() {
+        let cases = [
+            (approval::ApprovalDecision::Denied, "denied", false),
+            (approval::ApprovalDecision::Timeout, "no_response", true),
+            (approval::ApprovalDecision::Unreachable, "unreachable", true),
+            (approval::ApprovalDecision::StaleState, "stale_state", true),
+        ];
+        for (decision, token, retriable) in cases {
+            let v = refused_call_result(json!(1), "db__drop", decision, "destructive");
+            let result = &v["result"];
+            assert_eq!(result["isError"].as_bool(), Some(true), "{token} must fail closed");
+            let sc = &result["structuredContent"];
+            assert_eq!(sc["toolportDecision"].as_str(), Some(token));
+            assert_eq!(sc["reason"].as_str(), Some("destructive"));
+            assert_eq!(sc["retriable"].as_bool(), Some(retriable));
+            // The human-readable text still names the tool so a person reading a log sees it.
+            assert!(result["content"][0]["text"].as_str().unwrap().contains("db__drop"));
+        }
+    }
+
     fn router() -> Router {
         Router::new()
     }
@@ -5836,6 +7123,168 @@ mod tests {
         buf
     }
 
+    #[test]
+    fn deadline_http_ingress_times_out_slow_headers_and_bodies() {
+        let deadlines = HttpReadDeadlines {
+            header: Duration::from_millis(180),
+            body: Duration::from_millis(120),
+        };
+        let (_server, _ingress, public_addr) =
+            bind_deadline_http_server("127.0.0.1:0", deadlines).unwrap();
+
+        let mut slow_header = TcpStream::connect(public_addr).unwrap();
+        slow_header
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut drip_stream = slow_header.try_clone().unwrap();
+        let drip = std::thread::spawn(move || {
+            for byte in b"GET / HTTP/1.1" {
+                if drip_stream.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        });
+        let started = Instant::now();
+        let mut response = String::new();
+        let read_result = slow_header.read_to_string(&mut response);
+        let elapsed = started.elapsed();
+        drip.join().unwrap();
+        assert!(
+            read_result.is_ok()
+                || read_result
+                    .as_ref()
+                    .is_err_and(|err| err.kind() == std::io::ErrorKind::ConnectionReset),
+            "unexpected slow-header read error: {read_result:?}"
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 408 Request Timeout"),
+            "slow header response was: {response}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(350),
+            "header timeout reset after each drip ({elapsed:?}) instead of enforcing an absolute deadline"
+        );
+
+        let mut slow_body = TcpStream::connect(public_addr).unwrap();
+        slow_body
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        slow_body
+            .write_all(b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\na")
+            .unwrap();
+        let mut response = String::new();
+        slow_body.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 408 Request Timeout"),
+            "slow body response was: {response}"
+        );
+    }
+
+    #[test]
+    fn deadline_http_ingress_forwards_complete_requests_and_closes_private_hop() {
+        let (server, _ingress, public_addr) =
+            bind_deadline_http_server("127.0.0.1:0", HttpReadDeadlines::default()).unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(public_addr).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .write_all(
+                    b"GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        });
+
+        let request = server
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .expect("ingress did not forward a complete request");
+        assert_eq!(request.url(), "/ready");
+        assert!(request.headers().iter().any(|header| {
+            header.field.equiv("Connection") && header.value.as_str().eq_ignore_ascii_case("close")
+        }));
+        request
+            .respond(tiny_http::Response::from_string("ready"))
+            .unwrap();
+        assert!(client.join().unwrap().contains("ready"));
+    }
+
+    #[test]
+    fn chunked_http_body_parser_bounds_and_finds_the_terminal_chunk() {
+        let mut scan = ChunkedHttpBodyScan::default();
+        assert_eq!(
+            chunked_http_body_end(b"4\r\ntest\r\n0\r\n\r\n", &mut scan).unwrap(),
+            Some(14)
+        );
+        let mut scan = ChunkedHttpBodyScan::default();
+        assert_eq!(
+            chunked_http_body_end(
+                b"4\r\ntest\r\n0\r\nX-Test: yes\r\n\r\n",
+                &mut scan
+            )
+            .unwrap(),
+            Some(27)
+        );
+        let mut scan = ChunkedHttpBodyScan::default();
+        assert_eq!(
+            chunked_http_body_end(b"4\r\nte", &mut scan).unwrap(),
+            None
+        );
+        let mut scan = ChunkedHttpBodyScan::default();
+        assert_eq!(
+            chunked_http_body_end(b"nope\r\n", &mut scan).unwrap_err(),
+            HttpIngressError::BadRequest
+        );
+    }
+
+    #[test]
+    fn chunked_http_body_parser_resumes_from_verified_boundaries() {
+        let mut scan = ChunkedHttpBodyScan::default();
+        assert_eq!(
+            chunked_http_body_end(b"4\r\ntest\r\n5\r\npar", &mut scan).unwrap(),
+            None
+        );
+        assert_eq!(scan.offset, 9);
+        assert_eq!(scan.decoded, 4);
+        assert_eq!(
+            chunked_http_body_end(b"4\r\ntest\r\n5\r\nparty\r\n0\r\nX: y\r\n", &mut scan)
+                .unwrap(),
+            None
+        );
+        assert_eq!(scan.offset, 19);
+        assert_eq!(scan.decoded, 9);
+        assert_eq!(
+            chunked_http_body_end(b"4\r\ntest\r\n5\r\nparty\r\n0\r\nX: y\r\n\r\n", &mut scan)
+                .unwrap(),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn deadline_http_ingress_rejects_ambiguous_request_framing() {
+        assert!(matches!(
+            parse_http_head(
+                b"POST / HTTP/1.1\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n"
+            ),
+            Err(HttpIngressError::BadRequest)
+        ));
+        assert!(matches!(
+            parse_http_head(
+                b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n"
+            ),
+            Err(HttpIngressError::BadRequest)
+        ));
+        assert!(matches!(
+            parse_http_head(b"POST / HTTP/1.1\r\nExpect: something-else\r\n"),
+            Err(HttpIngressError::ExpectationFailed)
+        ));
+    }
+
     /// The live proof of the multithreaded HTTP loop: a call blocked in dispatch (a
     /// slow downstream, or the moral equivalent of a 120s approval hold) must NOT stall
     /// an unrelated request. A single-threaded accept loop would serialize them.
@@ -5881,7 +7330,7 @@ mod tests {
         let port = server.server_addr().to_ip().unwrap().port();
         let search = Arc::new(SearchGuard::default());
         let confirm = Arc::new(ConfirmGuard::new());
-        std::thread::spawn(move || serve_http_loop(server, state, None, search, confirm));
+        std::thread::spawn(move || serve_http_loop(server, state, None, search, confirm, true));
         std::thread::sleep(Duration::from_millis(50)); // let the listener come up
 
         // Kick off the slow (blocking) call on its own thread, then let it get parked
@@ -5905,16 +7354,107 @@ mod tests {
     }
 
     #[test]
+    fn bounded_stdio_line_recovers_after_oversized_frame() {
+        let input = b"1234\r\nabcdefgh\nok\nlast";
+        let mut reader = std::io::BufReader::with_capacity(3, input.as_slice());
+
+        assert_eq!(
+            read_bounded_line(&mut reader, 4).unwrap(),
+            BoundedLine::Line("1234".to_string()),
+            "CRLF is excluded from the byte limit"
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 4).unwrap(),
+            BoundedLine::TooLong
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 4).unwrap(),
+            BoundedLine::Line("ok".to_string()),
+            "oversized input is drained through its newline"
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 4).unwrap(),
+            BoundedLine::Line("last".to_string()),
+            "a final frame without a newline is still accepted"
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 4).unwrap(),
+            BoundedLine::Eof
+        );
+    }
+
+    #[test]
+    fn http_over_cap_rejects_promptly_and_recovers() {
+        let state = http_state(false);
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let search = Arc::new(SearchGuard::default());
+        let confirm = Arc::new(ConfirmGuard::new());
+        let inflight = Arc::new(AtomicUsize::new(0));
+
+        // Hold every permit without creating 256 slow OS threads. The listener
+        // sees exactly the same saturated counter it would see under real load.
+        let mut guards: Vec<_> = (0..MAX_HTTP_INFLIGHT)
+            .map(|_| {
+                try_acquire_inflight(&inflight, MAX_HTTP_INFLIGHT)
+                    .expect("permit under cap")
+            })
+            .collect();
+
+        let listener_inflight = Arc::clone(&inflight);
+        std::thread::spawn(move || {
+            serve_http_loop_with_inflight(
+                server,
+                state,
+                None,
+                search,
+                confirm,
+                true,
+                listener_inflight,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(50));
+
+        let started = Instant::now();
+        let rejected = http_get(port, "/");
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "over-cap response blocked the accept loop"
+        );
+        assert!(
+            rejected.contains("503 Service Unavailable"),
+            "unexpected over-cap response: {rejected}"
+        );
+        assert!(
+            rejected.contains("Retry-After: 1"),
+            "missing retry guidance: {rejected}"
+        );
+
+        // Once one request releases its permit, the next connection is handled
+        // normally and the worker returns that permit when it finishes.
+        drop(guards.pop());
+        let recovered = http_get(port, "/");
+        assert!(
+            recovered.contains("200 OK") && recovered.contains("Toolport gateway"),
+            "listener did not recover after a permit released: {recovered}"
+        );
+        drop(guards);
+    }
+
+    #[test]
     fn inflight_guard_caps_and_releases_workers() {
         let inflight = Arc::new(AtomicUsize::new(0));
         let guards: Vec<_> = (0..MAX_HTTP_INFLIGHT)
-            .map(|_| try_acquire_inflight(&inflight).expect("permit under cap"))
+            .map(|_| {
+                try_acquire_inflight(&inflight, MAX_HTTP_INFLIGHT)
+                    .expect("permit under cap")
+            })
             .collect();
 
-        assert!(try_acquire_inflight(&inflight).is_none());
+        assert!(try_acquire_inflight(&inflight, MAX_HTTP_INFLIGHT).is_none());
         drop(guards);
         assert_eq!(inflight.load(Ordering::SeqCst), 0);
-        assert!(try_acquire_inflight(&inflight).is_some());
+        assert!(try_acquire_inflight(&inflight, MAX_HTTP_INFLIGHT).is_some());
     }
 
     #[test]
@@ -6034,6 +7574,34 @@ mod tests {
     }
 
     #[test]
+    fn insecure_loopback_requires_the_exact_cli_flag() {
+        let args = vec![
+            "toolport-gateway".to_string(),
+            "--http".to_string(),
+            "8765".to_string(),
+            INSECURE_LOOPBACK_FLAG.to_string(),
+        ];
+        assert!(insecure_loopback_requested(&args));
+        assert!(!insecure_loopback_requested(&[
+            "toolport-gateway".to_string(),
+            "--insecure".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn http_bind_requires_auth_except_for_explicit_loopback_escape_hatch() {
+        assert!(http_bind_is_authorized(true, true, false));
+        assert!(http_bind_is_authorized(false, true, false));
+        assert!(http_bind_is_authorized(true, false, true));
+        assert!(!http_bind_is_authorized(true, false, false));
+        assert!(!http_bind_is_authorized(false, false, false));
+        assert!(!http_bind_is_authorized(false, false, true));
+        assert!(http_allows_insecure_open(true, false, true));
+        assert!(!http_allows_insecure_open(true, true, true));
+        assert!(!http_allows_insecure_open(false, false, true));
+    }
+
+    #[test]
     fn server_of_tool_extracts_prefix() {
         assert_eq!(server_of_tool("vercel__deploy"), "vercel");
         assert_eq!(server_of_tool("resend__send_email"), "resend");
@@ -6068,11 +7636,12 @@ mod tests {
             json!({ "name": "resend__send" }),
             json!({ "name": "toolport_search_tools" }),
         ];
-        // Unscoped: everything passes.
-        assert_eq!(scope_tools(&tools, None).len(), 3);
+        // Unscoped: everything passes. (`|_| None` = the router knows nothing, so scoping
+        // falls back to the `server__` prefix heuristic.)
+        assert_eq!(scope_tools(&tools, None, |_| None).len(), 3);
         // Scoped to vercel: its tool plus the meta-tool, never resend.
         let set: std::collections::HashSet<String> = ["vercel".to_string()].into_iter().collect();
-        let names: Vec<String> = scope_tools(&tools, Some(&set))
+        let names: Vec<String> = scope_tools(&tools, Some(&set), |_| None)
             .iter()
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
             .collect();
@@ -6082,16 +7651,69 @@ mod tests {
     }
 
     #[test]
+    fn scope_tools_scopes_override_renamed_tool_via_router() {
+        // A tool renamed via a ToolOverride to a non-namespaced name ("deploy") has no
+        // `__`, so the prefix heuristic alone treats it as a meta-tool and leaks it to
+        // every scoped client. The router's route_of gives its real server, so a client
+        // that can't see that server never sees the tool's name or schema. (SOU-21)
+        let tools = vec![
+            json!({ "name": "deploy" }), // vercel tool renamed, no namespace
+            json!({ "name": "resend__send" }),
+            json!({ "name": "toolport_search_tools" }), // genuine meta-tool
+        ];
+        let route_of = |n: &str| match n {
+            "deploy" => Some("vercel".to_string()),
+            "resend__send" => Some("resend".to_string()),
+            _ => None,
+        };
+        let set: std::collections::HashSet<String> = ["resend".to_string()].into_iter().collect();
+        let names: Vec<String> = scope_tools(&tools, Some(&set), route_of)
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert!(names.contains(&"resend__send".to_string()), "in-scope server kept");
+        assert!(names.contains(&"toolport_search_tools".to_string()), "meta-tool kept");
+        assert!(
+            !names.contains(&"deploy".to_string()),
+            "renamed vercel tool must not leak to a resend-only client"
+        );
+    }
+
+    #[test]
+    fn scope_tools_drops_unknown_bare_name_when_router_misses() {
+        // Cold/stale cache: route_of can't resolve a downstream tool renamed to a bare name
+        // yet. It must NOT be treated as a meta-tool (that would leak it to every scoped
+        // client) - only known gateway meta-tools survive a route_of miss. (SOU-21)
+        let tools = vec![
+            json!({ "name": "deploy" }), // renamed downstream tool, router hasn't indexed it
+            json!({ "name": "toolport_status" }), // genuine gateway meta-tool
+            json!({ "name": "vercel__ship" }), // namespaced, in scope
+        ];
+        let set: std::collections::HashSet<String> = ["vercel".to_string()].into_iter().collect();
+        let names: Vec<String> = scope_tools(&tools, Some(&set), |_| None)
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert!(names.contains(&"toolport_status".to_string()), "known meta-tool kept");
+        assert!(names.contains(&"vercel__ship".to_string()), "namespaced in-scope tool kept");
+        assert!(
+            !names.contains(&"deploy".to_string()),
+            "unknown bare name must not leak during a cold cache"
+        );
+    }
+
+    #[test]
     fn resolve_http_scope_auth_and_scope_policy() {
         let mut reg = Registry::default();
-        // No auth configured at all -> open, unscoped.
-        assert_eq!(resolve_http_scope(&reg, None, None), Some(None));
+        // No auth configured at all -> open only under the explicit escape hatch.
+        assert_eq!(resolve_http_scope(&reg, None, None, true), Some(None));
+        assert_eq!(resolve_http_scope(&reg, None, None, false), None);
         // Legacy env token: exact match -> unscoped; mismatch -> rejected.
         assert_eq!(
-            resolve_http_scope(&reg, Some("envtok"), Some("envtok")),
+            resolve_http_scope(&reg, Some("envtok"), Some("envtok"), false),
             Some(None)
         );
-        assert!(resolve_http_scope(&reg, Some("envtok"), Some("nope")).is_none());
+        assert!(resolve_http_scope(&reg, Some("envtok"), Some("nope"), false).is_none());
         // A registered client with an empty profile is authorized but unscoped.
         reg.http_clients.push(registry::HttpClient {
             id: "c1".into(),
@@ -6099,11 +7721,14 @@ mod tests {
             token_sha256: registry::sha256_hex("fulltok"),
             profile: String::new(),
         });
-        assert_eq!(resolve_http_scope(&reg, None, Some("fulltok")), Some(None));
+        assert_eq!(
+            resolve_http_scope(&reg, None, Some("fulltok"), false),
+            Some(None)
+        );
         // Once any client is registered, an unknown/absent bearer is rejected
         // (the open default no longer applies).
-        assert!(resolve_http_scope(&reg, None, Some("unknown")).is_none());
-        assert!(resolve_http_scope(&reg, None, None).is_none());
+        assert!(resolve_http_scope(&reg, None, Some("unknown"), false).is_none());
+        assert!(resolve_http_scope(&reg, None, None, false).is_none());
         // A client scoped to a non-empty profile resolves to a (possibly empty)
         // allow-set; exact membership is covered by enabled_servers_for tests.
         reg.http_clients.push(registry::HttpClient {
@@ -6113,9 +7738,21 @@ mod tests {
             profile: "Default".into(),
         });
         assert!(matches!(
-            resolve_http_scope(&reg, None, Some("scopedtok")),
+            resolve_http_scope(&reg, None, Some("scopedtok"), false),
             Some(Some(_))
         ));
+
+        // Removing the last registered client while the gateway is live must not
+        // turn an authenticated listener into an open one. Only immutable startup
+        // policy from `--insecure-loopback` enables the fallback.
+        let authenticated_startup_allows_open = http_allows_insecure_open(true, true, true);
+        reg.http_clients.clear();
+        assert!(resolve_http_scope(&reg, None, None, authenticated_startup_allows_open).is_none());
+        let explicit_open_startup = http_allows_insecure_open(true, false, true);
+        assert_eq!(
+            resolve_http_scope(&reg, None, None, explicit_open_startup),
+            Some(None)
+        );
     }
 
     #[test]
@@ -6143,6 +7780,35 @@ mod tests {
             profile: String::new(),
         });
         assert_eq!(http_client_label(&reg, Some("tok2")).as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn http_session_owner_uses_stable_client_id_and_effective_scope() {
+        let mut reg = Registry::default();
+        let billing = reg.add_profile("Billing");
+        reg.http_clients.push(registry::HttpClient {
+            id: "c1".into(),
+            label: "Open WebUI".into(),
+            token_sha256: registry::sha256_hex("tok1"),
+            profile: billing,
+        });
+        reg.http_clients.push(registry::HttpClient {
+            id: "c2".into(),
+            label: "Open WebUI".into(),
+            token_sha256: registry::sha256_hex("tok2"),
+            profile: String::new(),
+        });
+
+        let (_, first) = resolve_http_caller(&reg, None, Some("tok1"), false).unwrap();
+        let (_, second) = resolve_http_caller(&reg, None, Some("tok2"), false).unwrap();
+        assert_eq!(first.audit_label.as_deref(), Some("Open WebUI"));
+        assert_eq!(second.audit_label.as_deref(), Some("Open WebUI"));
+        assert_ne!(
+            first.session_owner.identity, second.session_owner.identity,
+            "duplicate display labels must not collapse distinct clients"
+        );
+        assert_eq!(first.session_owner.scope, Some(Vec::new()));
+        assert_eq!(second.session_owner.scope, None);
     }
 
     #[test]
@@ -6534,6 +8200,131 @@ mod tests {
     }
 
     #[test]
+    fn mcp_http_session_is_bound_to_client_identity_and_scope() {
+        let state = http_state(true);
+        let search = SearchGuard::default();
+        let confirm = ConfirmGuard::new();
+        let caller = |identity: &str, scope: &[&str]| HttpCaller {
+            audit_label: Some(identity.to_string()),
+            session_owner: McpSessionOwner {
+                identity: identity.to_string(),
+                scope: Some(scope.iter().map(|value| value.to_string()).collect()),
+            },
+        };
+        let owner = caller("client:cursor", &["github"]);
+        let intruder = caller("client:webui", &["github"]);
+        let rescoped_owner = caller("client:cursor", &["github", "stripe"]);
+
+        let init = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": "2025-06-18", "capabilities": {} }
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(&owner),
+        );
+        assert_eq!(init.status, 200, "body={}", init.body);
+        let sid = mcp_session_of(&init);
+        let list_body = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })
+            .to_string();
+
+        // A different authenticated identity cannot POST, listen, or delete.
+        let wrong_post = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &list_body,
+            Some(&sid),
+            None,
+            None,
+            Some(&intruder),
+        );
+        assert_eq!(wrong_post.status, 404);
+        let wrong_get = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "GET",
+            "/mcp",
+            "",
+            Some(&sid),
+            Some("text/event-stream"),
+            None,
+            Some(&intruder),
+        );
+        assert_eq!(wrong_get.status, 404);
+        let wrong_delete = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "DELETE",
+            "/mcp",
+            "",
+            Some(&sid),
+            None,
+            None,
+            Some(&intruder),
+        );
+        assert_eq!(wrong_delete.status, 404);
+
+        // The same client after a live scope change must also re-initialize.
+        let wrong_scope = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &list_body,
+            Some(&sid),
+            None,
+            None,
+            Some(&rescoped_owner),
+        );
+        assert_eq!(wrong_scope.status, 404);
+
+        // Refused attempts do not destroy the session; the original owner can
+        // still use and then explicitly terminate it.
+        let owner_post = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "POST",
+            "/mcp",
+            &list_body,
+            Some(&sid),
+            None,
+            None,
+            Some(&owner),
+        );
+        assert_eq!(owner_post.status, 200, "body={}", owner_post.body);
+        let owner_delete = handle_http(
+            &state,
+            &search,
+            &confirm,
+            "DELETE",
+            "/mcp",
+            "",
+            Some(&sid),
+            None,
+            None,
+            Some(&owner),
+        );
+        assert_eq!(owner_delete.status, 204);
+    }
+
+    #[test]
     fn mcp_http_get_opens_listen_stream() {
         let state = http_state(true);
         let search = SearchGuard::default();
@@ -6624,7 +8415,7 @@ mod tests {
     #[test]
     fn mcp_push_server_message_queues_sse_payload() {
         let state = http_state(true);
-        let sid = mint_mcp_session(&state).ok().unwrap();
+        let sid = mint_mcp_session(&state, None).ok().unwrap();
         let msg = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
         assert!(mcp_push_server_message(&state, &sid, &msg));
         let sessions = state.mcp_sessions.lock().unwrap();
@@ -6636,6 +8427,48 @@ mod tests {
         let chunk = String::from_utf8_lossy(&buf[..n]);
         assert!(chunk.contains("event: message"));
         assert!(chunk.contains("tools/list_changed"));
+    }
+
+    #[test]
+    fn mcp_session_outbound_queue_is_bounded() {
+        let session = McpSession::new(None);
+        for i in 0..MCP_SESSION_OUTBOUND_MAX {
+            assert!(session.push_message(
+                json!({"jsonrpc":"2.0","method":"notifications/test","params":{"i":i}})
+                    .to_string(),
+                None,
+            ));
+        }
+        assert!(!session.push_message(
+            json!({"jsonrpc":"2.0","method":"notifications/overflow"}).to_string(),
+            None,
+        ));
+        assert_eq!(session.outbound.lock().unwrap().len(), MCP_SESSION_OUTBOUND_MAX);
+    }
+
+    #[test]
+    fn mcp_upstream_timeout_drops_undelivered_request() {
+        let session = McpSession::new(None);
+        let err = session
+            .upstream_call_timeout("roots/list", json!({}), Duration::ZERO)
+            .unwrap_err();
+        assert_eq!(err, "upstream MCP client did not answer");
+        assert!(session.outbound.lock().unwrap().is_empty());
+        assert!(session.upstream_pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mcp_upstream_call_fails_immediately_when_queue_is_full() {
+        let session = McpSession::new(None);
+        for _ in 0..MCP_SESSION_OUTBOUND_MAX {
+            assert!(session.push_message("queued".to_string(), None));
+        }
+        let err = session
+            .upstream_call_timeout("roots/list", json!({}), Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(err, "upstream MCP client outbound queue is full");
+        assert!(session.upstream_pending.lock().unwrap().is_empty());
+        assert_eq!(session.outbound.lock().unwrap().len(), MCP_SESSION_OUTBOUND_MAX);
     }
 
     #[test]
@@ -7131,6 +8964,64 @@ mod tests {
         assert_eq!(total, 2);
     }
 
+    #[test]
+    fn high_confidence_name_match_stays_compact() {
+        let cat = vec![
+            json!({ "name": "mail__send_email", "description": "Send a message", "inputSchema": {} }),
+            json!({ "name": "calendar__list_events", "description": "Upcoming meetings", "inputSchema": {} }),
+            json!({ "name": "billing__get_invoice", "description": "Read an invoice", "inputSchema": {} }),
+        ];
+        let outcome = search_catalog_with(&cat, "send email", None, 25, None);
+        assert!(!outcome.low_confidence);
+        assert_eq!(outcome.total, 1);
+        assert_eq!(outcome.matches.len(), 1);
+        assert_eq!(outcome.broadened, 0);
+        assert_eq!(outcome.matches[0]["name"], "mail__send_email");
+    }
+
+    #[test]
+    fn weak_description_match_broadens_from_scoped_catalog() {
+        let cat = vec![
+            json!({ "name": "homes__lookup", "description": "Look up property records", "inputSchema": {} }),
+            json!({ "name": "maps__geocode", "description": "Resolve an address", "inputSchema": {} }),
+            json!({ "name": "tax__assessment", "description": "Read assessed values", "inputSchema": {} }),
+            json!({ "name": "photos__street_view", "description": "Show street imagery", "inputSchema": {} }),
+        ];
+        let outcome = search_catalog_with(&cat, "property details", None, 25, None);
+        assert!(outcome.low_confidence);
+        assert_eq!(outcome.total, 1, "only the description hit ranks directly");
+        assert_eq!(outcome.direct_returned, 1);
+        assert_eq!(outcome.broadened, 3);
+        assert_eq!(outcome.matches.len(), 4);
+        assert_eq!(outcome.matches[0]["name"], "homes__lookup");
+    }
+
+    #[test]
+    fn no_direct_match_returns_bounded_server_diverse_fallbacks() {
+        let mut cat = Vec::new();
+        for server in ["alpha", "beta", "gamma"] {
+            for i in 0..10 {
+                cat.push(json!({
+                    "name": format!("{server}__tool_{i}"),
+                    "description": format!("Capability {i}"),
+                    "inputSchema": {}
+                }));
+            }
+        }
+        let outcome = search_catalog_with(&cat, "astronaut nutrition", None, 25, None);
+        assert!(outcome.low_confidence);
+        assert_eq!(outcome.total, 0);
+        assert_eq!(outcome.direct_returned, 0);
+        assert_eq!(outcome.broadened, LOW_CONFIDENCE_MIN_RESULTS);
+        assert_eq!(outcome.matches.len(), LOW_CONFIDENCE_MIN_RESULTS);
+        let prefixes: std::collections::HashSet<_> = outcome
+            .matches
+            .iter()
+            .map(tool_prefix)
+            .collect();
+        assert_eq!(prefixes.len(), 3, "fallbacks should not come from one server");
+    }
+
     /// Data-driven recall measurement (not a pass/fail unit test): set
     /// STRIPE_TOOLS_JSON + STRIPE_INTENTS_JSON to fixture paths and run with
     /// `--nocapture` to print recall@k of the REAL lexical ranker over a generated
@@ -7287,6 +9178,54 @@ mod tests {
     }
 
     #[test]
+    fn search_query_bounds_are_enforced_before_ranking() {
+        assert!(validate_search_query(&"x".repeat(MAX_SEARCH_QUERY_CHARS)).is_ok());
+        assert!(validate_search_query(&"x".repeat(MAX_SEARCH_QUERY_CHARS + 1)).is_err());
+
+        let sixty_four_tokens = std::iter::repeat("x")
+            .take(MAX_SEARCH_QUERY_TOKENS)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(validate_search_query(&sixty_four_tokens).is_ok());
+        let sixty_five_tokens = format!("{sixty_four_tokens} x");
+        assert!(validate_search_query(&sixty_five_tokens).is_err());
+
+        let call = |query: &str| {
+            handle_request(
+                &search_req(query),
+                &Registry::default(),
+                &router(),
+                &catalog(),
+                true,
+                None,
+                &SearchGuard::default(),
+                &ConfirmGuard::new(),
+                None,
+                None,
+            )
+            .unwrap()
+        };
+
+        let char_limit_resp = call(&"x".repeat(MAX_SEARCH_QUERY_CHARS + 1));
+        assert_eq!(char_limit_resp["result"]["isError"], true);
+        assert!(char_limit_resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("512-character limit"));
+
+        let token_limit_resp = call(&sixty_five_tokens);
+        assert_eq!(token_limit_resp["result"]["isError"], true);
+        assert!(token_limit_resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("64-token limit"));
+        assert_eq!(
+            search_tool_def()["inputSchema"]["properties"]["query"]["maxLength"],
+            MAX_SEARCH_QUERY_CHARS
+        );
+    }
+
+    #[test]
     fn search_tool_call_returns_matches() {
         let reg = Registry::default();
         let req = json!({
@@ -7324,7 +9263,7 @@ mod tests {
     }
 
     #[test]
-    fn search_no_matches_guides_without_pushing_more_search() {
+    fn search_no_matches_explains_the_exhaustive_escape_hatch() {
         let reg = Registry::default();
         let req = json!({
             "jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -7344,9 +9283,41 @@ mod tests {
         )
         .unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("No tools matched"));
+        assert!(text.contains("No direct tools matched"));
+        assert!(text.contains("bounded fallback candidate"));
+        assert!(text.contains("empty query"));
+        assert!(text.contains("toolport_status"));
         // No phantom "Top match" when there's nothing to call.
         assert!(!text.contains("Top match:"));
+    }
+
+    #[test]
+    fn search_empty_scope_does_not_claim_fallback_candidates_exist() {
+        let reg = Registry::default();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {
+                "name": "toolport_search_tools",
+                "arguments": { "query": "charges", "server": "missing" }
+            }
+        });
+        let resp = handle_request(
+            &req,
+            &reg,
+            &router(),
+            &catalog(),
+            true,
+            None,
+            &SearchGuard::default(),
+            &ConfirmGuard::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("No tools matched"));
+        assert!(!text.contains("fallback candidate"));
+        assert!(!text.contains("inspect their descriptions"));
     }
 
     const ESCALATION_MARK: &str = "keep getting the same top tool";
@@ -7420,6 +9391,19 @@ mod tests {
             "non-search action should reset the streak"
         );
         assert!(text.contains("Top match:"));
+    }
+
+    #[test]
+    fn repeated_low_confidence_search_never_forces_a_weak_top_result() {
+        let reg = Registry::default();
+        let guard = SearchGuard::default();
+
+        for _ in 0..4 {
+            let text = search_text(&reg, &guard, "email details");
+            assert!(text.contains("Search confidence is low"));
+            assert!(!text.contains(ESCALATION_MARK));
+            assert!(!text.contains("call it now"));
+        }
     }
 
     #[test]
@@ -7528,27 +9512,35 @@ mod tests {
     #[test]
     fn discovery_mode_precedence_and_no_regression() {
         use DiscoveryMode::*;
-        // Env override wins over everything (per-client).
-        assert_eq!(resolve_mode_from(Some("grouped"), Some("lazy"), true), Grouped);
-        assert_eq!(resolve_mode_from(Some("lazy"), None, false), Lazy);
-        assert_eq!(resolve_mode_from(Some("full"), Some("grouped"), true), Full);
-        assert_eq!(resolve_mode_from(Some(" GROUPED "), None, true), Grouped);
+        // Args: (env, client_mode, registry_mode, lazy_discovery).
+        // A hand-set env override wins over everything, including the per-client override.
+        assert_eq!(resolve_mode_from(Some("grouped"), Some("lazy"), Some("lazy"), true), Grouped);
+        assert_eq!(resolve_mode_from(Some("lazy"), None, None, false), Lazy);
+        assert_eq!(resolve_mode_from(Some("full"), Some("lazy"), Some("grouped"), true), Full);
+        assert_eq!(resolve_mode_from(Some(" GROUPED "), None, None, true), Grouped);
         // Old behavior preserved: a SET-but-unrecognized/empty env is Full (was the
-        // `env == "lazy" ? lazy : not-lazy` branch), NOT a fall-through to the registry.
-        assert_eq!(resolve_mode_from(Some("typo"), Some("grouped"), true), Full);
-        assert_eq!(resolve_mode_from(Some(""), Some("grouped"), true), Full);
+        // `env == "lazy" ? lazy : not-lazy` branch), NOT a fall-through.
+        assert_eq!(resolve_mode_from(Some("typo"), None, Some("grouped"), true), Full);
+        assert_eq!(resolve_mode_from(Some(""), None, Some("grouped"), true), Full);
 
-        // No env: the registry override wins over the lazy_discovery bool.
-        assert_eq!(resolve_mode_from(None, Some("grouped"), true), Grouped);
-        assert_eq!(resolve_mode_from(None, Some("full"), true), Full);
-        assert_eq!(resolve_mode_from(None, Some("lazy"), false), Lazy);
-        // An unrecognized override is ignored, falling through to the bool.
-        assert_eq!(resolve_mode_from(None, Some("weird"), true), Lazy);
+        // No env: the PER-CLIENT override wins over the global mode and the bool.
+        assert_eq!(resolve_mode_from(None, Some("grouped"), Some("full"), true), Grouped);
+        assert_eq!(resolve_mode_from(None, Some("full"), None, true), Full);
+        assert_eq!(resolve_mode_from(None, Some("lazy"), Some("grouped"), false), Lazy);
+        // An `inherit`/empty/unrecognized per-client value falls through to the global mode.
+        assert_eq!(resolve_mode_from(None, Some("inherit"), Some("grouped"), true), Grouped);
+        assert_eq!(resolve_mode_from(None, Some("weird"), None, true), Lazy);
 
-        // BACK-COMPAT: no env, no discovery_mode override (every pre-existing registry)
-        // resolves to exactly the old lazy_discovery bool behavior.
-        assert_eq!(resolve_mode_from(None, None, true), Lazy);
-        assert_eq!(resolve_mode_from(None, None, false), Full);
+        // No env, no per-client: the global registry override wins over the bool.
+        assert_eq!(resolve_mode_from(None, None, Some("grouped"), true), Grouped);
+        assert_eq!(resolve_mode_from(None, None, Some("full"), true), Full);
+        assert_eq!(resolve_mode_from(None, None, Some("lazy"), false), Lazy);
+        // An unrecognized global override is ignored, falling through to the bool.
+        assert_eq!(resolve_mode_from(None, None, Some("weird"), true), Lazy);
+
+        // BACK-COMPAT: no env, no override anywhere resolves to exactly the old bool.
+        assert_eq!(resolve_mode_from(None, None, None, true), Lazy);
+        assert_eq!(resolve_mode_from(None, None, None, false), Full);
     }
 
     #[test]
@@ -7967,20 +9959,27 @@ mod tests {
     #[test]
     fn confirm_guard_token_is_consumed_on_use() {
         let guard = ConfirmGuard::new();
-        let token = guard.store("srv__delete".into(), json!({"id": "x"}));
+        let token = guard.store(
+            "srv__delete".into(),
+            json!({"id": "x"}),
+            Some("cursor"),
+        );
         // First take succeeds.
-        let (name, args) = guard.take(&token).unwrap();
+        let (name, args) = guard.take(&token, Some("cursor")).unwrap();
         assert_eq!(name, "srv__delete");
         assert_eq!(args["id"], "x");
         // Second take fails (token consumed).
-        assert!(guard.take(&token).is_none(), "token should be single-use");
+        assert!(
+            guard.take(&token, Some("cursor")).is_none(),
+            "token should be single-use"
+        );
     }
 
     #[test]
-    fn confirm_destructive_full_flow_does_not_loop() {
+    fn confirm_destructive_token_is_client_scoped_and_does_not_loop() {
         // The critical test: a destructive call is intercepted, then confirmed
-        // via toolport_confirm. The confirmed call must NOT be re-intercepted
-        // (which would create an infinite loop).
+        // via toolport_confirm. A different client cannot redeem or consume it,
+        // and the rightful owner's confirmed call must NOT be re-intercepted.
         let reg = registry_with_confirm();
         let confirm = ConfirmGuard::new();
         let cat = catalog_with_destructive();
@@ -8000,7 +9999,7 @@ mod tests {
             &SearchGuard::default(),
             &confirm,
             None,
-            None,
+            Some("cursor"),
         )
         .unwrap();
         let text1 = resp1["result"]["content"][0]["text"].as_str().unwrap();
@@ -8010,8 +10009,7 @@ mod tests {
         let token_start = text1.find("token: ").unwrap() + 7;
         let token = &text1[token_start..token_start + 32];
 
-        // Step 2: confirm with the token. This must fall through to normal
-        // routing — NOT re-intercepted.
+        // Step 2: a different client cannot redeem the token.
         let req2 = json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": { "name": "toolport_confirm", "arguments": { "token": token } }
@@ -8026,16 +10024,38 @@ mod tests {
             &SearchGuard::default(),
             &confirm,
             None,
-            None,
+            Some("claude"),
         )
         .unwrap();
         let text2 = resp2["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text2.contains("expired or invalid"),
+            "another client must not redeem the token: {text2}"
+        );
+
+        // Step 3: the wrong-client attempt did not consume the token, so its
+        // owner can still confirm. This falls through to normal routing and is
+        // NOT re-intercepted.
+        let resp3 = handle_request(
+            &req2,
+            &reg,
+            &router(),
+            &cat,
+            true,
+            None,
+            &SearchGuard::default(),
+            &confirm,
+            None,
+            Some("cursor"),
+        )
+        .unwrap();
+        let text3 = resp3["result"]["content"][0]["text"].as_str().unwrap();
         // The confirmed call reached the router (which doesn't have a real
         // stripe server, so it errors), but the important thing is it was NOT
         // re-intercepted.
         assert!(
-            !text2.contains("Destructive action intercepted"),
-            "confirmed call must not be re-intercepted (would loop). Got: {text2}"
+            !text3.contains("Destructive action intercepted"),
+            "confirmed call must not be re-intercepted (would loop). Got: {text3}"
         );
     }
             

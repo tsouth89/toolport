@@ -13,6 +13,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Trash2,
   X,
   XCircle,
 } from "lucide-react";
@@ -21,7 +22,9 @@ import { fmtTokens } from "@/lib/utils";
 import { toastError } from "@/lib/toast";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Input } from "@/components/ui/input";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
+  clearActivityLogs,
   exportAuditToPath,
   getAuditLog,
   getAuditStats,
@@ -303,7 +306,9 @@ function SecurityNotices({
                     <span className={`rounded px-1.5 py-0.5 font-medium ${badge.cls}`}>
                       {badge.label}
                     </span>
-                    <code className="font-mono text-foreground">{e.tool}</code>
+                    <code className="font-mono text-foreground">
+                      {e.tool || e.server || "integrity baseline"}
+                    </code>
                     {e.signatures && e.signatures.length > 0 && (
                       <span className="text-muted-foreground">
                         ({e.signatures.join(", ")})
@@ -668,7 +673,7 @@ function CallRow({ e }: { e: AuditEntry }) {
           </span>
         )}
         <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
-          {fmtMs(e.durationMs ?? null)}
+          {fmtMs(e.durationMs ?? e.heldMs ?? null)}
         </span>
         <span className="shrink-0 text-xs text-muted-foreground">
           {new Date(e.ts).toLocaleString()}
@@ -851,6 +856,12 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
   const [open, setOpen] = useState(false);
   const pct = t.flatTokens > 0 ? Math.round((t.savedTokens / t.flatTokens) * 100) : 0;
   const hit = t.returned > 0;
+  const fallbackCount = t.fallbacks ?? t.ranking?.filter((r) => r.fallback).length ?? 0;
+  const resultSummary = fallbackCount
+    ? `${t.total} direct + ${fallbackCount} fallback`
+    : hit
+      ? `${t.returned} of ${t.total}`
+      : "no match";
   return (
     <div className="rounded-md border border-border/50 text-sm">
       <div
@@ -891,7 +902,7 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
           </span>
         )}
         <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
-          {hit ? `${t.returned} of ${t.total}` : "no match"}
+          {resultSummary}
         </span>
         <span className="shrink-0 text-xs text-muted-foreground">
           {new Date(t.ts).toLocaleTimeString()}
@@ -917,11 +928,13 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
                     <span className="min-w-0 truncate text-[11px] text-muted-foreground">
                       {r.pinned
                         ? "pinned prerequisite"
-                        : r.matched.length > 0
-                          ? `matched ${r.matched.join(", ")}`
-                          : t.mode === "semantic"
-                            ? "semantic match"
-                            : "—"}
+                        : r.fallback
+                          ? "fallback candidate"
+                          : r.matched.length > 0
+                            ? `matched ${r.matched.join(", ")}`
+                            : t.mode === "semantic"
+                              ? "semantic match"
+                              : "—"}
                     </span>
                   </div>
                 ))}
@@ -1366,6 +1379,20 @@ export function ActivityView({
   // this, a first-run backend failure renders the friendly "No tool calls yet" state
   // and hides that anything is wrong.
   const [loadError, setLoadError] = useState(false);
+  // Local reload trigger: bumped after a "Clear retained activity" so the panels
+  // refetch (they'd otherwise keep showing the just-deleted rows until the parent's
+  // refreshKey next changes).
+  const [reloadTick, setReloadTick] = useState(0);
+
+  async function clearActivity() {
+    try {
+      await clearActivityLogs();
+      toast.success("Cleared retained activity");
+      setReloadTick((t) => t + 1);
+    } catch (e) {
+      toastError(`Couldn't clear activity: ${e}`);
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -1392,7 +1419,7 @@ export function ActivityView({
     return () => {
       alive = false;
     };
-  }, [refreshKey]);
+  }, [refreshKey, reloadTick]);
 
   // Export the full retained audit log. The save dialog offers CSV and JSON; the
   // chosen extension picks the format. CSV is formula-injection-safe in the backend.
@@ -1554,6 +1581,22 @@ export function ActivityView({
           <Download className="size-3.5" aria-hidden="true" />
           Export
         </button>
+        <ConfirmDialog
+          trigger={
+            <button
+              title="Delete all retained activity kept on this device"
+              className="flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              <Trash2 className="size-3.5" aria-hidden="true" />
+              Clear
+            </button>
+          }
+          title="Clear retained activity?"
+          description="Permanently deletes everything Toolport keeps on this device: the audit log, discovery search traces, live-inspection captures, and the savings tally (including its running total). Nothing is sent anywhere; each log starts fresh on the next event. This can't be undone."
+          confirmLabel="Clear activity"
+          destructive
+          onConfirm={clearActivity}
+        />
       </div>
 
       {logOpen && (

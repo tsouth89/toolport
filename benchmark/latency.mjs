@@ -184,7 +184,7 @@ async function main() {
   console.log(
     `  ${"handshake (one-time)".padEnd(28)}${handshake.toFixed(2).padStart(6)} ms`,
   );
-  console.log(row("tools/list (lazy, 3 tools)", list));
+  console.log(row("tools/list (lazy, 4 core tools)", list));
   console.log(row("toolport_search_tools", search));
   console.log(row("toolport_call_tool -> mock", gwCall));
   console.log(row("mock tool call (direct)", direct));

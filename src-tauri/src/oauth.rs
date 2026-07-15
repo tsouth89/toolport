@@ -8,7 +8,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use serde::Deserialize;
@@ -17,12 +17,20 @@ use sha2::{Digest, Sha256};
 pub struct Tokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
+    /// Unix timestamp when Toolport received this token response.
+    pub issued_at: u64,
+    /// Unix timestamp when the access token expires, when the server reports a
+    /// lifetime. `None` preserves the reactive-refresh behavior for providers
+    /// that omit `expires_in`.
+    pub expires_at: Option<u64>,
 }
 
 /// Everything needed to use and later refresh a remote server's access.
 pub struct AuthResult {
     pub access_token: String,
     pub refresh_token: Option<String>,
+    pub issued_at: u64,
+    pub expires_at: Option<u64>,
     pub token_endpoint: String,
     pub client_id: String,
 }
@@ -461,10 +469,30 @@ pub fn build_authorize_url(
 struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
-    /// Access-token lifetime in seconds, when the server reports it. Logged for
-    /// diagnostics so we can see how often a server expects re-auth.
+    /// Access-token lifetime in seconds, when the server reports it. Converted
+    /// to an absolute expiry so later processes can refresh before the deadline.
     #[serde(default)]
     expires_in: Option<u64>,
+}
+
+impl TokenResponse {
+    fn into_tokens(self, issued_at: u64) -> Tokens {
+        Tokens {
+            access_token: self.access_token,
+            refresh_token: self.refresh_token,
+            issued_at,
+            expires_at: self
+                .expires_in
+                .map(|lifetime| issued_at.saturating_add(lifetime)),
+        }
+    }
+}
+
+fn now_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Choose the `scope` to request. The input is the server's advertised
@@ -505,10 +533,7 @@ fn exchange_code(
         resp.refresh_token.is_some(),
         resp.expires_in
     ));
-    Ok(Tokens {
-        access_token: resp.access_token,
-        refresh_token: resp.refresh_token,
-    })
+    Ok(resp.into_tokens(now_epoch_seconds()))
 }
 
 /// Exchange a refresh token for a fresh access token (non-interactive). When a
@@ -540,10 +565,7 @@ pub fn refresh(
         resp.refresh_token.is_some(),
         resp.expires_in
     ));
-    Ok(Tokens {
-        access_token: resp.access_token,
-        refresh_token: resp.refresh_token,
-    })
+    Ok(resp.into_tokens(now_epoch_seconds()))
 }
 
 fn open_browser(url: &str) {
@@ -770,6 +792,8 @@ pub fn authenticate(mcp_url: &str) -> Result<AuthResult, String> {
     Ok(AuthResult {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
+        issued_at: tokens.issued_at,
+        expires_at: tokens.expires_at,
         token_endpoint: endpoints.token_endpoint,
         client_id,
     })
@@ -941,6 +965,33 @@ mod tests {
         );
         // No advertised scope -> request none.
         assert_eq!(requested_scope(None), None);
+    }
+
+    #[test]
+    fn token_response_keeps_issue_and_expiry_timestamps() {
+        let tokens = TokenResponse {
+            access_token: "access".into(),
+            refresh_token: Some("refresh".into()),
+            expires_in: Some(3_600),
+        }
+        .into_tokens(1_000);
+
+        assert_eq!(tokens.issued_at, 1_000);
+        assert_eq!(tokens.expires_at, Some(4_600));
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
+    }
+
+    #[test]
+    fn token_response_without_lifetime_keeps_unknown_expiry() {
+        let tokens = TokenResponse {
+            access_token: "access".into(),
+            refresh_token: None,
+            expires_in: None,
+        }
+        .into_tokens(1_000);
+
+        assert_eq!(tokens.issued_at, 1_000);
+        assert_eq!(tokens.expires_at, None);
     }
 
     #[test]

@@ -131,7 +131,8 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       validated address set is enforced at connect time (whole-set refusal), closing the
       resolve-once/connect-later window.
 - [x] Worker-per-request HTTP loop **SHIPPED (#99)** — a slow downstream / held call no
-      longer blocks other callers. (A per-request read timeout for slowloris is still open.)
+      longer blocks other callers. The public HTTP ingress now also enforces absolute
+      10-second header and 30-second body read deadlines before routing.
 
 ### New-user UX (first 10 minutes; scaffolding is strong, these are the sharp edges)
 
@@ -223,10 +224,10 @@ The 2026-07-01 block above supersedes the ordering; these remain the detailed ba
       hiding them. Optionally a `search_tools_deep` meta-tool that returns more candidates +
       full descriptions. No mandatory local model — the client model IS the reasoning layer.
       Ties into the open "per-candidate lexical+semantic scores" search-trace follow-up. (M)
-      **Partial:** the hybrid lexical+semantic ranker (a) shipped (`search_catalog_with`
-      scores every doc, `semantic_rerank` blends cosine with lexical fallback); still
-      open: (b) broadening the candidate set on low-confidence scores and the
-      `search_tools_deep` meta-tool.
+      **Shipped:** the hybrid lexical+semantic ranker scores every doc, and SOU-161 adds a
+      normalized confidence signal plus bounded, server-diverse fallback candidates for weak
+      and zero-match searches. Exact/high-confidence searches stay compact. A separate fifth
+      meta-tool remains intentionally deferred unless recall benchmarks prove it necessary.
 - [ ] **Per-client discovery mode + raw/direct passthrough.** Also from MajMin5: clients that
       already do their own tool-gating/deferral (Claude Desktop, LibreChat, and Claude Code's
       tool-search) pay a wasteful double hop when forced through our meta-tools (load meta-tools
@@ -260,9 +261,9 @@ background sync so policy reaches every member; deployed server-side).
 
 **Still open from the audit (not yet built):**
 
-- [ ] **Slowloris read timeout on the HTTP bridge** (tracked) — needs a socket read
-      deadline `tiny_http` doesn't expose; deferred rather than shipped as a fragile
-      threaded-read hack. Low risk (loopback bind + bearer + 4MB + inflight caps).
+- [x] **Slowloris read timeout on the HTTP bridge:** a bounded ingress adapter enforces
+      absolute header/body deadlines before handing complete requests to `tiny_http`,
+      with a 64-connection cap on incomplete reads and direct 408 responses.
 - [ ] **Persist OAuth token expiry.** `authenticate_oauth` parses `expires_in` then drops
       it (`oauth.rs`), so no "re-auth soon" UX is possible. Store issue/expiry ts; then a
       subtle near/past-expiry hint on the server row (probe stays source of truth). (M)
@@ -279,12 +280,11 @@ background sync so policy reaches every member; deployed server-side).
       they flag "couldn't read / may be stale" instead of rendering as empty.
 - [ ] **Client-import preview**: `handleImport` bulk-adds every importable server with only
       a count toast; reuse the share-link `preview_import`/`ImportItem` review flow. (S-M)
-- [ ] **Recall escape hatch** for lazy discovery: a `list_server_tools`/`search_tools_deep`
-      meta-tool returning more candidates + full descriptions when a search misses, and a
-      "no match" lead that names the empty-query-with-server escape. (M, extends hybrid search)
-      **Partial:** the empty-query-with-server escape (list all of a server's tools) exists;
-      still open: the dedicated `list_server_tools`/`search_tools_deep` meta-tool that
-      returns more candidates + full descriptions on a miss.
+- [x] **Recall escape hatch for lazy discovery (SOU-161).** Weak or zero-match searches now
+      preserve ranked results and add a bounded, server-diverse recovery menu. The response
+      explicitly names the existing empty-query-with-server exhaustive listing. This stays
+      inside `toolport_search_tools`, preserving the four-tool default surface; a dedicated
+      fifth meta-tool is deferred unless recall benchmarks show it is needed.
 - [ ] **Integrity-file cross-process lock.** `tool-pins.json` / `tool-quarantine.json` are
       atomic-write but unlocked; two gateways detecting drift at once can clobber each
       other's quarantine set (a lost entry un-blocks a tool). Reload-under-lock or centralize
@@ -314,8 +314,8 @@ flips every weakness:
 
 - **~90% fewer tokens.** In lazy-discovery mode the gateway advertises 4 meta-tools
   instead of every server's full tool list, so the agent's context stays flat no
-  matter how many servers you connect. Measured: 97% less tool overhead per request
-  (see [BENCHMARK.md](../BENCHMARK.md)).
+  matter how many servers you connect. Measured: 99.5% less tool-definition overhead
+  per request on a 415-tool catalog (see [BENCHMARK.md](../BENCHMARK.md)).
 - **Hot toggle, no restart.** Enable/disable a server, the gateway re-emits its
   tool list via the MCP `notifications/tools/list_changed`; supporting clients
   update live. The client's own config never changed, so nothing reloads.
@@ -405,7 +405,7 @@ Phase 2 - Client integration
 
 Phase 3 - Scaling & UX
 
-- [x] Lazy discovery: `CONDUIT_DISCOVERY=lazy` exposes 4 meta-tools (search/call)
+- [x] Lazy discovery: `CONDUIT_DISCOVERY=lazy` exposes 4 core meta-tools (status/search/call/fetch)
 - [x] Per-agent scoping: `CONDUIT_PROFILE` + per-client profile picker, per-profile cache
 - [x] Catalog: curated popular set + live official MCP Registry search, type-ahead
 - [x] Catalog as a left-nav destination; status grouping; non-blocking UI commands

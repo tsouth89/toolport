@@ -58,6 +58,9 @@ export interface AuditEntry {
   ok: boolean;
   /** How long the call took, ms. Absent for records logged before timing. */
   durationMs?: number;
+  /** How long a gated call waited for a human approval decision, ms. Present on
+   * `kind:"approval"` records instead of durationMs (which is downstream exec time). */
+  heldMs?: number;
   /** Short failure message for a failed call (never args or result data). */
   error?: string;
   /** A destructive call held for confirmation (not a success and not an error). */
@@ -92,6 +95,8 @@ export interface SearchTrace {
   names: string[];
   returned: number;
   total: number;
+  /** Full count of appended recovery candidates. Absent on older traces. */
+  fallbacks?: number;
   /** Tool-definition tokens the returned schemas cost this turn (≈). */
   returnedTokens: number;
   /** Tool-definition tokens advertising the whole (scoped) catalog would cost (≈). */
@@ -117,6 +122,8 @@ export interface SearchTraceRank {
   matched: string[];
   /** A pinned prerequisite prepended ahead of the ranked matches, not a query hit. */
   pinned: boolean;
+  /** A zero-score recovery candidate appended because the direct search was weak. */
+  fallback?: boolean;
 }
 
 /** One exposed tool's verifiable identity: the model-visible alias joined back to its
@@ -404,6 +411,12 @@ export interface Registry {
   quarantineOnDrift?: boolean;
   /** Global switch: expose 4 meta-tools instead of the full catalog. */
   lazyDiscovery?: boolean;
+  /** Global discovery mode ("full" | "lazy" | "grouped"). Takes precedence over
+   * `lazyDiscovery`; absent = fall back to the `lazyDiscovery` bool. */
+  discoveryMode?: string | null;
+  /** Per-client discovery-mode override, keyed by client id (e.g. "cursor" ->
+   * "grouped"). Absent = that client inherits the global mode. */
+  clientDiscovery?: Record<string, string>;
   /** Opt-in: let an agent enable/disable servers via the gateway's control tools. */
   allowAgentControl?: boolean;
   /** Connection to a Toolport Teams server, if joined. Token lives in the keychain. */
@@ -455,17 +468,24 @@ export function isEnabled(registry: Registry, serverId: string): boolean {
 /** Whether a registry entry is Toolport's own gateway. It's infrastructure, not a
  * proxied server, so it shouldn't appear as a manageable server in the UI.
  * Mirrors `is_gateway_server` in the Rust backend. */
-export function isGatewayServer(server: ServerEntry): boolean {
-  const name = server.name.toLowerCase();
-  const command = server.command?.toLowerCase() ?? "";
+function isGatewayIdentity(id: string, name: string, command: string | null): boolean {
+  const normalizedId = id.toLowerCase();
+  const normalizedName = name.toLowerCase();
+  const normalizedCommand = command?.toLowerCase() ?? "";
   return (
-    server.id === "conduit" ||
-    name === "conduit" ||
+    normalizedId === "conduit" ||
+    normalizedId === "toolport" ||
+    normalizedName === "conduit" ||
+    normalizedName === "toolport" ||
     // Current binary name and the pre-rename one, so an entry written by an older
     // Toolport is still recognized as the gateway.
-    command.includes("toolport-gateway") ||
-    command.includes("conduit-gateway")
+    normalizedCommand.includes("toolport-gateway") ||
+    normalizedCommand.includes("conduit-gateway")
   );
+}
+
+export function isGatewayServer(server: ServerEntry): boolean {
+  return isGatewayIdentity(server.id, server.name, server.command);
 }
 
 /** Servers a client has (config + plugins) that Toolport doesn't manage yet.
@@ -477,6 +497,8 @@ export function importableServers(
 ): McpServer[] {
   const have = new Set((registry?.servers ?? []).map((s) => s.name.toLowerCase()));
   return [...client.servers, ...client.pluginServers].filter(
-    (s) => s.name.toLowerCase() !== "conduit" && !have.has(s.name.toLowerCase()),
+    (server) =>
+      !isGatewayIdentity(server.name, server.name, server.command) &&
+      !have.has(server.name.toLowerCase()),
   );
 }

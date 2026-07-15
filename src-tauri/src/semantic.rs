@@ -120,14 +120,15 @@ fn embed_batch(cfg: &SemanticConfig, inputs: &[String]) -> Option<Vec<Vec<f32>>>
     if inputs.is_empty() {
         return Some(Vec::new());
     }
-    // A bounded agent, so a hung/slow embeddings endpoint (a wedged local Ollama/LM
-    // Studio, a black-holed cloud host) can't stall the interactive tool search
-    // indefinitely: on timeout `send_json` errors and the caller falls back to the
-    // pure-lexical ranker. Without this, the bare `ureq::post` inherits ureq's default
-    // of no read timeout and a hang here blocks the whole `search_tools` response.
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(10))
-        .build();
+    // Reuse the gateway's connect-time SSRF resolver so DNS rebinding or a redirect
+    // cannot send the tool catalog (or CONDUIT_EMBED_KEY) to cloud metadata. Private
+    // and loopback addresses remain allowed because local Ollama/LM Studio endpoints
+    // are a supported configuration. Keep the short timeout so any failure falls back
+    // promptly to the pure-lexical ranker.
+    let agent = crate::downstream::guarded_agent_with_timeout(
+        false,
+        std::time::Duration::from_secs(10),
+    );
     let mut req = agent.post(&cfg.endpoint).set("Content-Type", "application/json");
     if let Ok(key) = std::env::var("CONDUIT_EMBED_KEY") {
         if !key.is_empty() {
@@ -206,6 +207,15 @@ pub fn embed_tools(cfg: &SemanticConfig, tools: &[&Value]) -> HashMap<String, Ve
 mod tests {
     use super::*;
 
+    fn embedding_config(endpoint: String) -> SemanticConfig {
+        SemanticConfig {
+            enabled: true,
+            endpoint,
+            model: "test-model".into(),
+            blend: 0.5,
+        }
+    }
+
     #[test]
     fn cosine_basic() {
         assert!((cosine(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
@@ -245,5 +255,60 @@ mod tests {
         assert!(!SemanticConfig { enabled: false, ..base.clone() }.is_active());
         assert!(!SemanticConfig { endpoint: "".into(), ..base.clone() }.is_active());
         assert!(!SemanticConfig { model: "".into(), ..base }.is_active());
+    }
+
+    #[test]
+    fn embedding_agent_allows_local_endpoints() {
+        let listener = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = listener.server_addr().to_ip().unwrap().port();
+        let endpoint = format!("http://127.0.0.1:{port}/v1/embeddings");
+        let server = std::thread::spawn(move || {
+            let request = listener.recv().unwrap();
+            let body = r#"{"data":[{"embedding":[1.0,2.0]}]}"#;
+            let content_type = tiny_http::Header::from_bytes(
+                &b"Content-Type"[..],
+                &b"application/json"[..],
+            )
+            .unwrap();
+            request
+                .respond(tiny_http::Response::from_string(body).with_header(content_type))
+                .unwrap();
+        });
+
+        assert_eq!(
+            embed_query(&embedding_config(endpoint), "hello"),
+            Some(vec![1.0, 2.0])
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn embedding_agent_does_not_follow_redirects() {
+        use std::net::TcpListener;
+
+        let redirect_target = TcpListener::bind("127.0.0.1:0").unwrap();
+        redirect_target.set_nonblocking(true).unwrap();
+        let target_url = format!("http://{}/stolen", redirect_target.local_addr().unwrap());
+
+        let redirector = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = redirector.server_addr().to_ip().unwrap().port();
+        let endpoint = format!("http://127.0.0.1:{port}/v1/embeddings");
+        let server = std::thread::spawn(move || {
+            let request = redirector.recv().unwrap();
+            let location = tiny_http::Header::from_bytes(&b"Location"[..], target_url.as_bytes())
+                .unwrap();
+            request
+                .respond(
+                    tiny_http::Response::empty(302).with_header(location),
+                )
+                .unwrap();
+        });
+
+        assert!(embed_query(&embedding_config(endpoint), "hello").is_none());
+        server.join().unwrap();
+        assert!(matches!(
+            redirect_target.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
     }
 }

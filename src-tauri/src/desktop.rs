@@ -490,14 +490,15 @@ async fn import_servers(
     let detected = tauri::async_runtime::spawn_blocking(clients::detect_clients)
         .await
         .map_err(|e| e.to_string())?;
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let selected: Option<std::collections::HashSet<String>> =
         selected.map(|keys| keys.into_iter().collect());
-    for server in selected_servers_to_import(&detected, &reg, selected.as_ref()) {
-        reg.add_server(server);
-    }
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        for server in selected_servers_to_import(&detected, reg, selected.as_ref()) {
+            reg.add_server(server);
+        }
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// Parse a pasted config snippet and return the detected server(s) with
@@ -517,14 +518,13 @@ fn parse_server_snippet(text: String) -> Result<Vec<clients::ParsedSnippetServer
 
 #[tauri::command]
 fn add_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.add_server(entry);
-    registry::save(&reg)?;
-    // add_server appends, so the saved entry (with its assigned id) is the last one.
-    if let Some(saved) = reg.servers.last() {
+    let (reg, id) = write_registry(state.inner(), |reg| Ok(reg.add_server(entry)))?;
+    // Warm the launcher for the entry we just added, found by its assigned id (a concurrent
+    // add under the lock could otherwise make `last` a different server).
+    if let Some(saved) = reg.servers.iter().find(|s| s.id == id) {
         prewarm_launcher(saved);
     }
-    Ok(reg.clone())
+    Ok(reg)
 }
 
 /// Fire-and-forget spawn of a just-added download-then-run server (npx, uvx, ...)
@@ -564,18 +564,14 @@ fn prewarm_launcher(server: &ServerEntry) {
 
 #[tauri::command]
 fn update_server(state: State<RegistryState>, entry: ServerEntry) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.update_server(entry)?;
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| reg.update_server(entry))?;
+    Ok(reg)
 }
 
 #[tauri::command]
 fn remove_server(state: State<RegistryState>, id: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.remove_server(&id)?;
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| reg.remove_server(&id))?;
+    Ok(reg)
 }
 
 #[tauri::command]
@@ -585,10 +581,10 @@ fn set_server_enabled(
     server_id: String,
     enabled: bool,
 ) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_server_enabled(&profile_id, &server_id, enabled)?;
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_server_enabled(&profile_id, &server_id, enabled)
+    })?;
+    Ok(reg)
 }
 
 #[tauri::command]
@@ -597,34 +593,29 @@ fn set_all_enabled(
     profile_id: String,
     enabled: bool,
 ) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_all_enabled(&profile_id, enabled)?;
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| reg.set_all_enabled(&profile_id, enabled))?;
+    Ok(reg)
 }
 
 #[tauri::command]
 fn create_profile(state: State<RegistryState>, name: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.add_profile(&name);
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.add_profile(&name);
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 #[tauri::command]
 fn delete_profile(state: State<RegistryState>, id: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.remove_profile(&id)?;
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| reg.remove_profile(&id))?;
+    Ok(reg)
 }
 
 #[tauri::command]
 fn set_active_profile(state: State<RegistryState>, id: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_active_profile(&id)?;
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| reg.set_active_profile(&id))?;
+    Ok(reg)
 }
 
 /// Write a server set into a client's config (backs up first). Not yet called by
@@ -650,13 +641,21 @@ fn install_gateway(
     // and re-apply this client's effective scope without re-reading the config.
     // A concrete profile is stored by name; "no profile" is recorded as an
     // explicit-unscoped marker (not a removal) so a running gateway drops its old
-    // scope live instead of falling back to its boot-time CONDUIT_PROFILE.
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    match profile.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-        Some(p) => reg.set_client_scope(&client_id, Some(p)),
-        None => reg.set_client_unscoped(&client_id),
-    }
-    registry::save(&reg)?;
+    // scope live instead of falling back to its boot-time CONDUIT_PROFILE. The client
+    // config was already written above (outside the lock); only the registry record
+    // goes through the locked load-modify-save.
+    let scope: Option<String> = profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string);
+    write_registry(state.inner(), |reg| {
+        match scope.as_deref() {
+            Some(p) => reg.set_client_scope(&client_id, Some(p)),
+            None => reg.set_client_unscoped(&client_id),
+        }
+        Ok(())
+    })?;
     Ok(outcome)
 }
 
@@ -667,9 +666,10 @@ fn uninstall_gateway(
     client_id: String,
 ) -> Result<clients::WriteOutcome, String> {
     let outcome = clients::uninstall_gateway(&client_id)?;
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_client_scope(&client_id, None);
-    registry::save(&reg)?;
+    write_registry(state.inner(), |reg| {
+        reg.set_client_scope(&client_id, None);
+        Ok(())
+    })?;
     Ok(outcome)
 }
 
@@ -700,16 +700,17 @@ fn add_http_client(
 ) -> Result<AddedHttpClient, String> {
     let token = random_hex()?;
     let id = random_hex()?;
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.http_clients.push(registry::HttpClient {
-        id,
-        label: label.trim().to_string(),
-        token_sha256: registry::sha256_hex(&token),
-        profile: profile.unwrap_or_default().trim().to_string(),
-    });
-    registry::save(&reg)?;
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.http_clients.push(registry::HttpClient {
+            id,
+            label: label.trim().to_string(),
+            token_sha256: registry::sha256_hex(&token),
+            profile: profile.unwrap_or_default().trim().to_string(),
+        });
+        Ok(())
+    })?;
     Ok(AddedHttpClient {
-        registry: reg.clone(),
+        registry: reg,
         token,
     })
 }
@@ -717,10 +718,11 @@ fn add_http_client(
 /// Remove a registered HTTP-bridge client (revokes its token).
 #[tauri::command]
 fn remove_http_client(state: State<RegistryState>, id: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.http_clients.retain(|c| c.id != id);
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.http_clients.retain(|c| c.id != id);
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 #[derive(serde::Serialize)]
@@ -753,8 +755,8 @@ async fn migrate_client(
         .find(|c| c.id == client_id)
         .ok_or_else(|| format!("Unknown client '{client_id}'"))?;
 
-    let (imported, moved) = {
-        let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Import the client's servers under the lock (a fresh load-modify-save).
+    let (_, (imported, moved)) = write_registry(state.inner(), |reg| {
         let mut imported = 0;
         let mut moved = Vec::new();
         for server in &client.servers {
@@ -771,25 +773,28 @@ async fn migrate_client(
                 imported += 1;
             }
         }
-        registry::save(&reg)?;
-        (imported, moved)
-    };
+        Ok((imported, moved))
+    })?;
 
-    // Rewrite the client to only the gateway (backs up first).
+    // Rewrite the client to only the gateway (backs up first). External to the registry, so
+    // it stays outside the lock; the scope record below is a separate locked write.
     clients::migrate_to_gateway(&client_id, profile.as_deref())?;
 
     // Record the scope now that the client config was rewritten to the gateway.
     // "No profile" becomes an explicit-unscoped marker (not a removal) so a live
     // re-scope to "all servers" applies without restarting the client.
-    let registry = {
-        let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        match profile.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+    let scope: Option<String> = profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string);
+    let (registry, _) = write_registry(state.inner(), |reg| {
+        match scope.as_deref() {
             Some(p) => reg.set_client_scope(&client_id, Some(p)),
             None => reg.set_client_unscoped(&client_id),
         }
-        registry::save(&reg)?;
-        reg.clone()
-    };
+        Ok(())
+    })?;
 
     Ok(MigrateResult {
         registry,
@@ -807,24 +812,27 @@ fn set_secret(
     key: String,
     value: String,
 ) -> Result<Registry, String> {
+    // Keychain write first (external to the registry, so outside the lock), then record
+    // that the secret exists + bump the generation on the FRESH value under the lock.
     secrets::set_secret(&server_id, &key, &value)?;
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(server) = reg.servers.iter_mut().find(|s| s.id == server_id) {
-        match server.env.iter_mut().find(|e| e.key == key) {
-            Some(ev) => {
-                ev.secret = true;
-                ev.value = None;
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        if let Some(server) = reg.servers.iter_mut().find(|s| s.id == server_id) {
+            match server.env.iter_mut().find(|e| e.key == key) {
+                Some(ev) => {
+                    ev.secret = true;
+                    ev.value = None;
+                }
+                None => server.env.push(registry::EnvVar {
+                    key,
+                    value: None,
+                    secret: true,
+                }),
             }
-            None => server.env.push(registry::EnvVar {
-                key,
-                value: None,
-                secret: true,
-            }),
         }
-    }
-    reg.secrets_generation = reg.secrets_generation.wrapping_add(1);
-    registry::save(&reg)?;
-    Ok(reg.clone())
+        reg.secrets_generation = reg.secrets_generation.wrapping_add(1);
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// Remove a secret from the keychain and drop the env var from the server entry.
@@ -835,13 +843,14 @@ fn delete_secret(
     key: String,
 ) -> Result<Registry, String> {
     secrets::delete_secret(&server_id, &key)?;
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(server) = reg.servers.iter_mut().find(|s| s.id == server_id) {
-        server.env.retain(|e| e.key != key);
-    }
-    reg.secrets_generation = reg.secrets_generation.wrapping_add(1);
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        if let Some(server) = reg.servers.iter_mut().find(|s| s.id == server_id) {
+            server.env.retain(|e| e.key != key);
+        }
+        reg.secrets_generation = reg.secrets_generation.wrapping_add(1);
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// The most recent tool-call audit entries (newest first).
@@ -910,6 +919,21 @@ fn registry_summary(reg: &Registry) -> String {
     let active = reg.active_profile_id();
     let _ = writeln!(out, "\nsettings:");
     let _ = writeln!(out, "  lazy discovery: {}", reg.lazy_discovery);
+    let global_mode = reg
+        .discovery_mode
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| if reg.lazy_discovery { "lazy".into() } else { "full".into() });
+    let _ = writeln!(out, "  discovery mode: {global_mode} (global)");
+    if !reg.client_discovery.is_empty() {
+        let mut overrides: Vec<String> = reg
+            .client_discovery
+            .iter()
+            .map(|(id, mode)| format!("{id}={mode}"))
+            .collect();
+        overrides.sort();
+        let _ = writeln!(out, "  per-client discovery: {}", overrides.join(", "));
+    }
     let _ = writeln!(out, "  deny destructive: {}", reg.deny_destructive);
     let _ = writeln!(out, "  active profile: {active}");
 
@@ -1181,10 +1205,10 @@ fn set_tool_enabled(
     tool: String,
     enabled: bool,
 ) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_tool_enabled(&server_id, &tool, enabled)?;
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_tool_enabled(&server_id, &tool, enabled)
+    })?;
+    Ok(reg)
 }
 
 /// Pin (or unpin) a tool as a lazy-discovery prerequisite: search always surfaces a
@@ -1197,20 +1221,22 @@ fn set_tool_pinned(
     tool: String,
     pinned: bool,
 ) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_tool_pinned(&server_id, &tool, pinned);
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_tool_pinned(&server_id, &tool, pinned);
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// Flip the global destructive-tool deny switch. When on, the gateway hides and
 /// blocks every tool annotated `destructiveHint: true` across all servers.
 #[tauri::command]
 fn set_deny_destructive(state: State<RegistryState>, deny: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_deny_destructive(deny);
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_deny_destructive(deny);
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// Toggle per-call confirmation for destructive tools. When enabled, the gateway
@@ -1219,10 +1245,11 @@ fn set_deny_destructive(state: State<RegistryState>, deny: bool) -> Result<Regis
 /// `deny_destructive` (confirm turns deny off).
 #[tauri::command]
 fn set_confirm_destructive(state: State<RegistryState>, confirm: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_confirm_destructive(confirm);
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_confirm_destructive(confirm);
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// Toggle human-in-the-loop approval. When on, a gated tool call (destructive, or from an
@@ -1230,10 +1257,11 @@ fn set_confirm_destructive(state: State<RegistryState>, confirm: bool) -> Result
 /// via the approval broker. Distinct from confirm-destructive (which the agent re-confirms).
 #[tauri::command]
 fn set_human_approval(state: State<RegistryState>, on: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_human_approval(on);
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_human_approval(on);
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// The tool calls currently held awaiting a human decision (for the Pending Approvals UI).
@@ -1268,9 +1296,10 @@ fn decide_approval(
             let key = approval::fingerprint_allow_key(&view.server, &view.tool, fp);
             broker.add_session_allow(key.clone());
             if scope == "always" {
-                let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                reg.allow_tool(key);
-                registry::save(&reg)?;
+                write_registry(state.inner(), |reg| {
+                    reg.allow_tool(key);
+                    Ok(())
+                })?;
             }
         }
     }
@@ -1334,11 +1363,10 @@ fn revoke_allowed_tool(
     broker: State<approval_broker::ApprovalBroker>,
     key: String,
 ) -> Result<(), String> {
-    {
-        let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    write_registry(state.inner(), |reg| {
         reg.revoke_tool(&key);
-        registry::save(&reg)?;
-    }
+        Ok(())
+    })?;
     broker.remove_session_allow(&key);
     Ok(())
 }
@@ -1357,14 +1385,15 @@ fn set_tool_override(
     description: Option<String>,
 ) -> Result<Registry, String> {
     let norm = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_tool_override(
-        server,
-        tool,
-        registry::ToolOverride { name: norm(name), description: norm(description) },
-    );
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_tool_override(
+            server,
+            tool,
+            registry::ToolOverride { name: norm(name), description: norm(description) },
+        );
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// Remove a tool's exposure override, restoring the server's own name and description.
@@ -1374,10 +1403,11 @@ fn clear_tool_override(
     server: String,
     tool: String,
 ) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.clear_tool_override(&server, &tool);
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.clear_tool_override(&server, &tool);
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// Toggle live request/response inspection. When enabled, the gateway captures each
@@ -1387,10 +1417,11 @@ fn clear_tool_override(
 /// it off in the UI should also clear the ring (see `clear_inspect_log`).
 #[tauri::command]
 fn set_live_inspect(state: State<RegistryState>, enabled: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_live_inspect(enabled);
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_live_inspect(enabled);
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// The most recent live-inspection captures (newest first): each tool call's args and
@@ -1401,11 +1432,11 @@ fn get_inspect_log(limit: usize) -> Vec<serde_json::Value> {
 }
 
 /// Clear the live-inspection ring (delete `inspect.jsonl`), so no captured args/results
-/// linger. Called when the user turns live inspection off.
+/// linger. Called when the user turns live inspection off. Surfaces a real removal
+/// failure so the UI never confirms a delete that did not happen.
 #[tauri::command]
 fn clear_inspect_log() -> Result<(), String> {
-    inspect::clear();
-    Ok(())
+    inspect::try_clear().map_err(|e| format!("Couldn't clear the inspector log: {e}"))
 }
 
 /// Recent lazy-discovery search traces (newest first): what the model searched for,
@@ -1420,8 +1451,37 @@ fn get_search_traces(limit: usize) -> Vec<serde_json::Value> {
 /// Clear the search-trace log (delete `search-trace.jsonl`).
 #[tauri::command]
 fn clear_search_traces() -> Result<(), String> {
-    searchtrace::clear();
-    Ok(())
+    searchtrace::try_clear().map_err(|e| format!("Couldn't clear the search traces: {e}"))
+}
+
+/// Clear all retained local activity in one confirmed action: the audit log, discovery
+/// search traces, live-inspection captures, and the savings tally (including its
+/// carry-forward total). Each is a local, irreversible delete; the logs re-create
+/// themselves on the next event. Backs the Activity view's "Clear retained activity".
+///
+/// Attempts every log even if one fails (so a single locked file doesn't leave the
+/// rest un-cleared), then reports exactly which could not be removed. Never confirms a
+/// delete that did not happen: a leftover sensitive log must not read as "cleared".
+#[tauri::command]
+fn clear_activity_logs() -> Result<(), String> {
+    let mut failed = Vec::new();
+    if audit::try_clear().is_err() {
+        failed.push("audit log");
+    }
+    if searchtrace::try_clear().is_err() {
+        failed.push("search traces");
+    }
+    if inspect::try_clear().is_err() {
+        failed.push("inspector captures");
+    }
+    if savings::try_clear().is_err() {
+        failed.push("savings");
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Couldn't clear: {}", failed.join(", ")))
+    }
 }
 
 /// One exposed tool's verifiable identity: the model-visible alias joined back to its
@@ -1534,10 +1594,11 @@ fn list_tool_identities(state: State<RegistryState>) -> Vec<ToolIdentity> {
 /// that drifts from its pinned baseline, until the user re-approves it.
 #[tauri::command]
 fn set_quarantine_on_drift(state: State<RegistryState>, on: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.quarantine_on_drift = on;
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.quarantine_on_drift = on;
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// Tools currently quarantined (blocked after a high-risk drift), across all profiles.
@@ -1560,8 +1621,11 @@ fn release_quarantine(
         Some(profile.as_str())
     };
     integrity::release(prof, &tool);
-    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    registry::save(&reg)?;
+    // The quarantine release lives in the separate tool-pins file; the former blind re-save
+    // here was only a gateway mtime-nudge (which the no-op guard usually swallowed anyway)
+    // and it could revert a concurrent gateway/team write (SOU-23). Refresh the cache
+    // instead of blind-writing the possibly-stale snapshot.
+    reload_into_state(state.inner())?;
     Ok(())
 }
 
@@ -1570,10 +1634,11 @@ fn release_quarantine(
 /// Clients pick it up the next time they (re)spawn the gateway.
 #[tauri::command]
 fn set_lazy_discovery(state: State<RegistryState>, lazy: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.set_lazy_discovery(lazy);
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_lazy_discovery(lazy);
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// Opt into agent control: lets an agent enable or disable servers through the
@@ -1581,18 +1646,55 @@ fn set_lazy_discovery(state: State<RegistryState>, lazy: bool) -> Result<Registr
 /// default; the destructive-tool safety switch stays user-only regardless of this.
 #[tauri::command]
 fn set_allow_agent_control(state: State<RegistryState>, allow: bool) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.allow_agent_control = allow;
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.allow_agent_control = allow;
+        Ok(())
+    })?;
+    Ok(reg)
+}
+
+/// Set (or clear) a client's discovery-mode override. `mode` is `"full" | "lazy" |
+/// "grouped"`; `None` (or "inherit"/unknown) clears it so the client inherits the global
+/// mode. The gateway resolves this live via `CONDUIT_CLIENT_ID`, so the change applies
+/// without reinstalling the client.
+#[tauri::command]
+fn set_client_discovery(
+    state: State<RegistryState>,
+    client_id: String,
+    mode: Option<String>,
+) -> Result<Registry, String> {
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_client_discovery(&client_id, mode.as_deref());
+        Ok(())
+    })?;
+    Ok(reg)
 }
 
 /// Flush the in-memory registry to disk so the teams module (which reads the registry
 /// file) operates on the current state, then refresh the in-memory state from disk
 /// after the team operation merged into it.
-fn flush_to_disk(state: &RegistryState) -> Result<(), String> {
-    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    registry::save(&reg)
+/// Load-modify-save the registry under the cross-process lock (mutating a FRESH on-disk
+/// copy), then sync the in-memory cache to the persisted result. The in-process mutex is
+/// held across the whole op so app threads serialize on it before the file lock; together
+/// with `registry::update` this stops any app command from reverting a concurrent gateway
+/// or team-sync write (SOU-23). Returns the new registry and `f`'s value.
+fn write_registry<T>(
+    state: &RegistryState,
+    f: impl FnOnce(&mut Registry) -> Result<T, String>,
+) -> Result<(Registry, T), String> {
+    let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (reg, out) = registry::update(f)?;
+    *guard = reg.clone();
+    Ok((reg, out))
+}
+
+/// Refresh the in-memory cache from disk. Formerly `flush_to_disk`, which PUSHED the
+/// in-memory snapshot to disk; that blind write could revert a concurrent gateway/team
+/// change (SOU-23), and it is now unnecessary because every mutation persists immediately
+/// via `write_registry`, so the in-memory copy never holds unsaved changes. Pulling instead
+/// keeps the cache current for the team flows without ever clobbering the file.
+fn refresh_from_disk(state: &RegistryState) -> Result<(), String> {
+    reload_into_state(state).map(|_| ())
 }
 
 fn reload_into_state(state: &RegistryState) -> Result<Registry, String> {
@@ -1626,7 +1728,7 @@ async fn team_connect(
     invite_code: String,
     member_name: Option<String>,
 ) -> Result<TeamConnectResult, String> {
-    flush_to_disk(state.inner())?;
+    refresh_from_disk(state.inner())?;
     // Same reason as team_sync: a synchronous command runs on Tauri's main (UI) thread, and
     // teams::connect does a blocking network join + first config pull. Run it off-thread so
     // clicking "Connect" to join a team doesn't freeze the whole app until the join returns.
@@ -1698,7 +1800,7 @@ async fn team_join_poll(
 /// Running the blocking pull on a worker thread keeps the event loop free.
 #[tauri::command]
 async fn team_sync(app: tauri::AppHandle, state: State<'_, RegistryState>) -> Result<Registry, String> {
-    flush_to_disk(state.inner())?;
+    refresh_from_disk(state.inner())?;
     let result = tauri::async_runtime::spawn_blocking(teams::sync_now)
         .await
         .map_err(|e| format!("sync task join failed: {e}"))??;
@@ -1716,7 +1818,7 @@ async fn team_sync_wait(
     state: State<'_, RegistryState>,
     wait_secs: u64,
 ) -> Result<Registry, String> {
-    flush_to_disk(state.inner())?;
+    refresh_from_disk(state.inner())?;
     let wait = wait_secs.min(30);
     let result = tauri::async_runtime::spawn_blocking(move || teams::sync_wait(wait))
         .await
@@ -1766,20 +1868,35 @@ fn emit_team_review(app: &tauri::AppHandle, outcome: teams::MergeOutcome) {
 /// Leave the team: remove its merged servers, clear the connection and the token.
 #[tauri::command]
 fn team_disconnect(state: State<RegistryState>) -> Result<Registry, String> {
-    flush_to_disk(state.inner())?;
+    refresh_from_disk(state.inner())?;
     teams::disconnect()?;
     let fresh = reload_into_state(state.inner())?;
     nudge_gateway(state.inner());
     Ok(fresh)
 }
 
-/// Admin: push the current local server set as the team's shared config (own servers
-/// only, secret values never sent). Returns the new config version.
+/// Admin: replace only the team's shared server list with the current local set (own servers
+/// only, secret values never sent). Remote instructions and policy fields are preserved, and
+/// an optimistic-concurrency conflict is returned rather than overwriting another admin.
 #[tauri::command]
-async fn team_push(state: State<'_, RegistryState>) -> Result<i64, String> {
-    flush_to_disk(state.inner())?;
-    // push_current does a blocking PUT to the team server; keep it off the main thread.
-    tauri::async_runtime::spawn_blocking(teams::push_current)
+async fn team_push_preview(state: State<'_, RegistryState>) -> Result<teams::PushPreview, String> {
+    refresh_from_disk(state.inner())?;
+    tauri::async_runtime::spawn_blocking(teams::preview_push_current)
+        .await
+        .map_err(|e| format!("push preview task join failed: {e}"))?
+}
+
+#[tauri::command]
+async fn team_push(
+    state: State<'_, RegistryState>,
+    base_version: i64,
+    local_fingerprint: String,
+) -> Result<i64, String> {
+    refresh_from_disk(state.inner())?;
+    // push_current does a blocking GET + PUT to the team server; keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        teams::push_current(base_version, &local_fingerprint)
+    })
         .await
         .map_err(|e| format!("push task join failed: {e}"))?
 }
@@ -1787,20 +1904,23 @@ async fn team_push(state: State<'_, RegistryState>) -> Result<i64, String> {
 /// Re-save the registry to bump its mtime. The running gateway watches that file
 /// and rebuilds on change, so freshly-vaulted credentials take effect (and the
 /// server's tools flow to connected clients) without a manual restart.
+/// Refresh the in-memory cache from disk. Formerly a blind re-save meant to bump the
+/// registry mtime so the gateway would reload; that reverted concurrent gateway/team writes
+/// (SOU-23) and, because the no-op guard skips a same-content save, rarely bumped the mtime
+/// anyway. A real change (e.g. `bump_secrets_generation`) advances the file under the lock
+/// and triggers the gateway reload on its own.
 fn nudge_gateway(state: &RegistryState) {
-    // Recover from a poisoned lock like every other command does; otherwise a
-    // poisoned mutex would skip this re-save and freshly-vaulted credentials would
-    // silently never propagate to the running gateway.
-    let reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _ = registry::save(&reg);
+    let _ = reload_into_state(state);
 }
 
-/// Bump [`Registry::secrets_generation`] and save so gateways reload even when
-/// only the keychain changed.
+/// Bump [`Registry::secrets_generation`] and save under the lock so gateways reload even
+/// when only the keychain changed. Increments the FRESH on-disk value (not a stale `+1`) so
+/// a concurrent bump from another writer isn't lost.
 fn bump_secrets_generation(state: &RegistryState) {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.secrets_generation = reg.secrets_generation.wrapping_add(1);
-    let _ = registry::save(&reg);
+    let _ = write_registry(state, |reg| {
+        reg.secrets_generation = reg.secrets_generation.wrapping_add(1);
+        Ok(())
+    });
 }
 
 #[tauri::command]
@@ -1815,6 +1935,9 @@ fn set_auth_token(
     server_id: String,
     token: String,
 ) -> Result<(), String> {
+    // A manually pasted bearer replaces any prior OAuth session. Keeping stale
+    // refresh metadata could otherwise overwrite the user's token later.
+    remote::clear_oauth_state(&server_id)?;
     secrets::set_secret(&server_id, secrets::HTTP_AUTH_KEY, &token)?;
     bump_secrets_generation(state.inner());
     Ok(())
@@ -1822,6 +1945,9 @@ fn set_auth_token(
 
 #[tauri::command]
 fn clear_auth_token(state: State<RegistryState>, server_id: String) -> Result<(), String> {
+    // Remove refresh metadata first so a second-write failure cannot leave state
+    // that silently recreates the bearer token the user asked to delete.
+    remote::clear_oauth_state(&server_id)?;
     secrets::delete_secret(&server_id, secrets::HTTP_AUTH_KEY)?;
     bump_secrets_generation(state.inner());
     Ok(())
@@ -1865,6 +1991,8 @@ async fn authenticate_oauth(
         &res.client_id,
         res.refresh_token,
         Some(resource),
+        res.issued_at,
+        res.expires_at,
     )?;
     bump_secrets_generation(state.inner());
     Ok(())
@@ -2083,10 +2211,8 @@ fn deliver_shared_import(handle: &tauri::AppHandle, id: String) {
 /// values are never included, so each new server is left for the user to vault.
 #[tauri::command]
 fn import_config(state: State<RegistryState>, json: String) -> Result<Registry, String> {
-    let mut reg = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    apply_import(&mut reg, &json)?;
-    registry::save(&reg)?;
-    Ok(reg.clone())
+    let (reg, _) = write_registry(state.inner(), |reg| apply_import(reg, &json))?;
+    Ok(reg)
 }
 
 /// Read a shared-setup file from disk (path from an open dialog), capped so a
@@ -2658,17 +2784,20 @@ pub fn run() {
             clear_inspect_log,
             get_search_traces,
             clear_search_traces,
+            clear_activity_logs,
             list_tool_identities,
             set_quarantine_on_drift,
             list_quarantined,
             release_quarantine,
             set_lazy_discovery,
             set_allow_agent_control,
+            set_client_discovery,
             team_connect,
             team_join_poll,
             team_sync,
             team_sync_wait,
             team_disconnect,
+            team_push_preview,
             team_push,
             set_auth_token,
             clear_auth_token,

@@ -201,8 +201,9 @@ Gotcha: when running Toolport from source, build the gateway first with `npm run
 The gateway speaks HTTP/OpenAPI natively, so Open WebUI (and any OpenAPI tool
 client) connects straight to Toolport, no bridge or proxy. Flip on **Settings ->
 Integrations -> Open WebUI / HTTP endpoint** in the app (or run
-`toolport-gateway --http 8765`), then add `http://localhost:8765` as an OpenAPI
-tool server. See [docs/openwebui.md](docs/openwebui.md). The same endpoint serves
+`toolport-gateway --http 8765` after setting `CONDUIT_HTTP_TOKEN`), then add
+`http://localhost:8765` as an OpenAPI tool server. See
+[docs/openwebui.md](docs/openwebui.md). The same endpoint serves
 any HTTP/OpenAPI MCP consumer (n8n, LibreChat, custom agents).
 
 ### Headless / container / MCP over the network
@@ -232,7 +233,9 @@ gateway entry, written for you when you connect a client:
   and `CONDUIT_HTTP_TOKEN` for the required bearer token) - run the gateway in
   HTTP/OpenAPI mode instead of stdio, for Open WebUI and other OpenAPI clients (see
   above). The in-app Settings -> Integrations toggle sets these for you, and the
-  gateway refuses a non-loopback bind without a token.
+  gateway refuses to bind without a token or registered HTTP client. For isolated
+  local development only, `--insecure-loopback` explicitly permits an unauthenticated
+  loopback listener; it never permits an open non-loopback bind.
 
 **Semantic search (optional).** Lazy discovery ranks tools lexically by default. Point it
 at any `/v1/embeddings` endpoint (LM Studio, Ollama, or a cloud provider) to blend in

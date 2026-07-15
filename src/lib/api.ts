@@ -263,6 +263,13 @@ export function clearSearchTraces(): Promise<void> {
   return invoke<void>("clear_search_traces");
 }
 
+/** Clear all retained local activity at once: audit log, discovery traces,
+ * live-inspection captures, and the savings tally (incl. its carry-forward total).
+ * Local, irreversible deletes; each log re-creates itself on the next event. */
+export function clearActivityLogs(): Promise<void> {
+  return invoke<void>("clear_activity_logs");
+}
+
 /** Every pinned tool's verifiable identity (alias -> server/profiles + fingerprint +
  * first-seen/last-changed) for the active profile. Empty until a baseline is pinned. */
 export function getToolIdentities(): Promise<ToolIdentity[]> {
@@ -296,6 +303,16 @@ export function releaseQuarantine(profile: string, tool: string): Promise<void> 
 /** Toggle global lazy discovery (meta-tools vs full catalog) for all clients. */
 export function setLazyDiscovery(lazy: boolean): Promise<Registry> {
   return invoke<Registry>("set_lazy_discovery", { lazy });
+}
+
+/** Override one client's discovery mode ("full" | "lazy" | "grouped"), or clear it
+ * (`null`) so the client inherits the global mode. Applies live via the gateway's
+ * per-client resolution, no reconnect needed. */
+export function setClientDiscovery(
+  clientId: string,
+  mode: string | null,
+): Promise<Registry> {
+  return invoke<Registry>("set_client_discovery", { clientId, mode });
 }
 
 /** Opt into agent control: let an agent enable/disable servers via the gateway. */
@@ -387,9 +404,25 @@ export function teamDisconnect(): Promise<Registry> {
   return invoke<Registry>("team_disconnect");
 }
 
-/** Admin: push the current local server set as the team's shared config; returns version. */
-export function teamPush(): Promise<number> {
-  return invoke<number>("team_push");
+export interface TeamPushPreview {
+  baseVersion: number;
+  localFingerprint: string;
+  added: string[];
+  changed: string[];
+  removed: string[];
+}
+
+/** Admin: compare the local server export with the team's current shared server list. */
+export function teamPushPreview(): Promise<TeamPushPreview> {
+  return invoke<TeamPushPreview>("team_push_preview");
+}
+
+/** Admin: apply an explicitly previewed shared-server replacement; returns version. */
+export function teamPush(preview: TeamPushPreview): Promise<number> {
+  return invoke<number>("team_push", {
+    baseVersion: preview.baseVersion,
+    localFingerprint: preview.localFingerprint,
+  });
 }
 
 /** Probe every supported MCP client and read its current server configuration. */

@@ -1,6 +1,6 @@
 [package]
 name = "conduit"
-version = "1.7.2"
+version = "1.8.0"
 description = "Local MCP gateway: manage all your MCP servers in one place, set up once and shared by every AI client, with ~90% fewer tokens per request"
 authors = ["South Forge AI"]
 edition = "2021"
@@ -49,9 +49,14 @@ toml = "0.8"
 dirs = "5"
 ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
+subtle = "2.6"
 base64 = "0.22"
 regex = "1"
 getrandom = "0.2"
+# OS advisory file locking (flock / LockFileEx) for the cross-process registry write
+# lock, so the app, the gateway binary, and the team-sync worker can't revert each
+# other's registry.json edits. Auto-released by the OS if a holder crashes.
+fs2 = "0.4"
 chacha20poly1305 = "0.10"
 urlencoding = "2"
 # file:// URI -> path decoding for the ${ROOT} cwd token (issue #239); already in
@@ -66,6 +71,13 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"], option
 # OS keychain, with the native backend per platform.
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

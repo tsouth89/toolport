@@ -165,8 +165,9 @@ Use this before exposing a headless gateway beyond a trusted host or LAN.
 ### Network and auth
 
 - [ ] **Bearer token set** — `CONDUIT_HTTP_TOKEN` with at least 24 bytes of
-      entropy (`openssl rand -hex 24`). Required when binding anything other than
-      loopback; the process refuses `0.0.0.0` without it.
+      entropy (`openssl rand -hex 24`), or a registered scoped HTTP client. The
+      process refuses any bind without configured authentication unless an operator
+      explicitly passes `--insecure-loopback` for isolated local development.
 - [ ] **Firewall** — only trusted clients can reach the port. Do not publish
       `:8765` to the public internet without a reverse proxy.
 - [ ] **TLS in front** — the gateway speaks plain HTTP. Terminate TLS at nginx,
@@ -174,6 +175,9 @@ Use this before exposing a headless gateway beyond a trusted host or LAN.
       untrusted HTTP.
 - [ ] **Scoped HTTP clients** — if the registry lists `httpClients[]`, give each
       caller its own token and profile scope instead of sharing one global token.
+- [ ] **Request deadlines accounted for** — the gateway allows 10 seconds for complete
+      headers and 30 seconds for the request body, then closes the connection with 408.
+      Keep reverse-proxy deadlines at least as strict when exposing the gateway remotely.
 
 ### Secrets and registry
 
@@ -230,9 +234,9 @@ the v1.5.1–1.5.2 audit batch (#203–#207).
 **Known limitations (not bugs, but deploy constraints):**
 
 - No built-in TLS or rate limiting — use a reverse proxy.
-- Loopback without a token warns but still starts: any **local** process (including
-  a malicious web page via browser) can call tools. Set a token even on localhost if
-  browsers run on the same machine.
+- `--insecure-loopback` warns and starts an unauthenticated **local-only** listener:
+  any local process (including a malicious web page via browser) can call tools.
+  Prefer a token even on localhost if browsers run on the same machine.
 - Headless + human approval on = destructive calls blocked, not prompted.
 - MCP HTTP test coverage is thinner than the stdio gateway path (see ROADMAP).
 
@@ -258,7 +262,8 @@ a wholly new trust model.
 
 Optional internal pass: re-run the gateway HTTP + MCP integration tests, smoke
 `POST /mcp` initialize → `tools/list` with and without auth, and confirm
-unauthenticated requests to a non-loopback bind are rejected at startup.
+unauthenticated listeners are rejected at startup. Confirm `--insecure-loopback`
+works only on loopback when the local-development escape hatch is required.
 
 ## Environment Variables
 

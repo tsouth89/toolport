@@ -24,6 +24,21 @@ pub fn audit_path() -> Option<PathBuf> {
     Some(crate::registry::conduit_dir()?.join("audit.jsonl"))
 }
 
+/// Delete the audit log (called when the user clears retained activity). Returns
+/// `Err` only on a real removal failure; a missing file (nothing to clear) is
+/// success, so the caller can honestly confirm the log is gone rather than report a
+/// false "cleared". Local and irreversible; the next call re-creates the file.
+pub fn try_clear() -> std::io::Result<()> {
+    let Some(path) = audit_path() else {
+        return Ok(());
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 fn epoch_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -88,14 +103,17 @@ pub fn record_held(server: &str, tool: &str, client: Option<&str>) {
 }
 
 /// Build the audit entry for a gated HITL decision. Pure (no I/O) so it's unit-testable.
-/// Kept `ok:true` + `held:true` so it stays out of the error rate and the existing
-/// held-row UI renders it unchanged; the added fields (`kind`, `reason`, `decision`,
+/// `ok:true` keeps governance outcomes out of the error rate; `held` is true for every
+/// blocked outcome and false for `approved` (which ran), so the held-row UI stays honest;
+/// the added fields (`kind`, `reason`, `decision`,
 /// `argsHash`) let a governance / Approvals view tell *why* a call was gated and *which*
-/// way it resolved (denied vs no-response vs unreachable) apart - which the old flat
-/// `record_held` collapsed into one indistinguishable record. `reason` is the snake_case
-/// [`crate::approval::ApprovalReason`]; `decision` is `approved` | `denied` | `no_response`
-/// | `unreachable`. The RAW arguments are never stored - only `argsHash` - so the log
-/// proves which exact call was decided without persisting secrets/PII from arguments.
+/// way it resolved (approved vs denied vs no-response vs unreachable vs stale-state) apart -
+/// which the old flat `record_held` collapsed into one indistinguishable record. `reason`
+/// is the snake_case [`crate::approval::ApprovalReason`]; `decision` is `approved` |
+/// `denied` | `no_response` | `unreachable` | `stale_state` (the last: a human approved but
+/// the arguments were mutated before execute, so the stale approval was rejected). The RAW
+/// arguments are never stored - only `argsHash` - so the log proves which exact call was
+/// decided without persisting secrets/PII from arguments.
 fn decision_entry(
     server: &str,
     tool: &str,
@@ -103,21 +121,26 @@ fn decision_entry(
     reason: &str,
     decision: &str,
     args_hash: &str,
-    duration_ms: Option<u64>,
+    held_ms: Option<u64>,
 ) -> Value {
+    // `held` = the call was gated and did NOT run. An `approved` decision ran, so it is not
+    // held (it must not inflate the held count); every non-approval was blocked, so it is.
+    // `ok:true` throughout keeps governance outcomes (a deny, a timeout) out of the error rate.
     let mut entry = json!({
         "ts": epoch_millis() as u64,
         "server": server,
         "tool": tool,
         "ok": true,
-        "held": true,
+        "held": decision != "approved",
         "kind": "approval",
         "reason": reason,
         "decision": decision,
         "argsHash": args_hash,
     });
-    if let Some(ms) = duration_ms {
-        entry["durationMs"] = json!(ms);
+    // The approval wait, recorded as `heldMs` (not `durationMs`) so a governance view can
+    // tell how long a human was asked apart from a call's downstream execution duration.
+    if let Some(ms) = held_ms {
+        entry["heldMs"] = json!(ms);
     }
     if let Some(c) = client.filter(|c| !c.is_empty()) {
         entry["client"] = json!(c);
@@ -135,7 +158,7 @@ pub fn record_decision(
     reason: &str,
     decision: &str,
     args: &Value,
-    duration_ms: Option<u64>,
+    held_ms: Option<u64>,
 ) {
     write_line(&decision_entry(
         server,
@@ -144,7 +167,7 @@ pub fn record_decision(
         reason,
         decision,
         &args_hash(args),
-        duration_ms,
+        held_ms,
     ));
 }
 
@@ -460,6 +483,7 @@ const CSV_COLUMNS: &[&str] = &[
     "decision",
     "argsHash",
     "durationMs",
+    "heldMs",
     "action",
     "error",
 ];
@@ -511,7 +535,7 @@ mod tests {
         })];
         let csv = to_csv(&entries);
         assert!(csv.starts_with(
-            "ts,server,tool,client,ok,held,kind,reason,decision,argsHash,durationMs,action,error\r\n"
+            "ts,server,tool,client,ok,held,kind,reason,decision,argsHash,durationMs,heldMs,action,error\r\n"
         ));
         assert!(csv.contains("\"gh\""));
         assert!(csv.contains("\"search\""));
@@ -658,7 +682,9 @@ mod tests {
         assert_eq!(e["reason"], "destructive");
         assert_eq!(e["decision"], "unreachable");
         assert_eq!(e["argsHash"], "deadbeef");
-        assert_eq!(e["durationMs"], 1234);
+        // The wait is `heldMs` (approval wait), not `durationMs` (downstream exec time).
+        assert_eq!(e["heldMs"], 1234);
+        assert!(e.get("durationMs").is_none());
         assert_eq!(e["client"], "claude");
         // Held (didn't run) but ok:true so it stays out of the error rate.
         assert_eq!(e["held"], true);
@@ -672,8 +698,14 @@ mod tests {
         assert_eq!(denied["reason"], "untrusted_source");
         // Unattributed call omits the client field entirely.
         assert!(denied.get("client").is_none());
-        // durationMs is optional.
-        assert!(denied.get("durationMs").is_none());
+        // heldMs is optional.
+        assert!(denied.get("heldMs").is_none());
+
+        // An approved call RAN, so it is audited but not counted as held (still ok:true).
+        let approved = decision_entry("s", "t", None, "destructive", "approved", "h", None);
+        assert_eq!(approved["decision"], "approved");
+        assert_eq!(approved["held"], false);
+        assert_eq!(approved["ok"], true);
     }
 
     #[test]

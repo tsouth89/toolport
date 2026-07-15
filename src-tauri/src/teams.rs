@@ -270,16 +270,173 @@ pub fn fetch_me(server_url: &str, team_id: &str, token: &str) -> Result<Membersh
     }
 }
 
-/// Admin push of the team config. Returns the new version.
-pub fn push_config(server_url: &str, team_id: &str, token: &str, config: &Value) -> Result<i64, String> {
+/// A dashboard edit that lands between the preflight GET and PUT must never be overwritten.
+/// Keep this message stable and actionable: it is surfaced directly in the Teams UI.
+const STALE_PUSH_MESSAGE: &str =
+    "The team config changed before this update could be saved. Sync to review the latest settings, then try again; nothing was overwritten.";
+
+/// Fetch the complete current config before an admin replaces its server list. Unlike the
+/// sync pull, this request is intentionally unconditional: the caller needs the full object so
+/// instructions, policies, and future top-level fields can be round-tripped unchanged.
+fn fetch_config_for_update(
+    server_url: &str,
+    team_id: &str,
+    token: &str,
+) -> Result<(i64, Value), String> {
     require_secure_team_url(server_url)?;
     let url = format!("{}/teams/{}/config", base(server_url), team_id);
-    let body = serde_json::json!({ "config": config });
-    let resp = agent()
+    match agent()
+        .get(&url)
+        .set("authorization", &format!("Bearer {token}"))
+        .call()
+    {
+        Ok(resp) => {
+            let v: Value = resp.into_json().map_err(|e| e.to_string())?;
+            let version = v["version"]
+                .as_i64()
+                .ok_or("team server returned a config without a version")?;
+            let config = v.get("config").cloned().unwrap_or(Value::Null);
+            if !config.is_object()
+                || !config.get("servers").map(Value::is_array).unwrap_or(false)
+            {
+                return Err("team server returned a config without a server list".into());
+            }
+            Ok((version, config))
+        }
+        // Older self-hosted servers can have no config row until the first push. Version zero
+        // is the optimistic-concurrency baseline used by current servers for that empty state.
+        Err(ureq::Error::Status(404, _)) => Ok((0, json!({ "servers": [] }))),
+        Err(e) => Err(stringify(e)),
+    }
+}
+
+/// Replace only `servers` in a fetched config, preserving every other current and future field.
+fn replace_server_set(mut config: Value, servers: Value) -> Result<Value, String> {
+    if !servers.is_array() {
+        return Err("local team export did not contain a server list".into());
+    }
+    let object = config
+        .as_object_mut()
+        .ok_or("team server returned a config that was not an object")?;
+    object.insert("servers".to_string(), servers);
+    Ok(config)
+}
+
+fn push_body(config: &Value, base_version: i64) -> Value {
+    json!({ "config": config, "base_version": base_version })
+}
+
+fn push_status_message(status: u16) -> Option<&'static str> {
+    (status == 409).then_some(STALE_PUSH_MESSAGE)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushPreview {
+    pub base_version: i64,
+    pub local_fingerprint: String,
+    pub added: Vec<String>,
+    pub changed: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+fn server_index(servers: &Value) -> Result<BTreeMap<String, &Value>, String> {
+    let list = servers
+        .as_array()
+        .ok_or("team server list was not an array")?;
+    let mut indexed = BTreeMap::new();
+    for server in list {
+        let id = server
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or("team server entry had no id")?
+            .to_string();
+        if indexed.insert(id.clone(), server).is_some() {
+            return Err(format!("team server list contained duplicate id '{id}'"));
+        }
+    }
+    Ok(indexed)
+}
+
+fn preview_name(server: &Value, id: &str) -> String {
+    server
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(id)
+        .to_string()
+}
+
+fn sort_preview_names(names: &mut [String]) {
+    names.sort_by(|a, b| {
+        a.to_ascii_lowercase()
+            .cmp(&b.to_ascii_lowercase())
+            .then_with(|| a.cmp(b))
+    });
+}
+
+fn build_push_preview(
+    base_version: i64,
+    remote_servers: &Value,
+    local_servers: &Value,
+) -> Result<PushPreview, String> {
+    let remote = server_index(remote_servers)?;
+    let local = server_index(local_servers)?;
+    let mut added = Vec::new();
+    let mut changed = Vec::new();
+    let mut removed = Vec::new();
+
+    for (id, server) in &local {
+        match remote.get(id) {
+            None => added.push(preview_name(server, id)),
+            Some(previous) if *previous != *server => changed.push(preview_name(server, id)),
+            Some(_) => {}
+        }
+    }
+    for (id, server) in &remote {
+        if !local.contains_key(id) {
+            removed.push(preview_name(server, id));
+        }
+    }
+    sort_preview_names(&mut added);
+    sort_preview_names(&mut changed);
+    sort_preview_names(&mut removed);
+
+    Ok(PushPreview {
+        base_version,
+        local_fingerprint: crate::audit::args_hash(local_servers),
+        added,
+        changed,
+        removed,
+    })
+}
+
+/// Admin push of a servers-only config update. Returns the new version.
+pub fn push_config(
+    server_url: &str,
+    team_id: &str,
+    token: &str,
+    config: &Value,
+    base_version: i64,
+) -> Result<i64, String> {
+    require_secure_team_url(server_url)?;
+    let url = format!("{}/teams/{}/config", base(server_url), team_id);
+    let body = push_body(config, base_version);
+    let resp = match agent()
         .put(&url)
         .set("authorization", &format!("Bearer {token}"))
         .send_json(body)
-        .map_err(stringify)?;
+    {
+        Ok(resp) => resp,
+        Err(e @ ureq::Error::Status(status, _)) => {
+            if let Some(message) = push_status_message(status) {
+                return Err(message.into());
+            }
+            return Err(stringify(e));
+        }
+        Err(e) => return Err(stringify(e)),
+    };
     let v: Value = resp.into_json().map_err(|e| e.to_string())?;
     v["version"]
         .as_i64()
@@ -356,7 +513,6 @@ fn complete_join(server_url: &str, member_name: Option<&str>, joined: Joined) ->
 }
 
 fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -> Result<(TeamConnection, MergeOutcome), String> {
-    let mut reg = crate::registry::load()?;
     let conn = TeamConnection {
         server_url: base(server_url),
         team_id: joined.team_id.clone(),
@@ -366,18 +522,25 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
         last_etag: None,
         usage_reported: HashMap::new(),
     };
-    reg.team = Some(conn);
-    let mut outcome = MergeOutcome::default();
-    if let Some((version, cfg, etag)) =
-        pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0, None, 0)?
-    {
-        outcome = apply_team_config(&mut reg, &joined.team_id, &cfg);
-        if let Some(t) = reg.team.as_mut() {
-            t.last_version = version;
-            t.last_etag = etag;
+    // Pull BEFORE loading the registry, then load a FRESH copy AFTER the (possibly
+    // multi-second) network round trip and apply onto that — mirroring `sync_inner`.
+    // Loading first and saving here would clobber any change another command made to the
+    // registry while we were waiting on the join window's pull.
+    let pulled = pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0, None, 0)?;
+    // Load-modify-save the fresh registry under the cross-process lock, so a concurrent write
+    // during the join window's pull isn't reverted (SOU-23).
+    let (reg, outcome) = crate::registry::update(|reg| {
+        reg.team = Some(conn);
+        let mut outcome = MergeOutcome::default();
+        if let Some((version, cfg, etag)) = pulled {
+            outcome = apply_team_config(reg, &joined.team_id, &cfg);
+            if let Some(t) = reg.team.as_mut() {
+                t.last_version = version;
+                t.last_etag = etag;
+            }
         }
-    }
-    crate::registry::save(&reg)?;
+        Ok(outcome)
+    })?;
     let conn = reg.team.clone().ok_or_else(|| "team connection lost after save".to_string())?;
     Ok((conn, outcome))
 }
@@ -447,33 +610,39 @@ fn sync_inner(wait_secs: u64) -> Result<SyncResult, String> {
     // Re-load a FRESH registry now, AFTER the (possibly multi-second) network round
     // trips, and apply the deltas to it. Loading at the top and saving here would clobber
     // any change another command made to the registry while we were on the network.
-    let mut reg = crate::registry::load()?;
-    match reg.team.as_ref() {
-        // The user disconnected or switched teams mid-sync: don't apply stale results.
-        None => return Ok(SyncResult::Ok { role, role_changed, applied: None }),
-        Some(t) if t.team_id != conn.team_id => {
-            return Ok(SyncResult::Ok { role, role_changed, applied: None })
+    // Apply the deltas onto a FRESH registry under the cross-process lock, so a concurrent
+    // app or gateway write between our network round trip and our save isn't reverted
+    // (SOU-23). The closure returns `None` when the user disconnected / switched teams
+    // mid-sync (nothing applied); `Some(applied)` otherwise.
+    let (_, result) = crate::registry::update(|reg| {
+        match reg.team.as_ref() {
+            None => return Ok(None),
+            Some(t) if t.team_id != conn.team_id => return Ok(None),
+            _ => {}
         }
-        _ => {}
-    }
-
-    let applied = match pulled {
-        None => None,
-        Some((version, cfg, etag)) => {
-            let outcome = apply_team_config(&mut reg, &conn.team_id, &cfg);
-            if let Some(t) = reg.team.as_mut() {
-                t.last_version = version;
-                t.last_etag = etag;
+        let applied = match pulled {
+            None => None,
+            Some((version, cfg, etag)) => {
+                let outcome = apply_team_config(reg, &conn.team_id, &cfg);
+                if let Some(t) = reg.team.as_mut() {
+                    t.last_version = version;
+                    t.last_etag = etag;
+                }
+                Some((version, outcome))
             }
-            Some((version, outcome))
+        };
+        // Persist the refreshed role alongside any applied config, so admin-only UI tracks
+        // the member's real, current role on every sync.
+        if let Some(t) = reg.team.as_mut() {
+            t.role = role.clone();
         }
+        Ok(Some(applied))
+    })?;
+    let applied = match result {
+        // Skipped (disconnected / switched teams mid-sync): don't report usage for it.
+        None => return Ok(SyncResult::Ok { role, role_changed, applied: None }),
+        Some(applied) => applied,
     };
-    // Persist the refreshed role alongside any applied config, so admin-only UI tracks
-    // the member's real, current role on every sync.
-    if let Some(t) = reg.team.as_mut() {
-        t.role = role.clone();
-    }
-    crate::registry::save(&reg)?;
     // Best-effort showback after the config work: report today's/yesterday's per-server
     // usage rollup to the team server. Any failure here must never affect the sync
     // result — the member's config is already applied and saved.
@@ -584,44 +753,83 @@ fn report_usage(conn: &TeamConnection, token: &str) {
     // Persist the watermarks on a FRESH registry (same clobber-avoidance as sync_inner:
     // the POSTs above are network round trips another command may have raced past).
     // `new_state` only ever holds today + yesterday, so old days prune themselves.
-    let Ok(mut reg) = crate::registry::load() else { return };
-    if let Some(t) = reg.team.as_mut() {
-        if t.team_id == conn.team_id {
-            t.usage_reported = new_state;
-            let _ = crate::registry::save(&reg);
+    let _ = crate::registry::update(|reg| {
+        if let Some(t) = reg.team.as_mut() {
+            if t.team_id == conn.team_id {
+                t.usage_reported = new_state;
+            }
         }
-    }
+        Ok(())
+    });
 }
 
 /// Leave the team: remove its merged servers, clear the connection and the token.
 pub fn disconnect() -> Result<(), String> {
-    let mut reg = crate::registry::load()?;
-    if let Some(conn) = reg.team.clone() {
-        remove_team(&mut reg, &conn.team_id);
-    }
-    reg.team = None;
-    crate::registry::save(&reg)?;
+    crate::registry::update(|reg| {
+        if let Some(conn) = reg.team.clone() {
+            remove_team(reg, &conn.team_id);
+        }
+        reg.team = None;
+        Ok(())
+    })?;
     let _ = clear_token();
     Ok(())
 }
 
-/// Admin: push the current local server set as the team config. The user's own servers
-/// only (team-sourced ones are excluded), secret values never sent. Returns the version.
-pub fn push_current() -> Result<i64, String> {
+/// Admin: preview replacing the remote config's server list with the current local server set.
+/// The returned version and fingerprint bind the later confirmation to exactly what was shown.
+pub fn preview_push_current() -> Result<PushPreview, String> {
     let reg = crate::registry::load()?;
     let conn = reg.team.clone().ok_or("not connected to a team")?;
     if conn.role != "admin" {
         return Err("only a team admin can push the shared config".into());
     }
     let token = load_token().ok_or("team token is missing from the keychain")?;
-    let cfg = team_export(&reg);
-    push_config(&conn.server_url, &conn.team_id, &token, &cfg)
+    let local_servers = team_server_export(&reg);
+    let (base_version, remote_config) =
+        fetch_config_for_update(&conn.server_url, &conn.team_id, &token)?;
+    build_push_preview(
+        base_version,
+        remote_config
+            .get("servers")
+            .ok_or("team server returned a config without a server list")?,
+        &local_servers,
+    )
 }
 
-/// Build the config an admin pushes: the user's own servers (not team-sourced), with
-/// env keys but no secret values, plus the destructive-tool policy flag and the
-/// org screening policy.
-fn team_export(reg: &Registry) -> Value {
+/// Admin: replace only the remote config's server list with the current local server set.
+/// The user's own servers only (team-sourced ones are excluded), secret values never sent.
+/// Every other remote field is retained and the fetched version protects against stale writes.
+pub fn push_current(
+    expected_base_version: i64,
+    expected_local_fingerprint: &str,
+) -> Result<i64, String> {
+    let reg = crate::registry::load()?;
+    let conn = reg.team.clone().ok_or("not connected to a team")?;
+    if conn.role != "admin" {
+        return Err("only a team admin can push the shared config".into());
+    }
+    let token = load_token().ok_or("team token is missing from the keychain")?;
+    let servers = team_server_export(&reg);
+    if crate::audit::args_hash(&servers) != expected_local_fingerprint {
+        return Err(
+            "Your local server set changed after the preview. Review the update again before saving."
+                .into(),
+        );
+    }
+    let (base_version, remote_config) =
+        fetch_config_for_update(&conn.server_url, &conn.team_id, &token)?;
+    if base_version != expected_base_version {
+        return Err(STALE_PUSH_MESSAGE.into());
+    }
+    let cfg = replace_server_set(remote_config, servers)?;
+    push_config(&conn.server_url, &conn.team_id, &token, &cfg, base_version)
+}
+
+/// Build the server list an admin pushes: the user's own servers (not team-sourced), with
+/// env keys but no secret values. Governance lives on the server and is retained from the
+/// preflight GET rather than inferred from one admin's local safety preferences.
+fn team_server_export(reg: &Registry) -> Value {
     let servers: Vec<Value> = reg
         .servers
         .iter()
@@ -662,20 +870,7 @@ fn team_export(reg: &Registry) -> Value {
             })
         })
         .collect();
-    serde_json::json!({
-        "servers": servers,
-        "denyDestructive": reg.deny_destructive,
-        // Org screening policy. Emitted on every push so a desktop push never silently
-        // wipes a dashboard-set policy. Each flag is tighten-only on the member side:
-        // `true` forces the corresponding local safety toggle on, `false`/absent is a
-        // no-op that can never turn a member's toggle off. Shape is intentionally
-        // extensible (e.g. a future `sensitivity` field) without a breaking change.
-        "screeningPolicy": {
-            "forceContentDefense": reg.content_defense,
-            "forceQuarantineOnDrift": reg.quarantine_on_drift,
-            "forceHumanApproval": reg.human_approval,
-        },
-    })
+    Value::Array(servers)
 }
 
 // --- merge (pure, testable) ---
@@ -723,27 +918,30 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
     let tag = tag_for(team_id);
 
     // 1. Capture the prior generation of this team's servers, and which of them the
-    //    member had ENABLED. That enablement is their standing consent for the
-    //    review-required ones, so we re-apply it after the replace instead of forcing a
-    //    re-approval on every sync.
+    //    member had ENABLED IN EACH PROFILE. That enablement is their standing consent for
+    //    the review-required ones, so we re-apply it per profile after the replace instead
+    //    of forcing a re-approval on every sync. Capturing per-profile (not just the active
+    //    one) is what keeps a team server the member enabled in a NON-active profile from
+    //    being stripped on every sync and never restored.
     let old_ids: Vec<String> = reg
         .servers
         .iter()
         .filter(|s| is_team_server(s, &tag))
         .map(|s| s.id.clone())
         .collect();
-    let prev_enabled: std::collections::HashSet<String> = reg
-        .active_profile_id
-        .as_ref()
-        .and_then(|aid| reg.profiles.iter().find(|p| &p.id == aid))
-        .map(|p| {
-            p.enabled_server_ids
-                .iter()
-                .filter(|id| old_ids.contains(id))
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
+    let prev_enabled_by_profile: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        reg.profiles
+            .iter()
+            .map(|p| {
+                let enabled: std::collections::HashSet<String> = p
+                    .enabled_server_ids
+                    .iter()
+                    .filter(|id| old_ids.contains(id))
+                    .cloned()
+                    .collect();
+                (p.id.clone(), enabled)
+            })
+            .collect();
     reg.servers.retain(|s| !is_team_server(s, &tag));
     for p in &mut reg.profiles {
         p.enabled_server_ids.retain(|id| !old_ids.contains(id));
@@ -751,19 +949,28 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
 
     // 2. Classify and add the new team servers. Ready (public remote) servers are safe to
     //    auto-enable; review servers (local command or LAN URL) are added but left off;
-    //    blocked (link-local/metadata) are refused outright.
+    //    blocked (link-local/metadata) are refused outright. Dedup each new id (like
+    //    `add_server`) against BOTH the servers already in the registry and the other new
+    //    team entries, so a team id can't collide with the member's own server or a sibling
+    //    team entry and silently overwrite its secrets/profiles/tool-prefixes. (This team's
+    //    previous servers were already removed above, so they don't block id reuse.)
     let mut auto_enable: Vec<String> = Vec::new();
     let mut review_ids: Vec<String> = Vec::new();
+    let mut used_ids: Vec<String> = reg.servers.iter().map(|s| s.id.clone()).collect();
     let mut outcome = MergeOutcome::default();
     if let Some(arr) = team_cfg.get("servers").and_then(Value::as_array) {
         for s in arr {
             match classify_team_server(s, &tag) {
-                TeamClass::Ready(entry) => {
+                TeamClass::Ready(mut entry) => {
+                    entry.id = crate::registry::unique_id(&entry.id, &used_ids);
+                    used_ids.push(entry.id.clone());
                     auto_enable.push(entry.id.clone());
                     reg.servers.push(entry);
                     outcome.applied += 1;
                 }
-                TeamClass::Review(entry) => {
+                TeamClass::Review(mut entry) => {
+                    entry.id = crate::registry::unique_id(&entry.id, &used_ids);
+                    used_ids.push(entry.id.clone());
                     review_ids.push(entry.id.clone());
                     reg.servers.push(entry);
                     outcome.review += 1;
@@ -774,18 +981,24 @@ pub fn apply_team_config(reg: &mut Registry, team_id: &str, team_cfg: &Value) ->
         }
     }
 
-    // 3. Enable: ready servers always; review servers ONLY if the member had already
-    //    consented (enabled before this sync). New review servers stay off, so nothing
-    //    local runs without an explicit opt-in.
-    if let Some(active_id) = reg.active_profile_id.clone() {
-        if let Some(p) = reg.profiles.iter_mut().find(|p| p.id == active_id) {
-            let to_enable = auto_enable
-                .iter()
-                .chain(review_ids.iter().filter(|id| prev_enabled.contains(*id)));
-            for id in to_enable {
-                if !p.enabled_server_ids.contains(id) {
-                    p.enabled_server_ids.push(id.clone());
-                }
+    // 3. Enable per profile. Ready (public remote) servers auto-enable in the ACTIVE profile
+    //    (first-run convenience). EVERY profile then restores the exact team servers the
+    //    member had enabled in THAT profile before this sync — their standing consent — so a
+    //    server enabled in a non-active profile survives the replace. Review servers the
+    //    member never consented to stay off, so nothing local runs without an explicit opt-in.
+    let active_id = reg.active_profile_id.clone();
+    for p in &mut reg.profiles {
+        let is_active = active_id.as_deref() == Some(p.id.as_str());
+        let prev = prev_enabled_by_profile.get(&p.id);
+        let was_enabled = |id: &String| prev.map(|s| s.contains(id)).unwrap_or(false);
+        for id in &auto_enable {
+            if (is_active || was_enabled(id)) && !p.enabled_server_ids.contains(id) {
+                p.enabled_server_ids.push(id.clone());
+            }
+        }
+        for id in &review_ids {
+            if was_enabled(id) && !p.enabled_server_ids.contains(id) {
+                p.enabled_server_ids.push(id.clone());
             }
         }
     }
@@ -1043,6 +1256,105 @@ mod tests {
     }
 
     #[test]
+    fn re_sync_preserves_enablement_in_a_non_active_profile() {
+        // A team server the member enabled in a NON-active profile must survive re-sync.
+        // The old code captured prior enablement from the active profile only, stripped the
+        // team ids from every profile, and re-enabled just the active one — so a non-active
+        // enablement was lost on every sync (SOU-20).
+        let mut r = base_registry();
+        r.profiles.push(crate::registry::Profile {
+            id: "p2".into(),
+            name: "Second".into(),
+            enabled_server_ids: Vec::new(),
+        });
+        let cfg = json!({ "servers": [
+            { "id": "review1", "name": "Review1", "transport": "stdio", "command": "run-me" }
+        ]});
+        // First sync adds the review server (present, but left OFF everywhere until opt-in).
+        apply_team_config(&mut r, "t1", &cfg);
+        assert!(r.servers.iter().any(|s| s.id == "team_review1"));
+        // Member consents to it in the NON-active profile p2.
+        r.profiles
+            .iter_mut()
+            .find(|p| p.id == "p2")
+            .unwrap()
+            .enabled_server_ids
+            .push("team_review1".into());
+
+        // Re-sync with the same config: the non-active-profile consent must be restored.
+        apply_team_config(&mut r, "t1", &cfg);
+        let p2 = r.profiles.iter().find(|p| p.id == "p2").unwrap();
+        assert!(
+            p2.enabled_server_ids.contains(&"team_review1".to_string()),
+            "team server enabled in a non-active profile survives re-sync"
+        );
+        // A review server with no consent in the active profile is still not auto-enabled there.
+        assert!(!active_enabled(&r).contains(&"team_review1".to_string()));
+    }
+
+    #[test]
+    fn colliding_team_ids_are_deduped_not_overwritten() {
+        // Two team entries whose ids slugify to the same value must both survive with
+        // DISTINCT ids. The old code built ids without dedup, so both became "team_my-server"
+        // and collided on secrets/profiles/tool-prefixes, silently dropping one (SOU-20).
+        let mut r = base_registry();
+        let cfg = json!({ "servers": [
+            { "id": "My Server", "name": "First", "transport": "http", "url": "https://1.2.3.4/mcp" },
+            { "id": "my-server", "name": "Second", "transport": "http", "url": "https://1.2.3.5/mcp" }
+        ]});
+        let outcome = apply_team_config(&mut r, "t1", &cfg);
+        assert_eq!(outcome.applied, 2, "both team servers applied");
+        let team_ids: Vec<String> = r
+            .servers
+            .iter()
+            .filter(|s| s.source.as_deref() == Some("team:t1"))
+            .map(|s| s.id.clone())
+            .collect();
+        assert_eq!(team_ids.len(), 2, "two team server entries, not one overwriting the other");
+        let unique: std::collections::HashSet<&String> = team_ids.iter().collect();
+        assert_eq!(unique.len(), 2, "the colliding ids were deduped to distinct ids");
+    }
+
+    #[test]
+    fn team_id_does_not_collide_with_an_existing_local_server() {
+        // A team server whose id would slugify onto an EXISTING local server's id must be
+        // deduped against the whole registry, not just this sync's batch — otherwise team
+        // sync would overwrite the member's own server's secrets/profile/tool routing.
+        let mut r = base_registry();
+        r.servers.push(ServerEntry {
+            id: "team_github".into(),
+            name: "My own".into(),
+            transport: "stdio".into(),
+            command: Some("x".into()),
+            args: vec![],
+            env: vec![],
+            url: None,
+            source: Some("manual".into()),
+            disabled_tools: vec![],
+            cwd: None,
+            unknown_fields: serde_json::Map::new(),
+        });
+        let cfg = json!({ "servers": [
+            { "id": "github", "name": "GitHub", "transport": "http", "url": "https://1.2.3.4/mcp" }
+        ]});
+        apply_team_config(&mut r, "t1", &cfg);
+        // The member's own server keeps its id and is untouched.
+        assert_eq!(
+            r.servers.iter().filter(|s| s.id == "team_github").count(),
+            1,
+            "no duplicate id: the local server is not clobbered"
+        );
+        assert_eq!(
+            r.servers.iter().find(|s| s.id == "team_github").unwrap().source.as_deref(),
+            Some("manual"),
+        );
+        // The team server took a distinct, deduped id.
+        let team: Vec<_> = r.servers.iter().filter(|s| s.source.as_deref() == Some("team:t1")).collect();
+        assert_eq!(team.len(), 1);
+        assert_ne!(team[0].id, "team_github", "team server deduped away from the local id");
+    }
+
+    #[test]
     fn team_forced_deny_destructive_is_releasable_and_leaves_the_member_untouched() {
         let mut r = base_registry();
         r.deny_destructive = false; // member's own choice: off
@@ -1186,22 +1498,85 @@ mod tests {
     }
 
     #[test]
-    fn team_export_round_trips_screening_policy() {
-        // The pushed config must carry the policy so a desktop push never wipes it, and
-        // it must reflect the admin's own toggles.
-        let mut r = base_registry();
-        r.content_defense = true;
-        r.quarantine_on_drift = true;
-        r.human_approval = true;
-        let cfg = team_export(&r);
-        let sp = cfg.get("screeningPolicy").expect("policy is emitted");
-        assert_eq!(sp.get("forceContentDefense").and_then(Value::as_bool), Some(true));
-        assert_eq!(sp.get("forceQuarantineOnDrift").and_then(Value::as_bool), Some(true));
-        assert_eq!(sp.get("forceHumanApproval").and_then(Value::as_bool), Some(true));
+    fn replacing_servers_preserves_instructions_policies_and_unknown_fields() {
+        let remote = json!({
+            "servers": [{ "id": "old" }],
+            "instructions": "Use the approved issue workflow.",
+            "denyDestructive": true,
+            "screeningPolicy": { "forceHumanApproval": true },
+            "futureControl": { "mode": "strict", "revision": 7 }
+        });
+        let new_servers = json!([{ "id": "new" }]);
+
+        let updated = replace_server_set(remote.clone(), new_servers.clone()).unwrap();
+
+        assert_eq!(updated["servers"], new_servers);
+        for key in [
+            "instructions",
+            "denyDestructive",
+            "screeningPolicy",
+            "futureControl",
+        ] {
+            assert_eq!(
+                updated[key], remote[key],
+                "{key} must be round-tripped unchanged"
+            );
+        }
     }
 
     #[test]
-    fn team_export_excludes_gateway_and_team_servers() {
+    fn push_payload_binds_the_fetched_base_version() {
+        let config = json!({ "servers": [], "instructions": "keep me" });
+        let body = push_body(&config, 42);
+        assert_eq!(body["base_version"], 42);
+        assert_eq!(body["config"], config);
+    }
+
+    #[test]
+    fn push_preview_reports_sorted_added_changed_and_removed_names() {
+        let remote = json!([
+            { "id": "remove-z", "name": "Zulu", "transport": "http" },
+            { "id": "same", "name": "Same", "transport": "http" },
+            { "id": "change", "name": "Old label", "transport": "http" }
+        ]);
+        let local = json!([
+            { "id": "new-b", "name": "beta", "transport": "http" },
+            { "id": "change", "name": "Changed", "transport": "stdio" },
+            { "id": "same", "name": "Same", "transport": "http" },
+            { "id": "new-a", "name": "Alpha", "transport": "http" }
+        ]);
+
+        let preview = build_push_preview(7, &remote, &local).unwrap();
+
+        assert_eq!(preview.base_version, 7);
+        assert_eq!(preview.added, vec!["Alpha", "beta"]);
+        assert_eq!(preview.changed, vec!["Changed"]);
+        assert_eq!(preview.removed, vec!["Zulu"]);
+        assert_eq!(preview.local_fingerprint, crate::audit::args_hash(&local));
+    }
+
+    #[test]
+    fn push_preview_rejects_ambiguous_duplicate_ids() {
+        let duplicated = json!([
+            { "id": "same", "name": "One" },
+            { "id": "same", "name": "Two" }
+        ]);
+        let err = build_push_preview(1, &json!([]), &duplicated).unwrap_err();
+        assert!(err.contains("duplicate id 'same'"));
+    }
+
+    #[test]
+    fn stale_push_status_is_actionable_and_other_errors_fall_through() {
+        let message = push_status_message(409).expect("409 must be recognized as stale");
+        assert!(message.contains("changed"));
+        assert!(message.contains("Sync"));
+        assert!(message.contains("nothing was overwritten"));
+        assert_eq!(push_status_message(401), None);
+        assert_eq!(push_status_message(500), None);
+    }
+
+    #[test]
+    fn team_server_export_excludes_gateway_and_team_servers() {
         let mut r = base_registry(); // has "mine" (manual)
         // Toolport's own gateway entry: infra, must never be pushed to the team.
         r.servers.push(ServerEntry {
@@ -1231,8 +1606,8 @@ mod tests {
             cwd: None,
             unknown_fields: serde_json::Map::new(),
         });
-        let cfg = team_export(&r);
-        let ids: Vec<&str> = cfg["servers"]
+        let servers = team_server_export(&r);
+        let ids: Vec<&str> = servers
             .as_array()
             .unwrap()
             .iter()
