@@ -2115,6 +2115,95 @@ fn request_human_decision(mut req: approval::ApprovalRequest) -> approval::Appro
     }
 }
 
+/// The stable machine token for a HITL decision, shared by the audit record and the
+/// agent-facing envelope so both name the outcome the same way. `Approved` is included for
+/// the audit path (approved calls are logged too); the refusal envelope never sees it.
+fn decision_token(decision: approval::ApprovalDecision) -> &'static str {
+    match decision {
+        approval::ApprovalDecision::Approved => "approved",
+        approval::ApprovalDecision::Denied => "denied",
+        approval::ApprovalDecision::Unreachable => "unreachable",
+        approval::ApprovalDecision::StaleState => "stale_state",
+        // A human was asked but didn't answer in the fail-closed window.
+        approval::ApprovalDecision::Timeout => "no_response",
+    }
+}
+
+/// Content-binding gate: after a human approves a *specific* call, the bytes that RUN must
+/// equal the bytes APPROVED. Returns `StaleState` when the canonical `argsHash` of `current`
+/// differs from `approved_hash` (the call was mutated after approval), else `None` so the
+/// call may proceed. In today's synchronous path the approved and executed arguments are the
+/// same value, so this is a defense-in-depth invariant; it is also the enforcement seam a
+/// decoupled approval (session re-use, or a code-mode script that approves then replays with
+/// different arguments) must clear before its effect runs. Fail-closed: any mismatch blocks.
+fn content_binding_decision(
+    approved_hash: &str,
+    current: &Value,
+) -> Option<approval::ApprovalDecision> {
+    if audit::args_hash(current) == approved_hash {
+        None
+    } else {
+        Some(approval::ApprovalDecision::StaleState)
+    }
+}
+
+/// Build the agent-facing envelope for a call the gateway refused to run. Carries a
+/// machine-readable `toolportDecision` + gate `reason` (+ a `retriable` hint) in
+/// `structuredContent` so an agent - or a code-mode script inspecting the result - can pick
+/// the right recovery (retry after approval, re-form the call, or abandon) instead of
+/// blind-retrying a flat error string. Every non-approval is fail-closed (`isError: true`).
+fn refused_call_result(
+    id: Value,
+    name: &str,
+    decision: approval::ApprovalDecision,
+    reason_str: &str,
+) -> Value {
+    let token = decision_token(decision);
+    let (retriable, why) = match decision {
+        approval::ApprovalDecision::Denied => {
+            (false, format!("the call to {name} was denied by a human reviewer"))
+        }
+        approval::ApprovalDecision::Unreachable => (
+            true,
+            format!(
+                "the call to {name} could not be approved because the Toolport approval service \
+                 was unreachable (is the Toolport app running?)"
+            ),
+        ),
+        approval::ApprovalDecision::StaleState => (
+            true,
+            format!(
+                "the call to {name} changed after it was approved, so the stale approval was \
+                 rejected"
+            ),
+        ),
+        _ => (
+            true,
+            format!("the call to {name} was not approved in time (the Toolport app may be closed)"),
+        ),
+    };
+    let guidance = match decision {
+        approval::ApprovalDecision::StaleState => {
+            " Re-form the exact call and get it approved again, then retry."
+        }
+        approval::ApprovalDecision::Denied => "",
+        _ => " Ask the user to approve it in the Toolport app, then retry.",
+    };
+    success(
+        id,
+        json!({
+            "content": [{ "type": "text", "text":
+                format!("Toolport: {why}, so it did not run.{guidance}") }],
+            "isError": true,
+            "structuredContent": {
+                "toolportDecision": token,
+                "reason": reason_str,
+                "retriable": retriable,
+            }
+        }),
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn handle_request(
@@ -2758,6 +2847,18 @@ fn handle_request_with_cancel(
                     .map(|s| matches!(s.source.as_deref(), Some("shared") | Some("registry")))
                     .unwrap_or(false);
                 if let Some(reason) = approval::gate_reason(true, is_dest, untrusted) {
+                    // The gate reason names WHY a human was asked; shared by the audit record
+                    // and the agent-facing envelope on every outcome (approved included).
+                    let reason_str = match reason {
+                        approval::ApprovalReason::Destructive => "destructive",
+                        approval::ApprovalReason::UntrustedSource => "untrusted_source",
+                        approval::ApprovalReason::DestructiveAndUntrusted => {
+                            "destructive_and_untrusted"
+                        }
+                    };
+                    // The exact call being approved, content-bound: the bytes that RUN must
+                    // hash-match these. Captured before the (blocking) human decision.
+                    let approved_args_hash = audit::args_hash(&arguments);
                     let t0 = std::time::Instant::now();
                     let decision = request_human_decision(approval::ApprovalRequest {
                         token: String::new(),
@@ -2771,45 +2872,48 @@ fn handle_request_with_cancel(
                     });
                     let held_ms = t0.elapsed().as_millis() as u64;
                     if !decision.is_approved() {
-                        let why = match decision {
-                            approval::ApprovalDecision::Denied => "was denied by a human reviewer",
-                            approval::ApprovalDecision::Unreachable => {
-                                "could not be approved because the Toolport approval service was \
-                                 unreachable (is the Toolport app running?)"
-                            }
-                            _ => "was not approved in time (the Toolport app may be closed)",
-                        };
                         // Governance audit: the gate reason and which non-approval outcome
                         // (denied / no-response / unreachable), plus a content hash of the
                         // exact call - never the raw args. Replaces the flat record_held so
-                        // the three failure modes are no longer indistinguishable in the log.
-                        let reason_str = match reason {
-                            approval::ApprovalReason::Destructive => "destructive",
-                            approval::ApprovalReason::UntrustedSource => "untrusted_source",
-                            approval::ApprovalReason::DestructiveAndUntrusted => {
-                                "destructive_and_untrusted"
-                            }
-                        };
-                        let decision_str = match decision {
-                            approval::ApprovalDecision::Denied => "denied",
-                            approval::ApprovalDecision::Unreachable => "unreachable",
-                            _ => "no_response",
-                        };
+                        // the failure modes are no longer indistinguishable in the log.
                         audit::record_decision(
-                            srv, tool, client, reason_str, decision_str, &arguments, Some(held_ms),
+                            srv,
+                            tool,
+                            client,
+                            reason_str,
+                            decision_token(decision),
+                            &arguments,
+                            Some(held_ms),
                         );
-                        return Some(success(
-                            id,
-                            json!({
-                                "content": [{ "type": "text", "text": format!(
-                                    "Toolport: the call to {name} {why}, so it did not run. \
-                                     Ask the user to approve it in the Toolport app, then retry."
-                                ) }],
-                                "isError": true
-                            }),
-                        ));
+                        return Some(refused_call_result(id, name, decision, reason_str));
                     }
-                    // A human approved: skip the agent-confirm step and route the call.
+                    // A human approved. Enforce content-binding before running: if the call
+                    // was mutated after approval, reject the stale approval (fail-closed)
+                    // rather than run bytes a human never actually saw.
+                    if let Some(stale) = content_binding_decision(&approved_args_hash, &arguments) {
+                        audit::record_decision(
+                            srv,
+                            tool,
+                            client,
+                            reason_str,
+                            decision_token(stale),
+                            &arguments,
+                            Some(held_ms),
+                        );
+                        return Some(refused_call_result(id, name, stale, reason_str));
+                    }
+                    // Approved calls are audited too, so the trail shows what actually ran,
+                    // not only what was blocked.
+                    audit::record_decision(
+                        srv,
+                        tool,
+                        client,
+                        reason_str,
+                        "approved",
+                        &arguments,
+                        Some(held_ms),
+                    );
+                    // Skip the agent-confirm step and route the call.
                     confirmed = true;
                 }
             }
@@ -6801,6 +6905,56 @@ mod tests {
         let d = decide_via_broker(bad, &mut r);
         assert!(!d.is_approved());
         assert_eq!(d, approval::ApprovalDecision::Unreachable);
+    }
+
+    /// The audit record and the agent-facing envelope must name every outcome the same way,
+    /// so a governance view and a recovering agent never disagree about what happened.
+    #[test]
+    fn decision_token_names_every_outcome() {
+        assert_eq!(decision_token(approval::ApprovalDecision::Approved), "approved");
+        assert_eq!(decision_token(approval::ApprovalDecision::Denied), "denied");
+        assert_eq!(decision_token(approval::ApprovalDecision::Timeout), "no_response");
+        assert_eq!(decision_token(approval::ApprovalDecision::Unreachable), "unreachable");
+        assert_eq!(decision_token(approval::ApprovalDecision::StaleState), "stale_state");
+    }
+
+    /// Content-binding: identical arguments pass (the approved call runs); any change to the
+    /// arguments after approval yields StaleState, so the stale approval never runs.
+    #[test]
+    fn content_binding_matches_only_identical_args() {
+        let approved = audit::args_hash(&json!({ "table": "users", "hard": true }));
+        // Same content, different key order -> canonical hash matches -> allowed.
+        assert!(content_binding_decision(&approved, &json!({ "hard": true, "table": "users" }))
+            .is_none());
+        // Mutated after approval (different value) -> StaleState, fail-closed.
+        assert_eq!(
+            content_binding_decision(&approved, &json!({ "table": "orders", "hard": true })),
+            Some(approval::ApprovalDecision::StaleState)
+        );
+    }
+
+    /// The refusal envelope is machine-readable: a code-mode script (or any agent) can read
+    /// `structuredContent.toolportDecision` + `retriable` to pick a recovery instead of
+    /// blind-retrying a flat error string. Every non-approval stays `isError: true`.
+    #[test]
+    fn refused_call_result_carries_typed_decision() {
+        let cases = [
+            (approval::ApprovalDecision::Denied, "denied", false),
+            (approval::ApprovalDecision::Timeout, "no_response", true),
+            (approval::ApprovalDecision::Unreachable, "unreachable", true),
+            (approval::ApprovalDecision::StaleState, "stale_state", true),
+        ];
+        for (decision, token, retriable) in cases {
+            let v = refused_call_result(json!(1), "db__drop", decision, "destructive");
+            let result = &v["result"];
+            assert_eq!(result["isError"].as_bool(), Some(true), "{token} must fail closed");
+            let sc = &result["structuredContent"];
+            assert_eq!(sc["toolportDecision"].as_str(), Some(token));
+            assert_eq!(sc["reason"].as_str(), Some("destructive"));
+            assert_eq!(sc["retriable"].as_bool(), Some(retriable));
+            // The human-readable text still names the tool so a person reading a log sees it.
+            assert!(result["content"][0]["text"].as_str().unwrap().contains("db__drop"));
+        }
     }
 
     fn router() -> Router {

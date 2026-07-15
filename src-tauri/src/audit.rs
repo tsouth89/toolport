@@ -103,14 +103,17 @@ pub fn record_held(server: &str, tool: &str, client: Option<&str>) {
 }
 
 /// Build the audit entry for a gated HITL decision. Pure (no I/O) so it's unit-testable.
-/// Kept `ok:true` + `held:true` so it stays out of the error rate and the existing
-/// held-row UI renders it unchanged; the added fields (`kind`, `reason`, `decision`,
+/// `ok:true` keeps governance outcomes out of the error rate; `held` is true for every
+/// blocked outcome and false for `approved` (which ran), so the held-row UI stays honest;
+/// the added fields (`kind`, `reason`, `decision`,
 /// `argsHash`) let a governance / Approvals view tell *why* a call was gated and *which*
-/// way it resolved (denied vs no-response vs unreachable) apart - which the old flat
-/// `record_held` collapsed into one indistinguishable record. `reason` is the snake_case
-/// [`crate::approval::ApprovalReason`]; `decision` is `approved` | `denied` | `no_response`
-/// | `unreachable`. The RAW arguments are never stored - only `argsHash` - so the log
-/// proves which exact call was decided without persisting secrets/PII from arguments.
+/// way it resolved (approved vs denied vs no-response vs unreachable vs stale-state) apart -
+/// which the old flat `record_held` collapsed into one indistinguishable record. `reason`
+/// is the snake_case [`crate::approval::ApprovalReason`]; `decision` is `approved` |
+/// `denied` | `no_response` | `unreachable` | `stale_state` (the last: a human approved but
+/// the arguments were mutated before execute, so the stale approval was rejected). The RAW
+/// arguments are never stored - only `argsHash` - so the log proves which exact call was
+/// decided without persisting secrets/PII from arguments.
 fn decision_entry(
     server: &str,
     tool: &str,
@@ -120,12 +123,15 @@ fn decision_entry(
     args_hash: &str,
     duration_ms: Option<u64>,
 ) -> Value {
+    // `held` = the call was gated and did NOT run. An `approved` decision ran, so it is not
+    // held (it must not inflate the held count); every non-approval was blocked, so it is.
+    // `ok:true` throughout keeps governance outcomes (a deny, a timeout) out of the error rate.
     let mut entry = json!({
         "ts": epoch_millis() as u64,
         "server": server,
         "tool": tool,
         "ok": true,
-        "held": true,
+        "held": decision != "approved",
         "kind": "approval",
         "reason": reason,
         "decision": decision,
@@ -689,6 +695,12 @@ mod tests {
         assert!(denied.get("client").is_none());
         // durationMs is optional.
         assert!(denied.get("durationMs").is_none());
+
+        // An approved call RAN, so it is audited but not counted as held (still ok:true).
+        let approved = decision_entry("s", "t", None, "destructive", "approved", "h", None);
+        assert_eq!(approved["decision"], "approved");
+        assert_eq!(approved["held"], false);
+        assert_eq!(approved["ok"], true);
     }
 
     #[test]

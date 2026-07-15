@@ -90,6 +90,14 @@ pub enum ApprovalDecision {
     /// in time". Still fail-closed - it never lets the call proceed. The broker never sends
     /// this; it is only ever produced gateway-side.
     Unreachable,
+    /// A human approved a *specific* call, but the arguments about to execute no longer match
+    /// the ones that were approved (their canonical [`crate::audit::args_hash`] differs). The
+    /// stale approval is rejected rather than run on mutated content - approval binds to
+    /// CONTENT, not just intent. Like [`Unreachable`], the broker never sends this; it is
+    /// only ever produced gateway-side, at execute time, and is still fail-closed. This is
+    /// the seam a decoupled approval (session re-use, or a code-mode script that approves
+    /// then replays) must clear before its effect runs.
+    StaleState,
 }
 
 impl ApprovalDecision {
@@ -167,6 +175,20 @@ mod tests {
         assert!(!ApprovalDecision::Timeout.is_approved());
         // Unreachable is fail-closed exactly like the other non-approvals.
         assert!(!ApprovalDecision::Unreachable.is_approved());
+        // StaleState (approved-then-mutated) is fail-closed too: content no longer matches.
+        assert!(!ApprovalDecision::StaleState.is_approved());
+    }
+
+    #[test]
+    fn stale_state_is_a_distinct_serde_variant() {
+        // Round-trips to snake_case and is distinct from the other non-approvals so a
+        // caller can tell "the approved content changed" apart from a deny/timeout.
+        let s = serde_json::to_string(&ApprovalDecision::StaleState).unwrap();
+        assert_eq!(s, "\"stale_state\"");
+        let back: ApprovalDecision = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, ApprovalDecision::StaleState);
+        assert_ne!(ApprovalDecision::StaleState, ApprovalDecision::Denied);
+        assert_ne!(ApprovalDecision::StaleState, ApprovalDecision::Unreachable);
     }
 
     #[test]
