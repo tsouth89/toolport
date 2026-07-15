@@ -75,16 +75,17 @@ const SAVINGS_MODELS = [
   {
     group: "OpenAI",
     items: [
-      { label: "GPT-5.5", price: 5 },
-      { label: "GPT-5.4", price: 2.5 },
-      { label: "GPT-5.4 mini", price: 0.75 },
+      { label: "GPT-5.6 Sol", price: 5 },
+      { label: "GPT-5.6 Terra", price: 2.5 },
+      { label: "GPT-5.6 Luna", price: 1 },
     ],
   },
   {
     group: "Google",
     items: [
-      { label: "Gemini 2.5 Pro", price: 1.25 },
-      { label: "Gemini 2.5 Flash", price: 0.3 },
+      { label: "Gemini 3.1 Pro", price: 2 },
+      { label: "Gemini 3.5 Flash", price: 1.5 },
+      { label: "Gemini 3.1 Flash-Lite", price: 0.25 },
     ],
   },
 ];
