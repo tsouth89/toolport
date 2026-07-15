@@ -50,6 +50,12 @@ dirs = "5"
 ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
 subtle = "2.6"
+# Pure-Rust JS engine for server-side "code mode" orchestration (SOU-184): run one
+# agent script that calls many downstream tools, so an N-step task costs one round-trip
+# and the intermediate results never enter model context. Chosen over QuickJS to keep the
+# build free of a C toolchain / FFI. `boa_gc` supplies the Trace impls host state needs.
+boa_engine = "0.21"
+boa_gc = "0.21"
 base64 = "0.22"
 regex = "1"
 getrandom = "0.2"

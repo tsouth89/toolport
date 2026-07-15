@@ -95,6 +95,31 @@ pub fn record(full_tokens: u64, meta_tokens: u64, catalog_tools: u64, by_server:
     if !by_server.is_empty() {
         entry["byServer"] = json!(by_server);
     }
+    append_line(&entry);
+}
+
+/// Record one code-mode script run: the downstream round-trips it collapsed into a single
+/// `run_script` call (`round_trips_saved` = calls - 1). Written to the SAME log + counter as
+/// lazy-discovery savings, tagged `kind:"orchestration"` and carrying `roundTripsSaved` so
+/// the reader totals round-trips-saved separately from tokens-saved. `loads:0` keeps it out
+/// of the list-serve count (a script run is not a `tools/list`). No-op when nothing was saved.
+pub fn record_orchestration(round_trips_saved: u64) {
+    if round_trips_saved == 0 {
+        return;
+    }
+    append_line(&json!({
+        "ts": epoch_millis() as u64,
+        "kind": "orchestration",
+        "roundTripsSaved": round_trips_saved,
+        "loads": 0,
+    }));
+}
+
+/// Append one JSON entry as a single line. Every connected client spawns its own gateway
+/// process, so this is `O_APPEND` with one `write_all` (not `writeln!`) per line: concurrent
+/// writers can't interleave bytes into a corrupt JSON line, and a read-modify-write counter
+/// would race. Best-effort; rotates the log when it grows past the cap.
+fn append_line(entry: &Value) {
     if let Some(path) = savings_path() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -104,8 +129,6 @@ pub fn record(full_tokens: u64, meta_tokens: u64, catalog_tools: u64, by_server:
             .append(true)
             .open(&path)
         {
-            // Single write_all (not writeln!) so concurrent client-spawned gateways
-            // can't interleave bytes into corrupt JSON lines.
             let _ = file.write_all(format!("{entry}\n").as_bytes());
         }
         rotate_if_large(&path);
@@ -150,16 +173,22 @@ fn fold(entries: &[Value]) -> Value {
     let mut loads = 0u64;
     let mut peak = 0u64;
     let mut since = 0u64;
+    let mut round_trips = 0u64;
     for e in entries {
         saved = saved.saturating_add(e.get("saved").and_then(Value::as_u64).unwrap_or(0));
+        // A normal list-serve line has no `loads` and counts as one; a carry line and an
+        // orchestration line carry an explicit `loads` (the latter is 0), so neither a
+        // rotation nor a code-mode run inflates the list-load count.
         loads = loads.saturating_add(e.get("loads").and_then(Value::as_u64).unwrap_or(1));
         peak = peak.max(e.get("tools").and_then(Value::as_u64).unwrap_or(0));
+        round_trips = round_trips
+            .saturating_add(e.get("roundTripsSaved").and_then(Value::as_u64).unwrap_or(0));
         let ts = e.get("ts").and_then(Value::as_u64).unwrap_or(0);
         if ts > 0 && (since == 0 || ts < since) {
             since = ts;
         }
     }
-    json!({ "ts": since, "saved": saved, "tools": peak, "loads": loads })
+    json!({ "ts": since, "saved": saved, "tools": peak, "loads": loads, "roundTripsSaved": round_trips })
 }
 
 /// Every savings line on disk, oldest first (bounded by rotation). Shared by the
@@ -189,6 +218,7 @@ fn aggregate(entries: &[Value]) -> Value {
         "listLoads": folded.get("loads").and_then(Value::as_u64).unwrap_or(0),
         "peakCatalog": folded.get("tools").and_then(Value::as_u64).unwrap_or(0),
         "sinceTs": folded.get("ts").and_then(Value::as_u64).unwrap_or(0),
+        "roundTripsSaved": folded.get("roundTripsSaved").and_then(Value::as_u64).unwrap_or(0),
     })
 }
 
@@ -242,5 +272,37 @@ mod tests {
         assert_eq!(s["tokensSaved"], 0);
         assert_eq!(s["listLoads"], 0);
         assert_eq!(s["sinceTs"], 0);
+        assert_eq!(s["roundTripsSaved"], 0);
+    }
+
+    #[test]
+    fn orchestration_lines_total_round_trips_without_inflating_loads() {
+        // Code-mode runs live in the same log; they add round-trips-saved but are NOT
+        // list serves, so they must not count toward listLoads or tokensSaved.
+        let entries = vec![
+            json!({ "ts": 100, "saved": 60, "tools": 80 }), // one lazy list serve
+            json!({ "ts": 200, "kind": "orchestration", "roundTripsSaved": 5, "loads": 0 }),
+            json!({ "ts": 300, "kind": "orchestration", "roundTripsSaved": 3, "loads": 0 }),
+        ];
+        let s = aggregate(&entries);
+        assert_eq!(s["tokensSaved"], 60);
+        assert_eq!(s["listLoads"], 1); // only the list serve
+        assert_eq!(s["roundTripsSaved"], 8); // 5 + 3
+        assert_eq!(s["peakCatalog"], 80);
+    }
+
+    #[test]
+    fn carry_line_preserves_round_trips_after_rotation() {
+        // Folding a mix (list serve + orchestration) into a carry line and re-aggregating
+        // yields the same totals, so rotation never loses round-trips-saved.
+        let detail = [
+            json!({ "ts": 10, "saved": 100, "tools": 40 }),
+            json!({ "ts": 20, "kind": "orchestration", "roundTripsSaved": 7, "loads": 0 }),
+        ];
+        let carry = fold(&detail);
+        let s = aggregate(&[carry]);
+        assert_eq!(s["tokensSaved"], 100);
+        assert_eq!(s["listLoads"], 1);
+        assert_eq!(s["roundTripsSaved"], 7);
     }
 }
