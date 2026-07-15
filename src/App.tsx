@@ -90,11 +90,13 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { useTheme } from "@/lib/theme";
 
 /** Above this many servers, "Disable all" asks for confirmation first. */
 const BULK_DISABLE_CONFIRM_MIN = 3;
 
 function App() {
+  const { resolved: resolvedTheme } = useTheme();
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [clients, setClients] = useState<DetectedClient[]>([]);
   const [importPreview, setImportPreview] = useState<ImportItem[] | null>(null);
@@ -808,7 +810,7 @@ function App() {
         destructive
         onConfirm={handleToggleAll}
       />
-      <Toaster theme="dark" position="bottom-right" />
+      <Toaster theme={resolvedTheme} position="bottom-right" />
     </TooltipProvider>
   );
 }

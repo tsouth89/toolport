@@ -10,11 +10,14 @@ import {
   FolderTree,
   Globe,
   Layers,
+  Monitor,
+  Moon,
   Pin,
   Power,
   ShieldAlert,
   ShieldCheck,
   ShieldX,
+  Sun,
   Trash2,
   UserCheck,
   X,
@@ -51,6 +54,7 @@ import {
   type QuarantinedTool,
 } from "@/lib/api";
 import type { AllowedTool, FolderProfile, Profile, Registry } from "@/lib/types";
+import { useTheme, type Theme } from "@/lib/theme";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -451,6 +455,7 @@ function ProfileToolScope({
 /** Global discovery + security policy. These apply to every client uniformly, so
  * they live here rather than in the per-server Playground. */
 export function SettingsView({ registry, onRegistryChange }: Props) {
+  const { theme, setTheme } = useTheme();
   const lazyDiscovery = registry?.lazyDiscovery ?? true;
   const denyDestructive = registry?.denyDestructive ?? false;
   const confirmDestructive = registry?.confirmDestructive ?? false;
@@ -671,6 +676,39 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           "Start Toolport in the tray when you sign in, so it can hold tool calls for approval even before you open it",
           toggleAutostart,
         )}
+        <div className="flex items-center gap-2.5 rounded-md border px-3 py-2.5 text-sm">
+          <Sun className="size-4 shrink-0 text-info" />
+          <span className="flex min-w-0 flex-1 flex-col leading-tight">
+            <span className="font-medium">Appearance</span>
+            <span className="text-xs text-muted-foreground">
+              Light, dark, or follow your system setting.
+            </span>
+          </span>
+          <div className="flex shrink-0 gap-0.5 rounded-md border bg-background p-0.5">
+            {(
+              [
+                ["light", Sun, "Light"],
+                ["system", Monitor, "System"],
+                ["dark", Moon, "Dark"],
+              ] as [Theme, typeof Sun, string][]
+            ).map(([value, Icon, label]) => (
+              <button
+                key={value}
+                onClick={() => setTheme(value)}
+                aria-pressed={theme === value}
+                title={label}
+                className={`flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors ${
+                  theme === value
+                    ? "bg-muted font-medium text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Icon className="size-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
       </section>
       {profiles.length > 0 && (
         <section className="flex flex-col gap-2">
