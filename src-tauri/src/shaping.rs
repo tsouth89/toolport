@@ -335,6 +335,19 @@ mod tests {
         json!({ "content": [{ "type": "text", "text": "x".repeat(n) }], "isError": false })
     }
 
+    fn big_structured_result(text_len: usize, structured_len: usize) -> Value {
+    json!({
+        "content": [{
+            "type": "text",
+            "text": "x".repeat(text_len)
+        }],
+        "structuredContent": {
+            "data": "x".repeat(structured_len)
+        },
+        "isError": false
+      })
+    }
+
     #[test]
     fn under_budget_is_untouched() {
         let mut r = big_text_result(100);
@@ -582,5 +595,32 @@ mod tests {
 
         let text = projected["content"][0]["text"].as_str().unwrap();
         assert_eq!(text, "40");
+    }
+    #[test]
+    fn structured_payload_counts_toward_cache_eviction() {
+        // Large structured payload (~20 MB) with a tiny text body.
+        let mut first = big_structured_result(10, 20 * 1024 * 1024);
+        assert!(shape_result(&mut first, 1024, None));
+
+        // Extract the cursor for the cached result.
+        let text = first["content"][0]["text"].as_str().unwrap();
+        let cursor = text
+            .split("\"cursor\":\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap()
+            .to_string();
+
+        // Insert several more large structured results so the first one is evicted.
+        for _ in 0..4 {
+            let mut next = big_structured_result(10, 20 * 1024 * 1024);
+            assert!(shape_result(&mut next, 1024, None));
+        }
+
+        // The original cursor should now be gone.
+        let result = fetch_result(&cursor, 0, 10, None, None);
+        let text = result["content"][0]["text"].as_str().unwrap();
+
+        assert!(text.contains("unknown or expired"));
     }
 }

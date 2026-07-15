@@ -5773,7 +5773,6 @@ mod tests {
             Box::new(PagingRoute {body}),
         )
         .unwrap();
-       
         let mut r = Router::new();
         r.add(ds);
         r
