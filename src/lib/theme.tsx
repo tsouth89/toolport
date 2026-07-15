@@ -11,10 +11,15 @@ function readStored(): Theme {
   try {
     const v = localStorage.getItem(STORAGE_KEY);
     if (v === "light" || v === "dark" || v === "system") return v;
+    // No explicit choice yet. Preserve dark for EXISTING installs (they never opted into a
+    // theme, so an upgrade shouldn't flip their app under them); default NEW installs to
+    // `system`. `conduit.onboarded` is set once onboarding is done = an existing user. The
+    // inline bootstrap in index.html makes the same decision so there's no flash.
+    return localStorage.getItem("conduit.onboarded") === "1" ? "dark" : "system";
   } catch {
-    // localStorage can throw in locked-down webviews; fall back to system.
+    // localStorage unavailable: dark matches the historical hardcoded app.
+    return "dark";
   }
-  return "system";
 }
 
 function prefersDark(): boolean {
