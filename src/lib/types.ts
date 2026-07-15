@@ -358,6 +358,14 @@ export interface Profile {
   enabledServerIds: string[];
 }
 
+/** A folder -> profile auto-routing mapping (SOU-188): a client whose reported project
+ * root is `path` or a descendant auto-scopes to `profile` (a profile id or name), the
+ * longest matching path wins. Empty list = no folder routing. */
+export interface FolderProfile {
+  path: string;
+  profile: string;
+}
+
 /** A tool call held awaiting a human decision (the HITL approval queue). */
 export interface PendingApproval {
   id: string;
@@ -393,6 +401,8 @@ export interface Registry {
   servers: ServerEntry[];
   profiles: Profile[];
   activeProfileId: string | null;
+  /** Folder -> profile auto-routing mappings. Absent/empty = no folder routing. */
+  folderProfiles?: FolderProfile[];
   /** Per-tool exposure overrides (rename / re-describe), keyed by server id then original tool name. */
   toolOverrides?: Record<string, Record<string, ToolOverride>>;
   /** Tools pinned as lazy-discovery prerequisites, keyed by server id -> original tool names. */

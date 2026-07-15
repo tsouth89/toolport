@@ -5,6 +5,7 @@ import type {
   AuthInfo,
   CatalogEntry,
   DetectedClient,
+  FolderProfile,
   ImportItem,
   InspectEntry,
   McpPrompt,
@@ -654,4 +655,9 @@ export function deleteProfile(id: string): Promise<Registry> {
 
 export function setActiveProfile(id: string): Promise<Registry> {
   return invoke<Registry>("set_active_profile", { id });
+}
+
+/** Replace the folder -> profile auto-routing mappings (SOU-188). */
+export function setFolderProfiles(mappings: FolderProfile[]): Promise<Registry> {
+  return invoke<Registry>("set_folder_profiles", { mappings });
 }

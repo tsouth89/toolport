@@ -138,6 +138,18 @@ pub struct Profile {
     pub enabled_server_ids: Vec<String>,
 }
 
+/// Maps a project folder to a profile, so the gateway can auto-scope a client to the right
+/// server set based on the working directory (MCP `root`) it reports, instead of a manual
+/// profile switch. A client whose reported root is `path` or a descendant of it resolves to
+/// `profile`; the longest matching `path` wins. `profile` is a profile id OR name (resolved
+/// the same way as `client_scopes`, via `resolve_profile_id`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderProfile {
+    pub path: String,
+    pub profile: String,
+}
+
 /// A consumer registered to reach the gateway over the HTTP/OpenAPI bridge with
 /// its own bearer token and scope. Lets one bridge process serve several clients
 /// (e.g. Open WebUI) with different server sets, resolved per request from the
@@ -177,6 +189,35 @@ fn ct_eq(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Normalize a filesystem path for prefix comparison WITHOUT touching disk: unify separators
+/// to `/`, trim a trailing separator, and lowercase on Windows (its paths are
+/// case-insensitive). String-only so it works for a path that doesn't exist on this machine
+/// (the client reported it). Not canonicalization, just enough to compare two reported paths.
+fn normalize_path(p: &str) -> String {
+    let mut s = p.trim().replace('\\', "/");
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    if cfg!(windows) {
+        s = s.to_ascii_lowercase();
+    }
+    s
+}
+
+/// True when `root` is `base` itself or a descendant of it, matched on a path BOUNDARY so
+/// base `/a/proj` matches `/a/proj` and `/a/proj/src` but never `/a/project`. Both must
+/// already be [`normalize_path`]-ed. An empty `base` matches nothing (an unset mapping path
+/// must not swallow every root).
+fn path_is_within(base: &str, root: &str) -> bool {
+    if base.is_empty() {
+        return false;
+    }
+    if root == base {
+        return true;
+    }
+    root.starts_with(base) && root.as_bytes().get(base.len()) == Some(&b'/')
 }
 
 /// A user override for how one tool is exposed to clients, keyed in the registry by the
@@ -336,6 +377,12 @@ pub struct Registry {
     /// the client follows the active profile (all its enabled servers).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub client_scopes: HashMap<String, String>,
+    /// Folder -> profile mappings for project-scoped auto-routing: when a client reports a
+    /// working directory (MCP `root`), the gateway picks the profile whose mapped path is the
+    /// longest prefix of that root, instead of the client's manually-set profile. Empty = no
+    /// folder routing (every client follows its configured/active profile as before).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_profiles: Vec<FolderProfile>,
     /// Per-client discovery-mode override, keyed by stable client id (e.g. "cursor" ->
     /// "grouped"). Value is `"full" | "lazy" | "grouped"`; an absent entry means the client
     /// inherits the global mode (`discovery_mode`, else `lazy_discovery`). The gateway
@@ -454,6 +501,7 @@ impl Default for Registry {
             team: None,
             result_budgets: HashMap::new(),
             client_scopes: HashMap::new(),
+            folder_profiles: Vec::new(),
             client_discovery: HashMap::new(),
             http_clients: Vec::new(),
             secrets_generation: 0,
@@ -824,6 +872,38 @@ impl Registry {
             .iter()
             .filter(|s| self.is_enabled(&id, &s.id))
             .collect()
+    }
+
+    /// Resolve the folder-scoped profile for a client's reported root path, if any
+    /// [`folder_profiles`](Self::folder_profiles) mapping matches. The longest matching
+    /// mapped path wins (so a nested mapping overrides its parent). Returns the mapped
+    /// profile string (id or name, resolved like `client_scopes`), or `None` to fall back to
+    /// the client's configured/active profile. Path-only string matching, never touches disk:
+    /// canonicalizing would fail for a root that doesn't exist on THIS machine, and the point
+    /// is to match what the client reported.
+    pub fn profile_for_root(&self, root: &str) -> Option<String> {
+        let root = normalize_path(root);
+        if root.is_empty() {
+            return None;
+        }
+        self.folder_profiles
+            .iter()
+            .filter_map(|fp| {
+                let base = normalize_path(&fp.path);
+                path_is_within(&base, &root).then_some((base.len(), fp.profile.clone()))
+            })
+            .max_by_key(|(len, _)| *len)
+            .map(|(_, profile)| profile)
+    }
+
+    /// Replace the folder -> profile routing mappings (the UI edits the list wholesale). Drops
+    /// entries with a blank path or profile; stores paths verbatim (normalized only at match
+    /// time in [`profile_for_root`]).
+    pub fn set_folder_profiles(&mut self, mappings: Vec<FolderProfile>) {
+        self.folder_profiles = mappings
+            .into_iter()
+            .filter(|m| !m.path.trim().is_empty() && !m.profile.trim().is_empty())
+            .collect();
     }
 
     /// Servers the multi-tenant HTTP bridge must connect: the union of the base
@@ -1694,6 +1774,62 @@ mod tests {
             r.enabled_servers_for("nope").is_empty(),
             "unknown profile must fail closed, not fall back to active"
         );
+    }
+
+    #[test]
+    fn profile_for_root_longest_prefix_wins_on_a_path_boundary() {
+        let mut r = Registry::default();
+        r.folder_profiles = vec![
+            FolderProfile { path: "/home/me/work".into(), profile: "Work".into() },
+            FolderProfile { path: "/home/me/work/client-a".into(), profile: "ClientA".into() },
+            FolderProfile { path: "/home/me/personal".into(), profile: "Personal".into() },
+        ];
+        // Exact match, and a descendant picks the parent mapping.
+        assert_eq!(r.profile_for_root("/home/me/work"), Some("Work".into()));
+        assert_eq!(r.profile_for_root("/home/me/work/src"), Some("Work".into()));
+        // A more specific nested mapping wins over its parent.
+        assert_eq!(
+            r.profile_for_root("/home/me/work/client-a/repo"),
+            Some("ClientA".into())
+        );
+        assert_eq!(r.profile_for_root("/home/me/personal/notes"), Some("Personal".into()));
+        // No mapping -> None (caller falls back to the configured profile).
+        assert_eq!(r.profile_for_root("/tmp/other"), None);
+        // Boundary: a sibling sharing a NAME prefix must not match ("work" vs "workspace").
+        assert_eq!(r.profile_for_root("/home/me/workspace"), None);
+        // Empty root never matches.
+        assert_eq!(r.profile_for_root(""), None);
+    }
+
+    #[test]
+    fn set_folder_profiles_drops_blank_entries() {
+        let mut r = Registry::default();
+        r.set_folder_profiles(vec![
+            FolderProfile { path: "/a".into(), profile: "P".into() },
+            FolderProfile { path: "  ".into(), profile: "P".into() }, // blank path
+            FolderProfile { path: "/b".into(), profile: " ".into() },  // blank profile
+        ]);
+        assert_eq!(r.folder_profiles.len(), 1);
+        assert_eq!(r.folder_profiles[0].path, "/a");
+    }
+
+    #[test]
+    fn profile_for_root_normalizes_separators_and_trailing_slash() {
+        let mut r = Registry::default();
+        r.folder_profiles =
+            vec![FolderProfile { path: "/home/me/work/".into(), profile: "Work".into() }];
+        // A trailing slash on the mapping and backslash separators in the root both normalize.
+        assert_eq!(r.profile_for_root("/home/me/work"), Some("Work".into()));
+        assert_eq!(r.profile_for_root(r"\home\me\work\sub"), Some("Work".into()));
+    }
+
+    #[test]
+    fn folder_profiles_omitted_from_json_when_empty() {
+        // Back-compat: a registry with no folder routing serializes without the field, so
+        // existing registry.json files round-trip unchanged.
+        let r = Registry::default();
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("folderProfiles"));
     }
 
     #[test]

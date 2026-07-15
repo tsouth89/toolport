@@ -3535,6 +3535,22 @@ fn resolve_live_profile(
     }
 }
 
+/// The profile that actually governs a client's scope right now: a folder-scoped override
+/// when the client's reported project root matches a `folder_profiles` mapping (SOU-188),
+/// otherwise the client's configured profile from [`resolve_live_profile`]. Folder routing
+/// auto-scopes by working directory with no manual profile switch; an unmatched or unknown
+/// root leaves the configured behavior exactly as before. stdio-only for now (the root comes
+/// from the single upstream client's MCP `roots`); the HTTP bridge always passes `root: None`.
+fn effective_profile(
+    reg: &Registry,
+    client_id: Option<&str>,
+    env_profile: &Option<String>,
+    root: Option<&str>,
+) -> Option<String> {
+    root.and_then(|r| reg.profile_for_root(r))
+        .or_else(|| resolve_live_profile(reg, client_id, env_profile))
+}
+
 /// The registry as a JSON value with the `team` block removed. The gateway builds the
 /// router ONLY from servers/profiles/policy flags and never reads the `team` block (its
 /// sync version/etag, role, member name, and per-day usage watermarks). The desktop team
@@ -3628,7 +3644,17 @@ fn watch_registry(
                 continue;
             }
             last_relevant = new_relevant;
-            let resolved = resolve_live_profile(&new_reg, client_id.as_deref(), &env_profile);
+            // The client's reported project root, read first so folder routing (SOU-188) can
+            // fold into the profile resolution below AND place ${ROOT} servers in the rebuild.
+            let root = client_root
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            // Effective profile = a folder-scoped override for the current root, else the
+            // client's configured profile. So editing folder_profiles (a registry change)
+            // re-applies routing live for a client already sitting in a mapped folder.
+            let resolved =
+                effective_profile(&new_reg, client_id.as_deref(), &env_profile, root.as_deref());
             // Capture the profile we were serving before this reload so the log can
             // show the transition - the single most useful line when diagnosing
             // "why can't this client see server X": it pins down which profile is
@@ -3642,10 +3668,6 @@ fn watch_registry(
                 prev
             };
             // Build the new router (spawns processes) before taking locks.
-            let root = client_root
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
             let new_router = build_router(
                 &new_reg,
                 resolved.as_deref(),
@@ -3799,6 +3821,11 @@ struct GatewayState {
     stdio_upstream: Arc<StdioUpstream>,
     /// Answers downstream server-initiated RPC (roots, sampling, elicitation).
     server_handler: ServerRequestHandler,
+    /// This stdio gateway's single client id + boot `CONDUIT_PROFILE`, kept so the
+    /// root-change handler can recompute the effective (folder-scoped) profile off the
+    /// request thread without re-reading env. Process constants; unused in HTTP mode.
+    client_id: Option<String>,
+    env_profile: Option<String>,
 }
 
 /// Client capabilities the upstream MCP client declared at `initialize`.
@@ -4456,9 +4483,41 @@ fn refresh_client_root(state: &GatewayState) {
             false
         }
     };
-    // Only respawn when the resolved root actually changed and a ${ROOT} server is
-    // present, so a client that has no root (or no ${ROOT} server) never churns.
-    if changed && profile_has_root_server(state) {
+    if !changed {
+        return;
+    }
+    // Folder routing (SOU-188): the new project root may map to a different profile. Recompute
+    // the effective profile (folder override for this root, else the configured one) and swap
+    // state.profile before the rebuild so the new server scope takes effect. No mapping match
+    // leaves the configured profile untouched, exactly as before.
+    let new_effective = {
+        let reg = state
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        effective_profile(
+            &reg,
+            state.client_id.as_deref(),
+            &state.env_profile,
+            new_root.as_deref(),
+        )
+    };
+    let profile_switched = {
+        let mut cur = state
+            .profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *cur != new_effective {
+            *cur = new_effective;
+            true
+        } else {
+            false
+        }
+    };
+    // Rebuild when folder routing switched the profile (new server scope) OR a ${ROOT} server
+    // must be re-placed at the new path. rebuild_router_for_root reads the now-updated
+    // state.profile and emits tools/list_changed; skip the churn when neither applies.
+    if profile_switched || profile_has_root_server(state) {
         rebuild_router_for_root(state);
     }
 }
@@ -6616,6 +6675,8 @@ fn main() {
         client_root,
         stdio_upstream,
         server_handler,
+        client_id: client_id.clone(),
+        env_profile: env_profile.clone(),
     };
 
     // Native HTTP/OpenAPI transport: a first-class path for HTTP tool clients
@@ -6962,6 +7023,40 @@ mod tests {
         }
     }
 
+    /// Folder routing (SOU-188): a reported root that matches a `folder_profiles` mapping
+    /// overrides the client's configured profile; an unmatched or absent root falls back to
+    /// the configured profile (client_scopes, then env), so unmapped clients are unchanged.
+    #[test]
+    fn effective_profile_prefers_folder_override_then_configured() {
+        let mut reg = Registry::default();
+        reg.folder_profiles = vec![registry::FolderProfile {
+            path: "/proj/work".into(),
+            profile: "Work".into(),
+        }];
+        reg.client_scopes.insert("cursor".into(), "Billing".into());
+        let env = Some("Env".to_string());
+        // Root under a mapping -> folder override wins over the configured profile.
+        assert_eq!(
+            effective_profile(&reg, Some("cursor"), &env, Some("/proj/work/repo")),
+            Some("Work".into())
+        );
+        // Root outside any mapping -> the client's configured profile (client_scopes).
+        assert_eq!(
+            effective_profile(&reg, Some("cursor"), &env, Some("/elsewhere")),
+            Some("Billing".into())
+        );
+        // No root reported -> configured profile, unchanged.
+        assert_eq!(
+            effective_profile(&reg, Some("cursor"), &env, None),
+            Some("Billing".into())
+        );
+        // No client scope + no folder match -> env fallback (legacy behavior).
+        assert_eq!(
+            effective_profile(&reg, None, &env, Some("/elsewhere")),
+            Some("Env".into())
+        );
+    }
+
     fn router() -> Router {
         Router::new()
     }
@@ -7093,6 +7188,8 @@ mod tests {
             client_root: Arc::new(Mutex::new(None)),
             stdio_upstream,
             server_handler,
+            client_id: None,
+            env_profile: None,
         }
     }
 

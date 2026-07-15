@@ -19,7 +19,9 @@ use crate::downstream::{resolve_root_token, DownstreamServer, StdioTransport};
 use crate::inspect;
 use crate::integrity;
 use crate::oauth;
-use crate::registry::{self, arg_looks_secret, redact_url_userinfo, Profile, Registry, ServerEntry};
+use crate::registry::{
+    self, arg_looks_secret, redact_url_userinfo, FolderProfile, Profile, Registry, ServerEntry,
+};
 use crate::remote;
 use crate::router;
 use crate::savings;
@@ -615,6 +617,21 @@ fn delete_profile(state: State<RegistryState>, id: String) -> Result<Registry, S
 #[tauri::command]
 fn set_active_profile(state: State<RegistryState>, id: String) -> Result<Registry, String> {
     let (reg, _) = write_registry(state.inner(), |reg| reg.set_active_profile(&id))?;
+    Ok(reg)
+}
+
+/// Replace the folder -> profile auto-routing mappings (SOU-188). A gateway serving a client
+/// whose reported project root is under a mapped path auto-scopes to that profile. Returns
+/// the saved registry so the UI reflects the persisted list.
+#[tauri::command]
+fn set_folder_profiles(
+    state: State<RegistryState>,
+    mappings: Vec<FolderProfile>,
+) -> Result<Registry, String> {
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.set_folder_profiles(mappings);
+        Ok(())
+    })?;
     Ok(reg)
 }
 
@@ -2746,6 +2763,7 @@ pub fn run() {
             create_profile,
             delete_profile,
             set_active_profile,
+            set_folder_profiles,
             write_to_client,
             install_gateway,
             uninstall_gateway,

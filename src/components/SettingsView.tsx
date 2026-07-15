@@ -6,6 +6,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  FolderTree,
   Globe,
   Layers,
   Pin,
@@ -37,6 +38,7 @@ import {
   setDenyDestructive,
   setHumanApproval,
   setLazyDiscovery,
+  setFolderProfiles,
   setLiveInspect,
   setQuarantineOnDrift,
   setToolPinned,
@@ -45,7 +47,7 @@ import {
   type HttpBridgeStatus,
   type QuarantinedTool,
 } from "@/lib/api";
-import type { AllowedTool, Registry } from "@/lib/types";
+import type { AllowedTool, FolderProfile, Registry } from "@/lib/types";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -134,6 +136,120 @@ function PinnedPrerequisites({
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  );
+}
+
+/** Folder -> profile auto-routing (SOU-188): map a project folder to a profile so a client
+ * opened in that folder auto-scopes to it, no manual profile switch. Reads/writes
+ * `registry.folderProfiles`; the longest matching path wins at match time. stdio clients. */
+function FolderRouting({
+  registry,
+  onRegistryChange,
+}: {
+  registry: Registry | null;
+  onRegistryChange: (registry: Registry) => void;
+}) {
+  const mappings = registry?.folderProfiles ?? [];
+  const profiles = registry?.profiles ?? [];
+  const [path, setPath] = useState("");
+  const [profile, setProfile] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function save(next: FolderProfile[]) {
+    setBusy(true);
+    try {
+      onRegistryChange(await setFolderProfiles(next));
+    } catch (e) {
+      toastError(`Couldn't save folder routing: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function add() {
+    const p = path.trim();
+    if (!p || !profile) return;
+    // Replace any existing mapping for the same path rather than duplicating it.
+    const next = [...mappings.filter((m) => m.path.trim() !== p), { path: p, profile }];
+    await save(next);
+    setPath("");
+    setProfile("");
+  }
+
+  // A mapping's profile is stored as an id or name; show the profile's display name.
+  const label = (ref: string) =>
+    profiles.find((p) => p.id === ref || p.name === ref)?.name ?? ref;
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+      <div className="flex items-center gap-2 text-xs">
+        <FolderTree className="size-3.5 shrink-0 text-info" />
+        <span className="font-medium">Project folder routing</span>
+        <span className="rounded-full bg-muted px-1.5 py-0.5 text-muted-foreground">
+          {mappings.length}
+        </span>
+        <span className="ml-auto text-muted-foreground">
+          auto-scope a client by the folder it opens in
+        </span>
+      </div>
+      {mappings.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {mappings.map((m) => (
+            <li key={m.path} className="flex items-center gap-2 text-xs">
+              <code className="truncate rounded bg-muted px-1.5 py-0.5 font-mono text-foreground/90">
+                {m.path}
+              </code>
+              <span className="shrink-0 text-muted-foreground">&rarr;</span>
+              <span className="shrink-0 text-foreground/90">{label(m.profile)}</span>
+              <button
+                onClick={() => save(mappings.filter((x) => x.path !== m.path))}
+                disabled={busy}
+                aria-label={`Remove routing for ${m.path}`}
+                className="ml-auto rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border disabled:opacity-50"
+              >
+                <X className="size-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {profiles.length === 0 ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Create a profile first, then map a folder to it here.
+        </p>
+      ) : (
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void add();
+            }}
+            placeholder="/path/to/project"
+            className="min-w-0 flex-1 rounded border bg-background px-2 py-1 font-mono text-xs focus-visible:ring-1 focus-visible:ring-border focus-visible:outline-none"
+          />
+          <Select value={profile} onValueChange={setProfile}>
+            <SelectTrigger className="h-7 w-32 text-xs">
+              <SelectValue placeholder="Profile" />
+            </SelectTrigger>
+            <SelectContent>
+              {profiles.map((p) => (
+                <SelectItem key={p.id} value={p.id}>
+                  {p.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <button
+            onClick={() => void add()}
+            disabled={busy || !path.trim() || !profile}
+            className="shrink-0 rounded border px-2 py-1 text-xs font-medium hover:bg-muted disabled:opacity-50"
+          >
+            Add
+          </button>
+        </div>
       )}
     </div>
   );
@@ -466,6 +582,7 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
               );
             })}
           </div>
+          <FolderRouting registry={registry} onRegistryChange={onRegistryChange} />
         </section>
       )}
       <section className="flex flex-col gap-2">
