@@ -483,10 +483,13 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
           ≈ {fmtTokens(savings.tokensSaved)}{" "}
           <span className="text-base font-normal text-muted-foreground">tokens</span>
         </span>
-        <span className="text-xl font-semibold tabular-nums text-muted-foreground">
-          ≈ {fmtDollars(dollars)}
+        <span
+          className="text-xl font-semibold tabular-nums text-muted-foreground"
+          title="A ceiling at list input prices. Tool definitions live in the cacheable prompt prefix, so with prompt caching the real figure is lower; actual spend depends on your model mix and cache-hit rate."
+        >
+          up to {fmtDollars(dollars)}
           <span className="ml-1 text-xs font-normal text-muted-foreground/70">
-            illustrative
+            list prices, before caching
           </span>
         </span>
       </div>

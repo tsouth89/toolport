@@ -19,6 +19,12 @@ describe("fmtTokens", () => {
     expect(fmtTokens(1_234_567)).toBe("1.2M");
   });
 
+  it("rolls over to B and T instead of thousands of M", () => {
+    expect(fmtTokens(1_000_000_000)).toBe("1.0B");
+    expect(fmtTokens(2_110_000_000)).toBe("2.1B");
+    expect(fmtTokens(1_500_000_000_000)).toBe("1.5T");
+  });
+
   it("handles the boundary at 999999 (rounds up to 1000.0k, not 1.0M)", () => {
     // 999999 is just below the 1_000_000 threshold, so it takes the "k" branch:
     // (999999 / 1000).toFixed(1) === "1000.0", giving "1000.0k" rather than "1.0M".
