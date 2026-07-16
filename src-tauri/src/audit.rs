@@ -352,11 +352,30 @@ fn latency(durs: &mut [u64]) -> (Option<u64>, Option<u64>) {
     (Some(avg), Some(durs[idx]))
 }
 
-/// Aggregate the last `window` calls into per-server stats plus global totals.
-/// This is the data behind the observability dashboard: call volume, error
-/// rate, and latency per server, computed locally from the audit log.
-pub fn stats(window: usize) -> Value {
-    aggregate(&read_recent(window))
+/// Every retained entry, newest first. The log is size-capped (see `MAX_AUDIT_BYTES`), so
+/// this stays bounded no matter how long Toolport has been running.
+pub fn read_all() -> Vec<Value> {
+    let path = match audit_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    content
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+/// Aggregate the FULL retained log into per-server stats plus global totals: call volume,
+/// error rate, and latency per server, computed locally. Totals are the real count of what's
+/// retained (the byte cap bounds it), not a fixed window, so the error rate stays consistent
+/// with the call count instead of being taken over an arbitrary slice.
+pub fn stats() -> Value {
+    aggregate(&read_all())
 }
 
 /// Pure aggregation of audit entries into per-server + global stats. Split from

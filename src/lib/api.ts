@@ -47,8 +47,8 @@ export function getAuditLog(limit = 200): Promise<AuditEntry[]> {
 }
 
 /** Aggregated per-server stats (calls, error rate, latency) from the audit log. */
-export function getAuditStats(window = 2000): Promise<AuditStats> {
-  return invoke<AuditStats>("audit_stats", { window });
+export function getAuditStats(): Promise<AuditStats> {
+  return invoke<AuditStats>("audit_stats", {});
 }
 
 /** A tool-definition integrity event: a previously-approved tool changed

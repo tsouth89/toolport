@@ -1429,7 +1429,7 @@ export function ActivityView({
         setEntries([]);
         setLoadError(true);
       });
-    getAuditStats(2000)
+    getAuditStats()
       .then((s) => alive && setStats(s))
       .catch(() => alive && setStats(null));
     getSavingsSummary()

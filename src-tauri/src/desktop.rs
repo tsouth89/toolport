@@ -892,11 +892,11 @@ fn get_audit_log(limit: usize) -> Vec<serde_json::Value> {
     audit::read_recent(limit)
 }
 
-/// Aggregate the recent audit log into per-server call/error/latency stats for
-/// the observability dashboard.
+/// Aggregate the full retained audit log into per-server call/error/latency stats for
+/// the observability dashboard. Bounded by the log's byte cap, so totals are real.
 #[tauri::command]
-fn audit_stats(window: usize) -> serde_json::Value {
-    audit::stats(window)
+fn audit_stats() -> serde_json::Value {
+    audit::stats()
 }
 
 /// Recent tool-definition integrity events (newest first): a previously-approved
