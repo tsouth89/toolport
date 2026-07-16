@@ -1,70 +1,52 @@
 import { cn } from "@/lib/utils";
 
 /**
- * Official client brand marks.
+ * Official client brand logos.
  *
- * The SVG paths are vendored from simple-icons (CC0-1.0), each a single path on a
- * 24x24 viewBox. Only clients with a confidently-correct official mark get one; the
- * rest fall back to a neutral monogram badge (a wrong logo reads worse than none).
+ * SVGs are vendored under src/assets/client-logos (no runtime dependency), sourced from
+ * @lobehub/icons-static-svg (MIT) and simple-icons (CC0). Full-color marks keep their own
+ * fills; monochrome marks are authored with `fill="currentColor"`, so they inherit the
+ * surrounding text color and stay legible on both the light and dark (navy) themes.
  *
- * `color` is the brand hex, applied via the SVG's `color` so `fill="currentColor"`
- * picks it up. Near-black marks (Cursor, LM Studio, Windsurf, Cline) omit `color` and
- * inherit the surrounding text color instead, so they stay visible on the dark theme
- * instead of vanishing into the navy.
+ * Each file is a 24x24 viewBox sized in `1em`, so the wrapper's font-size sets the render
+ * size. Clients without a vendored logo fall back to a neutral monogram badge.
  */
-type Mark = { path: string; color?: string };
+const RAW = import.meta.glob("../assets/client-logos/*.svg", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
 
-const MARKS: Record<string, Mark> = {
-  claude: {
-    color: "#D97757",
-    path: "m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z",
-  },
-  googlegemini: {
-    color: "#8E75B2",
-    path: "M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81",
-  },
-  warp: {
-    color: "#01A4FF",
-    path: "M12.035 2.723h9.253A2.712 2.712 0 0 1 24 5.435v10.529a2.712 2.712 0 0 1-2.712 2.713H8.047Zm-1.681 2.6L6.766 19.677h5.598l-.399 1.6H2.712A2.712 2.712 0 0 1 0 18.565V8.036a2.712 2.712 0 0 1 2.712-2.712Z",
-  },
-  zed: {
-    color: "#084CCF",
-    path: "M2.25 1.5a.75.75 0 0 0-.75.75v16.5H0V2.25A2.25 2.25 0 0 1 2.25 0h20.095c1.002 0 1.504 1.212.795 1.92L10.764 14.298h3.486V12.75h1.5v1.922a1.125 1.125 0 0 1-1.125 1.125H9.264l-2.578 2.578h11.689V9h1.5v9.375a1.5 1.5 0 0 1-1.5 1.5H5.185L2.562 22.5H21.75a.75.75 0 0 0 .75-.75V5.25H24v16.5A2.25 2.25 0 0 1 21.75 24H1.655C.653 24 .151 22.788.86 22.08L13.19 9.75H9.75v1.5h-1.5V9.375A1.125 1.125 0 0 1 9.375 8.25h5.314l2.625-2.625H5.625V15h-1.5V5.625a1.5 1.5 0 0 1 1.5-1.5h13.19L21.438 1.5z",
-  },
-  google: {
-    color: "#4285F4",
-    path: "M12.48 10.92v3.28h7.84c-.24 1.84-.853 3.187-1.787 4.133-1.147 1.147-2.933 2.4-6.053 2.4-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0 5.867 0 .307 5.387.307 12s5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36 2.16-2.16 2.84-5.213 2.84-7.667 0-.76-.053-1.467-.173-2.053H12.48z",
-  },
-  cursor: {
-    path: "M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23",
-  },
-  lmstudio: {
-    path: "M5.6 0A5.6 5.6 0 0 0 0 5.6v12.8A5.6 5.6 0 0 0 5.6 24h12.8a5.6 5.6 0 0 0 5.6-5.6V5.6A5.6 5.6 0 0 0 18.4 0zm0 2h12.8A3.6 3.6 0 0 1 22 5.6v12.8a3.6 3.6 0 0 1-3.6 3.6H5.6A3.6 3.6 0 0 1 2 18.4V5.6A3.6 3.6 0 0 1 5.6 2m-.4 2.8a1.2 1.2 0 0 0 0 2.4h10.4a1.2 1.2 0 0 0 0-2.4zm3.2 4a1.2 1.2 0 0 0 0 2.4h10.4a1.2 1.2 0 0 0 0-2.4zm-3.2 4a1.2 1.2 0 0 0 0 2.4h10.4a1.2 1.2 0 0 0 0-2.4zm3.2 4a1.2 1.2 0 0 0 0 2.4h10.4a1.2 1.2 0 0 0 0-2.4z",
-  },
-  windsurf: {
-    path: "M23.55 5.067c-1.2038-.002-2.1806.973-2.1806 2.1765v4.8676c0 .972-.8035 1.7594-1.7597 1.7594-.568 0-1.1352-.286-1.4718-.7659l-4.9713-7.1003c-.4125-.5896-1.0837-.941-1.8103-.941-1.1334 0-2.1533.9635-2.1533 2.153v4.8957c0 .972-.7969 1.7594-1.7596 1.7594-.57 0-1.1363-.286-1.4728-.7658L.4076 5.1598C.2822 4.9798 0 5.0688 0 5.2882v4.2452c0 .2147.0656.4228.1884.599l5.4748 7.8183c.3234.462.8006.8052 1.3509.9298 1.3771.313 2.6446-.747 2.6446-2.0977v-4.893c0-.972.7875-1.7593 1.7596-1.7593h.003a1.798 1.798 0 0 1 1.4718.7658l4.9723 7.0994c.4135.5905 1.05.941 1.8093.941 1.1587 0 2.1515-.9645 2.1515-2.153v-4.8948c0-.972.7875-1.7594 1.7596-1.7594h.194a.22.22 0 0 0 .2204-.2202v-4.622a.22.22 0 0 0-.2203-.2203Z",
-  },
-  cline: {
-    path: "m23.365 13.556-1.442-2.895V8.994c0-2.764-2.218-5.002-4.954-5.002h-2.464c.178-.367.276-.779.276-1.213A2.77 2.77 0 0 0 12.018 0a2.77 2.77 0 0 0-2.763 2.779c0 .434.098.846.276 1.213H7.067c-2.736 0-4.954 2.238-4.954 5.002v1.667L.64 13.549c-.149.29-.149.636 0 .927l1.472 2.855v1.667C2.113 21.762 4.33 24 7.067 24h9.902c2.736 0 4.954-2.238 4.954-5.002V17.33l1.44-2.865c.143-.286.143-.622.002-.91m-12.854 2.36a2.27 2.27 0 0 1-2.261 2.273 2.27 2.27 0 0 1-2.261-2.273v-4.042A2.27 2.27 0 0 1 8.249 9.6a2.267 2.267 0 0 1 2.262 2.274zm7.285 0a2.27 2.27 0 0 1-2.26 2.273 2.27 2.27 0 0 1-2.262-2.273v-4.042A2.267 2.267 0 0 1 15.535 9.6a2.267 2.267 0 0 1 2.261 2.274z",
-  },
-};
+// basename (without .svg) -> raw SVG markup
+const LOGOS: Record<string, string> = Object.fromEntries(
+  Object.entries(RAW).map(([path, svg]) => [
+    path.split("/").pop()!.replace(".svg", ""),
+    svg,
+  ]),
+);
 
 /**
- * Client id -> brand mark key. Ids not listed here render a monogram fallback.
- * (VS Code, Codex/OpenAI, Amazon Q, Continue, Goose, Kiro, Jan, BoltAI, Pi, Hermes,
- * Roo Code, AnythingLLM have no clean official mark in the dataset yet.)
+ * Client id -> logo file basename. Most ids match their filename; the two Claude clients
+ * share the Anthropic mark family but use distinct files. Ids absent here render a monogram
+ * (VS Code, Continue, Jan, BoltAI, Pi, AnythingLLM have no clean official mark vendored yet).
  */
-const CLIENT_MARK: Record<string, string> = {
+const CLIENT_LOGO: Record<string, string> = {
   "claude-desktop": "claude",
-  "claude-code": "claude",
+  "claude-code": "claude-code",
   cursor: "cursor",
-  "gemini-cli": "googlegemini",
-  antigravity: "google",
+  codex: "codex",
+  antigravity: "antigravity",
+  "gemini-cli": "gemini-cli",
+  cline: "cline",
+  "roo-code": "roo-code",
+  kiro: "kiro",
+  "lm-studio": "lm-studio",
+  goose: "goose",
+  hermes: "hermes",
+  windsurf: "windsurf",
   warp: "warp",
   zed: "zed",
-  "lm-studio": "lmstudio",
-  windsurf: "windsurf",
-  cline: "cline",
+  "amazon-q": "amazon-q",
 };
 
 /** Initials for the monogram fallback: two letters for multi-word names, else two chars. */
@@ -75,8 +57,8 @@ function initials(name: string): string {
 }
 
 /**
- * The official brand logo for a client, or a neutral monogram badge when no mark is
- * available. Decorative: the client name always sits next to it, so it's aria-hidden.
+ * The official brand logo for a client, or a neutral monogram badge when none is vendored.
+ * Decorative: the client name always sits next to it, so it's aria-hidden.
  */
 export function ClientLogo({
   id,
@@ -89,21 +71,16 @@ export function ClientLogo({
   size?: number;
   className?: string;
 }) {
-  const mark = MARKS[CLIENT_MARK[id] ?? ""];
+  const svg = LOGOS[CLIENT_LOGO[id] ?? ""];
 
-  if (mark) {
+  if (svg) {
     return (
-      <svg
+      <span
         aria-hidden
-        viewBox="0 0 24 24"
-        width={size}
-        height={size}
-        fill="currentColor"
-        className={cn("shrink-0", className)}
-        style={mark.color ? { color: mark.color } : undefined}
-      >
-        <path d={mark.path} />
-      </svg>
+        className={cn("inline-flex shrink-0 items-center justify-center", className)}
+        style={{ fontSize: size, lineHeight: 0, width: size, height: size }}
+        dangerouslySetInnerHTML={{ __html: svg }}
+      />
     );
   }
 
