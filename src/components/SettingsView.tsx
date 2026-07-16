@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Bot,
+  Braces,
   Check,
   ChevronRight,
   Copy,
@@ -44,6 +45,7 @@ import {
   setAllowAgentControl,
   setConfirmDestructive,
   setDenyDestructive,
+  setCodeMode,
   setHumanApproval,
   setLazyDiscovery,
   setFolderProfiles,
@@ -485,6 +487,7 @@ function ProfileToolScope({
 export function SettingsView({ registry, onRegistryChange }: Props) {
   const { theme, setTheme } = useTheme();
   const lazyDiscovery = registry?.lazyDiscovery ?? true;
+  const codeMode = registry?.codeMode ?? false;
   const denyDestructive = registry?.denyDestructive ?? false;
   const confirmDestructive = registry?.confirmDestructive ?? false;
   const humanApproval = registry?.humanApproval ?? false;
@@ -832,6 +835,14 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
         {lazyDiscovery ? (
           <PinnedPrerequisites registry={registry} onRegistryChange={onRegistryChange} />
         ) : null}
+        {toggle(
+          Braces,
+          codeMode,
+          "text-info",
+          "Code mode",
+          "Let agents run one server-side script that calls many tools in a single round-trip (sandboxed; each call still respects profile scope and human approval)",
+          apply(setCodeMode),
+        )}
       </section>
       <section className="flex flex-col gap-2">
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">

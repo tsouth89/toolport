@@ -306,6 +306,11 @@ export function setLazyDiscovery(lazy: boolean): Promise<Registry> {
   return invoke<Registry>("set_lazy_discovery", { lazy });
 }
 
+/** Toggle server-side code mode (the toolport_run_script meta-tool) for all clients. */
+export function setCodeMode(enabled: boolean): Promise<Registry> {
+  return invoke<Registry>("set_code_mode", { enabled });
+}
+
 /** Override one client's discovery mode ("full" | "lazy" | "grouped"), or clear it
  * (`null`) so the client inherits the global mode. Applies live via the gateway's
  * per-client resolution, no reconnect needed. */

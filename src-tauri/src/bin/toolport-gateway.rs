@@ -383,6 +383,15 @@ fn set_discovery_mode(mode: DiscoveryMode) {
     DISCOVERY_MODE.store(mode.as_u8(), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The live "code mode" flag, synced from the registry's `code_mode` on startup and by the
+/// registry watcher (like [`DISCOVERY_MODE`]). Read lock-free by [`code_mode_enabled`], so the
+/// six advertise/dispatch sites don't need a `Registry` threaded through them.
+static CODE_MODE: AtomicBool = AtomicBool::new(false);
+
+fn set_code_mode_flag(enabled: bool) {
+    CODE_MODE.store(enabled, Ordering::Relaxed);
+}
+
 /// Parse a registry / per-client override mode string; `None` for empty, `inherit`, or an
 /// unrecognized value (so it falls through to the next precedence level).
 fn parse_mode(s: &str) -> Option<DiscoveryMode> {
@@ -469,15 +478,17 @@ fn grouped_discovery() -> bool {
 /// Opt-in gate for server-side "code mode" (the `toolport_run_script` meta-tool). Off by
 /// default: code mode runs an agent-supplied JS script that can call many tools in one
 /// round-trip, a powerful capability worth an explicit opt-in even under Toolport's local
-/// trust model. Enable with `CONDUIT_CODE_MODE=1` (or `true`). When off, `run_script` is
-/// neither advertised nor dispatched.
+/// trust model. Enabled by the registry's `code_mode` toggle (the Settings switch, synced
+/// into [`CODE_MODE`]); `CONDUIT_CODE_MODE=1` (or `true`) still force-enables regardless, for
+/// power users and tests. When off, `run_script` is neither advertised nor dispatched.
 fn code_mode_enabled() -> bool {
-    std::env::var("CONDUIT_CODE_MODE")
+    let env_forced = std::env::var("CONDUIT_CODE_MODE")
         .map(|v| {
             let v = v.trim();
             v == "1" || v.eq_ignore_ascii_case("true")
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+    env_forced || CODE_MODE.load(Ordering::Relaxed)
 }
 
 /// The server prefix of a *namespaced* tool (`server__tool`). `None` for a bare name
@@ -3879,6 +3890,9 @@ fn watch_registry(
                 eprintln!("toolport: discovery mode -> {}", new_mode.as_str());
             }
             set_discovery_mode(new_mode);
+            // Refresh code mode from the freshly-loaded registry so a Settings toggle takes
+            // effect without restarting the client (same live-refresh path as discovery mode).
+            set_code_mode_flag(new_reg.code_mode);
             // A team-metadata-only rewrite (usage watermark, sync version/etag, role) from
             // the desktop sync loop changes nothing the router depends on. Update the stored
             // copy but skip the rebuild, so a routine sync never re-spawns every stdio server
@@ -6779,6 +6793,9 @@ fn main() {
             registry::Registry::default()
         }
     };
+    // Seed code mode from the registry so it's live from the first request, before the
+    // watcher's first tick (an env override still force-enables inside code_mode_enabled).
+    set_code_mode_flag(loaded.code_mode);
     inspect::clear();
     // Resolve the live profile immediately from what's already on disk, rather than
     // waiting for the watcher's first tick: a scoped client re-launched after being

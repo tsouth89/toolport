@@ -1674,6 +1674,18 @@ fn set_lazy_discovery(state: State<RegistryState>, lazy: bool) -> Result<Registr
     Ok(reg)
 }
 
+/// Enable or disable server-side "code mode" (the `toolport_run_script` meta-tool). The
+/// gateway reads this from the registry and refreshes it live on the next watcher tick, so
+/// it applies to every client without forwarding an env var. Off by default.
+#[tauri::command]
+fn set_code_mode(state: State<RegistryState>, enabled: bool) -> Result<Registry, String> {
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        reg.code_mode = enabled;
+        Ok(())
+    })?;
+    Ok(reg)
+}
+
 /// Opt into agent control: lets an agent enable or disable servers through the
 /// gateway's `conduit_enable_server` / `conduit_disable_server` tools. Off by
 /// default; the destructive-tool safety switch stays user-only regardless of this.
@@ -2825,6 +2837,7 @@ pub fn run() {
             list_quarantined,
             release_quarantine,
             set_lazy_discovery,
+            set_code_mode,
             set_allow_agent_control,
             set_client_discovery,
             team_connect,
