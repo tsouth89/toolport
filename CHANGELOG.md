@@ -6,13 +6,83 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-07-16
+
+The orchestration-and-polish release: run whole tool sequences server-side, scope tools by
+folder and by profile, and a lighter, more finished UI.
+
+### Added
+
+**Code mode: run a sequence of tool calls in one server-side script.** Instead of
+round-tripping every call through the model, an agent can send one script that the gateway
+runs in a sandboxed pure-Rust (Boa) engine, calling tools and shaping results inline. This
+cuts round-trips and token overhead on multi-step work. (#335)
+
+**Folder- and project-scoped auto-routing.** Map a workspace root to a profile so the active
+server set follows the folder you're working in, with no manual switching. (#336)
+
+**Tool-granular profiles.** A profile can now scope not just which servers are visible but
+which individual tools each server exposes, so a profile can present a tight, purpose-built
+tool set. (#340)
+
+**Light and dark theme.** A System / Light / Dark control in Settings, with the light palette
+tuned for real use. Existing installs stay dark; fresh installs follow the OS. (#342)
+
+**Official client logos.** Client detail pages now show the real brand logo (Claude, Cursor,
+Codex, Gemini CLI, Zed, Warp, and more), with a clean monogram fallback where no official
+mark is available. (#343)
+
+**Structured-result projection in `toolport_fetch_result`.** Large tool results can be
+projected down to the fields that matter before they reach the model, instead of returning
+the full payload. (#331)
+
 ### Improved
 
-**Lazy discovery recovers from weak and zero-match searches.** The gateway now detects
+**Activity updates live while you watch it.** The feed and the Live Inspector refresh in place
+as calls come in, so a running agent's activity shows up without leaving and returning to the
+view. (#341)
+
+**Clearer savings accounting.** The Activity savings banner rolls large token counts into B/T
+units and frames the dollar figure honestly as a list-price upper bound before caching. (#339)
+
+**Lazy discovery recovers from weak and zero-match searches.** The gateway detects
 low-confidence lexical or hybrid rankings, preserves the ranked tools, and adds a bounded,
 server-diverse fallback menu from the caller's scoped catalog. Exact searches stay compact,
 and no-match responses explain how to enumerate every tool on a known server without adding
-another default meta-tool.
+another default meta-tool. (#328)
+
+**Transport helper text in the server dialog.** The add-server form explains the transport
+options inline. (#334)
+
+### Security
+
+**Approvals are content-bound and typed.** A human approval is bound to the exact argument
+content it was granted for, so a decision can't be reused against swapped arguments; the
+approval broker connection handling is also hardened. (#332, #324)
+
+**MCP sessions are isolated per client.** Sessions are bound to their HTTP client scope,
+destructive-confirmation tokens are scoped to the client that earned them, and per-session
+outbound queues are bounded. (#321, #322, #323)
+
+**Loopback HTTP requires authentication and bounded reads.** Local gateway HTTP now requires
+the bearer token and enforces request read deadlines. (#325, #326)
+
+**Semantic embedding requests are guarded against SSRF.** Outbound embedding requests are
+validated before they leave the gateway. (#320)
+
+**Teams server updates reject stale writes.** Concurrent updates no longer overwrite newer
+state. (#327)
+
+### Fixed
+
+**Windows stdio process trees are killed on teardown.** Spawned server process trees no longer
+linger after shutdown. (#330)
+
+**OAuth expiry is persisted and refreshed proactively.** Tokens refresh ahead of expiry
+instead of failing a call first. (#329)
+
+**Debounced config export in the Share dialog.** Rapid interactions no longer fire redundant
+export work. (#338)
 
 ## [1.8.0] - 2026-07-13
 
