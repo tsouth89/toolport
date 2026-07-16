@@ -56,6 +56,7 @@ import {
   type QuarantinedTool,
 } from "@/lib/api";
 import type { AllowedTool, FolderProfile, Profile, Registry } from "@/lib/types";
+import { isGatewayServer } from "@/lib/types";
 import { useTheme, type Theme } from "@/lib/theme";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -366,7 +367,8 @@ function ProfileToolScope({
 }) {
   const serverName = useMemo(() => {
     const m = new Map<string, string>();
-    for (const s of registry.servers) m.set(s.id, s.name);
+    // Toolport's own gateway is infrastructure, not a scopable server, so keep it out.
+    for (const s of registry.servers) if (!isGatewayServer(s)) m.set(s.id, s.name);
     return m;
   }, [registry.servers]);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -514,7 +516,8 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const profiles = registry?.profiles ?? [];
   const serverName = useMemo(() => {
     const m = new Map<string, string>();
-    for (const s of registry?.servers ?? []) m.set(s.id, s.name);
+    // Exclude Toolport's own gateway; it's infrastructure, not a profile-scopable server.
+    for (const s of registry?.servers ?? []) if (!isGatewayServer(s)) m.set(s.id, s.name);
     return m;
   }, [registry?.servers]);
 
