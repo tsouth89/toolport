@@ -101,11 +101,17 @@ jobs:
       # recompile from the tagged source, while the third-party deps (the bulk of the
       # compile) are restored. That is the from-scratch guarantee for OUR code plus the
       # speedup for everyone else's. Do NOT replace this with a plain actions/cache of
-      # `target/`. Keyed per matrix leg so the two macOS targets don't share a cache.
+      # `target/`. `key` distinguishes the two macOS targets (same runner OS); rust-cache
+      # already keys on the OS, so windows/linux (empty target) stay separate on their own.
+      # cache-bin: false keeps ~/.cargo/bin (which rust-cache caches by default) OUT of this
+      # cache: the Windows signer `trusted-signing-cli` lives there and is cached explicitly
+      # below, and a cache-restored signing binary would both defeat that step's version key
+      # and widen the poisoning surface for a tool that runs with the signing secrets.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src-tauri
-          key: ${{ matrix.target || matrix.bundles }}
+          key: ${{ matrix.target }}
+          cache-bin: "false"
 
       - name: Install dependencies
         run: npm ci
