@@ -832,8 +832,18 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
           "Expose 4 meta-tools, not the full catalog (all clients)",
           apply(setLazyDiscovery),
         )}
+        {/* Pinned prerequisites is a refinement of lazy discovery (the tools it must never
+            hide), not a peer feature, so nest it under the Lazy discovery toggle with an
+            indent + left rail. It has no meaning when lazy discovery is off, so it collapses
+            away entirely then. Code mode below is an independent capability and stays a
+            full-width sibling. */}
         {lazyDiscovery ? (
-          <PinnedPrerequisites registry={registry} onRegistryChange={onRegistryChange} />
+          <div className="ml-4 border-l-2 border-border/50 pl-3">
+            <PinnedPrerequisites
+              registry={registry}
+              onRegistryChange={onRegistryChange}
+            />
+          </div>
         ) : null}
         {toggle(
           Braces,
