@@ -7,6 +7,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  FolderOpen,
   FolderTree,
   Globe,
   Layers,
@@ -27,6 +28,7 @@ import {
   enable as enableAutostart,
   isEnabled as isAutostartEnabled,
 } from "@tauri-apps/plugin-autostart";
+import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { toastError } from "@/lib/toast";
 import {
   addHttpClient,
@@ -54,6 +56,7 @@ import {
   type QuarantinedTool,
 } from "@/lib/api";
 import type { AllowedTool, FolderProfile, Profile, Registry } from "@/lib/types";
+import { isGatewayServer } from "@/lib/types";
 import { useTheme, type Theme } from "@/lib/theme";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -175,6 +178,19 @@ function FolderRouting({
     }
   }
 
+  async function browse() {
+    try {
+      const picked = await openFolderDialog({
+        directory: true,
+        multiple: false,
+        title: "Choose a project folder",
+      });
+      if (typeof picked === "string") setPath(picked);
+    } catch (e) {
+      toastError(`Couldn't open the folder picker: ${e}`);
+    }
+  }
+
   async function add() {
     const p = path.trim();
     if (!p || !profile) return;
@@ -237,6 +253,17 @@ function FolderRouting({
             placeholder="/path/to/project"
             className="min-w-0 flex-1 rounded border bg-background px-2 py-1 font-mono text-xs focus-visible:ring-1 focus-visible:ring-border focus-visible:outline-none"
           />
+          <button
+            type="button"
+            onClick={() => void browse()}
+            disabled={busy}
+            aria-label="Browse for a project folder"
+            title="Browse…"
+            className="flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs font-medium hover:bg-muted disabled:opacity-50"
+          >
+            <FolderOpen className="size-3.5" />
+            Browse
+          </button>
           <Select value={profile} onValueChange={setProfile}>
             <SelectTrigger className="h-7 w-32 text-xs">
               <SelectValue placeholder="Profile" />
@@ -340,7 +367,8 @@ function ProfileToolScope({
 }) {
   const serverName = useMemo(() => {
     const m = new Map<string, string>();
-    for (const s of registry.servers) m.set(s.id, s.name);
+    // Toolport's own gateway is infrastructure, not a scopable server, so keep it out.
+    for (const s of registry.servers) if (!isGatewayServer(s)) m.set(s.id, s.name);
     return m;
   }, [registry.servers]);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -464,6 +492,9 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const quarantineOnDrift = registry?.quarantineOnDrift ?? false;
   const liveInspect = registry?.liveInspect ?? false;
   const [busy, setBusy] = useState(false);
+  // Profile cards collapse so a big Default profile doesn't dump every server (and its
+  // per-server tool rows) onto the page. Collapsed by default; the comma summary still shows.
+  const [openProfiles, setOpenProfiles] = useState<Set<string>>(new Set());
   const [quarantined, setQuarantined] = useState<QuarantinedTool[]>([]);
   const [quarantineError, setQuarantineError] = useState(false);
   const [allowedTools, setAllowedTools] = useState<AllowedTool[]>([]);
@@ -485,7 +516,8 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
   const profiles = registry?.profiles ?? [];
   const serverName = useMemo(() => {
     const m = new Map<string, string>();
-    for (const s of registry?.servers ?? []) m.set(s.id, s.name);
+    // Exclude Toolport's own gateway; it's infrastructure, not a profile-scopable server.
+    for (const s of registry?.servers ?? []) if (!isGatewayServer(s)) m.set(s.id, s.name);
     return m;
   }, [registry?.servers]);
 
@@ -729,9 +761,28 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
                 .filter((n): n is string => !!n)
                 .sort((a, b) => a.localeCompare(b));
               const active = p.id === registry?.activeProfileId;
+              const isOpen = openProfiles.has(p.id);
+              const toggle = () =>
+                setOpenProfiles((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(p.id)) next.delete(p.id);
+                  else next.add(p.id);
+                  return next;
+                });
               return (
                 <div key={p.id} className="flex flex-col gap-1 px-3 py-2.5">
-                  <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={toggle}
+                    aria-expanded={isOpen}
+                    disabled={names.length === 0}
+                    className="flex items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border disabled:cursor-default"
+                  >
+                    <ChevronRight
+                      className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${
+                        isOpen ? "rotate-90" : ""
+                      } ${names.length === 0 ? "invisible" : ""}`}
+                    />
                     <span className="text-sm font-medium">{p.name}</span>
                     {active && (
                       <span className="rounded-full bg-info/15 px-1.5 py-0.5 text-[10px] font-medium text-info">
@@ -741,20 +792,23 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
                     <span className="ml-auto text-xs text-muted-foreground">
                       {names.length} {names.length === 1 ? "server" : "servers"}
                     </span>
-                  </div>
-                  {names.length > 0 ? (
-                    <p className="text-xs text-muted-foreground">{names.join(", ")}</p>
-                  ) : (
-                    <p className="text-xs text-muted-foreground italic">
+                  </button>
+                  {names.length === 0 ? (
+                    <p className="pl-5 text-xs text-muted-foreground italic">
                       No servers in this profile.
                     </p>
-                  )}
-                  {registry && (
-                    <ProfileToolScope
-                      profile={p}
-                      registry={registry}
-                      onRegistryChange={onRegistryChange}
-                    />
+                  ) : isOpen ? (
+                    registry && (
+                      <ProfileToolScope
+                        profile={p}
+                        registry={registry}
+                        onRegistryChange={onRegistryChange}
+                      />
+                    )
+                  ) : (
+                    <p className="truncate pl-5 text-xs text-muted-foreground">
+                      {names.join(", ")}
+                    </p>
                   )}
                 </div>
               );
