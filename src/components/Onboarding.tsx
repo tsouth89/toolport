@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  Copy,
   Download,
   KeyRound,
   Link2,
@@ -19,6 +20,7 @@ import { toast } from "sonner";
 import { toastError } from "@/lib/toast";
 import {
   addCatalogServer,
+  getAuditLog,
   importServers,
   installGateway,
   listStacks,
@@ -26,11 +28,13 @@ import {
   teamConnect,
   teamJoinPoll,
 } from "@/lib/api";
+import { ClientLogo } from "@/components/ClientLogo";
 import { teamUrlError } from "@/lib/teamUrl";
 import { Input } from "@/components/ui/input";
 import {
   importableServers,
   isGatewayServer,
+  type AuditEntry,
   type DetectedClient,
   type ImportItem,
   type ProbeResult,
@@ -54,6 +58,8 @@ interface Props {
   onBrowseCatalog: () => void;
   /** Probe server health for the Done step (returns per-server results). */
   onProbe: () => Promise<ProbeResult[]>;
+  /** Close the wizard and open the Playground (the in-app verify fallback). */
+  onOpenPlayground: () => void;
   /** Mark onboarding complete (skipped or finished) and close. */
   onFinish: () => void;
 }
@@ -70,6 +76,7 @@ export function Onboarding({
   onClientsRefresh,
   onBrowseCatalog,
   onProbe,
+  onOpenPlayground,
   onFinish,
 }: Props) {
   const [step, setStep] = useState(initialStep);
@@ -112,9 +119,11 @@ export function Onboarding({
     <Done
       key="done"
       registry={registry}
+      clients={clients}
       serverCount={serverCount}
       connectedCount={connectedCount}
       onProbe={onProbe}
+      onOpenPlayground={onOpenPlayground}
       onFinish={onFinish}
     />,
   ];
@@ -768,15 +777,19 @@ function ConnectClients({
 
 function Done({
   registry,
+  clients,
   serverCount,
   connectedCount,
   onProbe,
+  onOpenPlayground,
   onFinish,
 }: {
   registry: Registry;
+  clients: DetectedClient[];
   serverCount: number;
   connectedCount: number;
   onProbe: () => Promise<ProbeResult[]>;
+  onOpenPlayground: () => void;
   onFinish: () => void;
 }) {
   // Probe what was just added so we report the truth, not a blanket "you're set up"
@@ -815,6 +828,8 @@ function Done({
   const broken = (health ?? []).filter((r) => !r.ok && !r.authRequired);
 
   const ready = serverCount > 0 && connectedCount > 0;
+  // The client to verify against: the first one Toolport is actually wired into.
+  const verifyClient = clients.find((c) => c.gatewayInstalled) ?? null;
   const missing = [
     serverCount === 0 ? "added a server" : null,
     connectedCount === 0 ? "connected a client" : null,
@@ -879,11 +894,157 @@ function Done({
         </div>
       )}
 
+      {ready && verifyClient && (
+        <VerifyCall client={verifyClient} onOpenPlayground={onOpenPlayground} />
+      )}
+
       <Button onClick={onFinish} className="self-start">
         {ready ? "Start using Toolport" : "Got it"}
         <ArrowRight className="size-4" />
       </Button>
     </>
+  );
+}
+
+/** Proves a real call actually reached Toolport: shows a safe copy-paste prompt for the
+ *  connected client, then watches the LOCAL audit log for the first new call (nothing is
+ *  sent anywhere). Optional and non-blocking; Playground is the in-app fallback. */
+export function VerifyCall({
+  client,
+  onOpenPlayground,
+  pollMs = 2000,
+  timeoutMs = 75_000,
+}: {
+  client: DetectedClient;
+  onOpenPlayground: () => void;
+  /** Poll interval and give-up deadline; overridable so tests run fast. */
+  pollMs?: number;
+  timeoutMs?: number;
+}) {
+  const prompt = "List the tools you can use through Toolport.";
+  const [status, setStatus] = useState<"waiting" | "success" | "timeout">("waiting");
+  const [hit, setHit] = useState<AuditEntry | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = Date.now() + timeoutMs;
+    void (async () => {
+      // Snapshot the newest existing call so only a call made from here on counts. Compare
+      // audit ts to audit ts (unit-agnostic); the deadline uses wall-clock independently.
+      let since = 0;
+      try {
+        const recent = await getAuditLog(1);
+        if (recent[0]) since = recent[0].ts;
+      } catch {
+        // No log yet is fine: `since` stays 0, so the first-ever call still counts.
+      }
+      const poll = async () => {
+        if (!alive) return;
+        try {
+          const log = await getAuditLog(25);
+          const fresh = log.find((e) => e.ts > since);
+          if (fresh) {
+            setHit(fresh);
+            setStatus("success");
+            return;
+          }
+        } catch {
+          // Transient read error: keep polling until the deadline.
+        }
+        if (Date.now() > deadline) {
+          setStatus("timeout");
+          return;
+        }
+        timer = setTimeout(poll, pollMs);
+      };
+      timer = setTimeout(poll, pollMs);
+    })();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [pollMs, timeoutMs]);
+
+  async function copyPrompt() {
+    try {
+      await navigator.clipboard.writeText(prompt);
+      toast.success("Prompt copied");
+    } catch {
+      toastError("Couldn't copy; select the text and copy it manually.");
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5 rounded-md border bg-muted/20 p-3">
+      <div className="flex items-center gap-2 text-sm font-medium">
+        <ClientLogo id={client.id} name={client.name} size={18} />
+        <span>Prove it works in {client.name}</span>
+      </div>
+
+      {status === "success" && hit ? (
+        <div className="flex items-start gap-2 rounded-md bg-success/10 px-3 py-2 text-sm">
+          <Check className="mt-0.5 size-4 shrink-0 text-success" />
+          <span>
+            <span className="font-medium text-success">It works.</span> A call just
+            reached Toolport: <code className="text-xs">{hit.tool}</code>
+            {hit.server ? (
+              <>
+                {" "}
+                on <code className="text-xs">{hit.server}</code>
+              </>
+            ) : null}
+            .
+          </span>
+        </div>
+      ) : (
+        <>
+          <p className="text-xs text-muted-foreground">
+            In {client.name}, ask your agent to run this. It's read-only, it just lists
+            your tools through Toolport.
+          </p>
+          <div className="flex items-center gap-2 rounded border bg-background px-2 py-1.5">
+            <code className="min-w-0 flex-1 truncate text-xs">{prompt}</code>
+            <button
+              type="button"
+              onClick={() => void copyPrompt()}
+              aria-label="Copy the prompt"
+              className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <Copy className="size-3.5" />
+            </button>
+          </div>
+
+          {status === "waiting" ? (
+            <div className="flex items-start gap-2 text-xs text-muted-foreground">
+              <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin" />
+              <span>
+                Waiting for the first call from {client.name}. Just connected it? Restart{" "}
+                {client.name} so it loads Toolport.
+              </span>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1.5 rounded-md bg-warning/10 px-3 py-2 text-xs">
+              <span className="font-medium text-warning">No call yet. Common fixes:</span>
+              <ul className="ml-3 list-disc space-y-0.5 text-muted-foreground">
+                <li>Restart {client.name} so it picks up Toolport.</li>
+                <li>Make sure it's scoped to a profile that has servers (Settings).</li>
+                <li>If a server needs sign-in, authenticate it first.</li>
+                <li>Check that each server started on the main screen.</li>
+              </ul>
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={onOpenPlayground}
+            className="self-start text-xs font-medium text-primary hover:underline"
+          >
+            Or test a tool in the Playground instead
+          </button>
+        </>
+      )}
+    </div>
   );
 }
 

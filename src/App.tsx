@@ -811,6 +811,10 @@ function App() {
               selectView("catalog");
             }}
             onProbe={reprobe}
+            onOpenPlayground={() => {
+              setShowOnboarding(false);
+              selectView("playground");
+            }}
             onFinish={finishOnboarding}
           />
         </Suspense>
