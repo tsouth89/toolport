@@ -123,7 +123,11 @@ APP="$APP" IDENTITY="$APPLE_SIGNING_IDENTITY" APP_PROFILE="$APP_PROFILE" GW_PROF
 #    release can simply be re-run once Apple's queue recovers. release.yml also
 #    caps this whole step with timeout-minutes as a backstop.
 # ---------------------------------------------------------------------------
-NOTARIZE_TIMEOUT="${NOTARIZE_TIMEOUT:-30m}"
+# 20m per artifact (not 30m): the two sequential waits plus signing, stapling, dmg creation,
+# the updater re-sign, and the failure-log dump must all finish under release.yml's 60m step
+# cap, so the helper's own fast-fail + `notarytool log` diagnostics always beat the blunt step
+# timeout (2x20m waits + overhead leaves ~15m of headroom).
+NOTARIZE_TIMEOUT="${NOTARIZE_TIMEOUT:-20m}"
 notarize() {
   local artifact="$1" kind="$2" id status
   log "Submitting the $kind for notarization"
