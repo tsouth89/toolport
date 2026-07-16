@@ -6,6 +6,32 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-07-16
+
+A fast follow-up to v1.9.0: make code mode reachable, correct the activity total, and stop
+the injection scanner from flagging benign shell examples.
+
+### Added
+
+**Turn on code mode from Settings.** Code mode (the `toolport_run_script` meta-tool) was
+gated behind the `CONDUIT_CODE_MODE` env var only, so there was no way to enable it from the
+app. A "Code mode" toggle now lives in Settings under Discovery, off by default. The env var
+still force-enables it for power users. (#346)
+
+### Fixed
+
+**Activity "calls logged" shows your real total.** The summary aggregated only the last 2,000
+audit entries, so the count capped at 2000 and the error rate was taken over that slice. It
+now aggregates the full retained log (still bounded by the log's size cap), so the total,
+error rate, and per-server breakdown are the real numbers. (#347)
+
+**The injection scanner stops flagging benign shell examples.** A tool description that
+documents a hashing pipeline (for example `... | base64 -d | shasum -a 256 | awk ...`) no
+longer trips the "embedded-command" content flag. The scanner now matches a pipe into an
+actual shell or interpreter (`| sh`, `base64 -d | sh`) with word boundaries, so look-alikes
+like `| shasum` and decode-then-hash stay clean while real decode-then-execute still flags.
+(#348)
+
 ## [1.9.0] - 2026-07-16
 
 The orchestration-and-polish release: run whole tool sequences server-side, scope tools by
