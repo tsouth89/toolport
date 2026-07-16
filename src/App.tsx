@@ -52,6 +52,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { AppSidebar } from "@/components/AppSidebar";
+import { ClientLogo } from "@/components/ClientLogo";
 import { PendingApprovals } from "@/components/PendingApprovals";
 import { RegistryServerRow } from "@/components/RegistryServerRow";
 import { ServerDialog } from "@/components/ServerDialog";
@@ -541,39 +542,53 @@ function App() {
 
         <main className="flex min-w-0 flex-1 flex-col">
           <header className="flex items-center justify-between gap-4 border-b px-6 py-4">
-            <div className="min-w-0 flex-1">
-              <h1 className="truncate text-lg font-semibold tracking-tight">
-                {view === "activity"
-                  ? "Activity"
-                  : view === "catalog"
-                    ? "Browse catalog"
-                    : view === "playground"
-                      ? "Playground"
-                      : view === "teams"
-                        ? "Teams"
-                        : view === "settings"
-                          ? "Settings"
-                          : selectedClient
-                            ? selectedClient.name
-                            : "Servers"}
-              </h1>
-              <p className="truncate text-sm text-muted-foreground">
-                {view === "activity"
-                  ? "Tool calls routed through Toolport"
-                  : view === "catalog"
-                    ? "Add MCP servers from the registry"
-                    : view === "playground"
-                      ? "Invoke a server's tools and see the raw result"
-                      : view === "teams"
-                        ? "Share one MCP server set across your team"
-                        : view === "settings"
-                          ? "Global discovery and security policy"
-                          : selectedClient
-                            ? "MCP client"
-                            : loading || !registry
-                              ? "Loading…"
-                              : "One gateway in front of every MCP server you run"}
-              </p>
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+              {view !== "activity" &&
+                view !== "catalog" &&
+                view !== "playground" &&
+                view !== "teams" &&
+                view !== "settings" &&
+                selectedClient && (
+                  <ClientLogo
+                    id={selectedClient.id}
+                    name={selectedClient.name}
+                    size={32}
+                  />
+                )}
+              <div className="min-w-0">
+                <h1 className="truncate text-lg font-semibold tracking-tight">
+                  {view === "activity"
+                    ? "Activity"
+                    : view === "catalog"
+                      ? "Browse catalog"
+                      : view === "playground"
+                        ? "Playground"
+                        : view === "teams"
+                          ? "Teams"
+                          : view === "settings"
+                            ? "Settings"
+                            : selectedClient
+                              ? selectedClient.name
+                              : "Servers"}
+                </h1>
+                <p className="truncate text-sm text-muted-foreground">
+                  {view === "activity"
+                    ? "Tool calls routed through Toolport"
+                    : view === "catalog"
+                      ? "Add MCP servers from the registry"
+                      : view === "playground"
+                        ? "Invoke a server's tools and see the raw result"
+                        : view === "teams"
+                          ? "Share one MCP server set across your team"
+                          : view === "settings"
+                            ? "Global discovery and security policy"
+                            : selectedClient
+                              ? "MCP client"
+                              : loading || !registry
+                                ? "Loading…"
+                                : "One gateway in front of every MCP server you run"}
+                </p>
+              </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {view === "servers" && !selectedClient && (
