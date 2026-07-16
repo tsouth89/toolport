@@ -252,6 +252,19 @@ namespaced per server, so the two never collide even in the same profile.
 
 ## Install
 
+**Quickest:**
+
+```sh
+# macOS (Homebrew)
+brew install --cask tsouth89/toolport/toolport
+
+# macOS or Linux (script: .deb via apt where available, else AppImage; Mac copies the app)
+curl -fsSL https://raw.githubusercontent.com/tsouth89/toolport/main/scripts/install.sh | bash
+```
+
+On **Windows**, download the `.exe` from the
+[latest release](https://github.com/tsouth89/toolport/releases/latest).
+
 Prebuilt installers are published on the
 [Releases](https://github.com/tsouth89/toolport/releases) page. Toolport runs on
 **Windows, macOS, and Linux**. On Linux, prefer the **`.deb`** (it links your
