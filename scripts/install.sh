@@ -52,8 +52,14 @@ install_linux() {
     [ -n "$url" ] || err "No .deb found in $tag_name."
     say "Downloading $(basename "$url")"
     curl -fsSL "$url" -o "$tmp/toolport.deb"
-    say "Installing with apt (you may be prompted for your password)"
-    sudo apt-get install -y "$tmp/toolport.deb"
+    # Use sudo only when we aren't already root (root shells / containers have no sudo).
+    sudo=""
+    if [ "$(id -u)" -ne 0 ]; then
+      command -v sudo >/dev/null 2>&1 && sudo="sudo" ||
+        err "Installing the .deb needs root: re-run as root or install sudo."
+    fi
+    say "Installing with apt${sudo:+ (you may be prompted for your password)}"
+    $sudo apt-get install -y "$tmp/toolport.deb"
     say "Installed. Launch Toolport from your app menu or run: toolport"
     return
   fi
