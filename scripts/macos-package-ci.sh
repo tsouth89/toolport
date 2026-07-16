@@ -114,13 +114,45 @@ APP="$APP" IDENTITY="$APPLE_SIGNING_IDENTITY" APP_PROFILE="$APP_PROFILE" GW_PROF
 # 4. Notarize + staple the app.
 #    Gatekeeper requires the .app be notarized and stapled. notarytool wants a
 #    zip; ditto --keepParent preserves the .app structure.
+#
+#    Notarization uses a BOUNDED wait (SOU-199). Apple's Developer ID Notary
+#    Service has recurring "In Progress" queue stalls, and a plain `submit
+#    --wait` blocks until Apple answers, which hung v1.9.1's mac job ~2h until
+#    the 6h job cap. notarize() submits, then waits with a hard timeout, and on
+#    a timeout or rejection dumps the notarization log and fails fast so the
+#    release can simply be re-run once Apple's queue recovers. release.yml also
+#    caps this whole step with timeout-minutes as a backstop.
 # ---------------------------------------------------------------------------
+NOTARIZE_TIMEOUT="${NOTARIZE_TIMEOUT:-30m}"
+notarize() {
+  local artifact="$1" kind="$2" id status
+  log "Submitting the $kind for notarization"
+  id="$(xcrun notarytool submit "$artifact" \
+    --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+    --output-format json |
+    python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))')" ||
+    die "notarytool submit failed for the $kind"
+  [[ -n "$id" ]] || die "notarytool submit returned no submission id for the $kind"
+  log "Waiting on notarization $id (timeout $NOTARIZE_TIMEOUT)"
+  # Bounded wait; on timeout notarytool exits non-zero and prints no final JSON, so `status`
+  # comes back empty and trips the not-Accepted branch below (a rejection yields "Invalid").
+  status="$(xcrun notarytool wait "$id" \
+    --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+    --timeout "$NOTARIZE_TIMEOUT" --output-format json 2>/dev/null |
+    python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || true)"
+  if [[ "$status" != "Accepted" ]]; then
+    printf '::error::Notarization of the %s (%s) did not succeed (status: %s); Apple queue stall or rejection. Log follows:\n' \
+      "$kind" "$id" "${status:-timeout}" >&2
+    xcrun notarytool log "$id" \
+      --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" >&2 || true
+    die "notarization did not succeed for the $kind; re-run the release once Apple's Notary queue recovers"
+  fi
+}
+
 log "Notarizing the app"
 APP_ZIP="$WORK/Toolport-notarize.zip"
 ditto -c -k --keepParent "$APP" "$APP_ZIP"
-xcrun notarytool submit "$APP_ZIP" \
-  --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
-  --wait
+notarize "$APP_ZIP" "app"
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP" || die "stapler validate failed on the app"
 
@@ -136,9 +168,7 @@ DMG="$DMG_DIR/Toolport_${TARGET}.dmg"
 rm -f "$DMG"
 hdiutil create -volname "Toolport" -srcfolder "$APP" -ov -format UDZO "$DMG"
 codesign --force --timestamp -s "$APPLE_SIGNING_IDENTITY" "$DMG"
-xcrun notarytool submit "$DMG" \
-  --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
-  --wait
+notarize "$DMG" "dmg"
 xcrun stapler staple "$DMG"
 
 # ---------------------------------------------------------------------------

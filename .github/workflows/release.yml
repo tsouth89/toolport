@@ -199,6 +199,10 @@ jobs:
       # script fails fast with a clear message if any required secret is missing.
       - name: Sign + notarize + package (macOS)
         if: startsWith(matrix.os, 'macos')
+        # Backstop for SOU-199: even with the script's bounded notarization waits, cap the whole
+        # macOS sign/notarize/package step so a stuck Apple Notary queue fails the job in ~1h
+        # instead of burning toward the 6h job cap.
+        timeout-minutes: 60
         run: bash scripts/macos-package-ci.sh
         env:
           APP: src-tauri/target/${{ matrix.target }}/release/bundle/macos/Toolport.app
