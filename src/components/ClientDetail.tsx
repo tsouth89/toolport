@@ -547,7 +547,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
                   disabled={busy}
                 >
                   <Shuffle className="size-3" />
-                  Import into gateway ({movable.length})
+                  Move into gateway ({movable.length})
                 </Button>
               )}
             </div>
@@ -563,7 +563,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
               </li>
               {movable.length > 0 && (
                 <li>
-                  <span className="font-medium text-foreground">Import into gateway</span>{" "}
+                  <span className="font-medium text-foreground">Move into gateway</span>{" "}
                   copies it, then removes it from {client.name}'s config so the gateway is
                   the only source (plugin servers stay). The cutover that actually saves
                   context.
@@ -577,8 +577,8 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
               <span>
                 {client.name} is already connected to Toolport. Import on its own leaves a
                 copy here too, so these tools load twice, once directly and once through
-                the gateway. Use <span className="font-medium">Import into gateway</span>{" "}
-                to avoid that.
+                the gateway. Use <span className="font-medium">Move into gateway</span> to
+                avoid that.
               </span>
             </p>
           )}
