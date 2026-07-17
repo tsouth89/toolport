@@ -65,6 +65,11 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 20
+          # Cache the npm download cache (~/.npm), keyed on package-lock.json, so `npm ci`
+          # below doesn't re-fetch the whole frontend dep tree on every release across all
+          # four matrix jobs. ci.yml already does this; a cache miss just falls back to a
+          # normal `npm ci`, so it never affects the built artifact.
+          cache: npm
 
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
