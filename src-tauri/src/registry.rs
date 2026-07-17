@@ -1534,14 +1534,15 @@ pub fn save(registry: &Registry) -> Result<(), String> {
     save_to(&path, registry)
 }
 
-/// A held cross-process exclusive lock over the registry, released on drop (and by the OS
-/// if the holding process exits). Serializes the registry read-modify-write section across
+/// A held cross-process exclusive lock over a file's sibling `<path>.lock`, released on drop
+/// (and by the OS if the holding process exits). Serializes a read-modify-write section across
 /// the desktop app, the gateway binary, and the team-sync worker, so no writer's save can
-/// revert another process's concurrent change (SOU-23). Advisory: it only excludes other
-/// holders of THIS lock, which every registry writer takes via `update` / `update_at`.
-pub struct RegistryLock(std::fs::File);
+/// revert another process's concurrent change (SOU-23). Used for the registry (via `update` /
+/// `update_at` / `lock_at`) and the integrity pins/quarantine stores (SOU-165). Advisory: it
+/// only excludes other holders of THIS lock, which every writer of the guarded file takes.
+pub struct FileLock(std::fs::File);
 
-impl Drop for RegistryLock {
+impl Drop for FileLock {
     fn drop(&mut self) {
         // Also released when the File closes / the process exits; explicit for clarity.
         let _ = self.0.unlock();
@@ -1560,7 +1561,7 @@ fn lock_path(path: &Path) -> PathBuf {
 /// Acquire the exclusive registry lock, retrying briefly under contention. Registry writes
 /// are sub-millisecond, so a real conflict clears at once; a holder stuck past the deadline
 /// surfaces as an error rather than hanging the caller indefinitely.
-fn lock_for(path: &Path) -> Result<RegistryLock, String> {
+fn lock_for(path: &Path) -> Result<FileLock, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -1572,7 +1573,7 @@ fn lock_for(path: &Path) -> Result<RegistryLock, String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         match file.try_lock_exclusive() {
-            Ok(()) => return Ok(RegistryLock(file)),
+            Ok(()) => return Ok(FileLock(file)),
             // Contended. The error KIND for "already locked" differs by platform (`WouldBlock`
             // on Unix, a lock-violation OS error on Windows), so do NOT gate the retry on it:
             // the lock file already opened above, so any try-lock failure here is contention.
@@ -1603,11 +1604,11 @@ pub fn update<T>(f: impl FnOnce(&mut Registry) -> Result<T, String>) -> Result<(
     Ok((reg, out))
 }
 
-/// Acquire the cross-process registry lock for an explicit path, for a caller that runs its
-/// own load-modify-save (the gateway's agent toggle, which interleaves audit + early
-/// returns) rather than using [`update_at`]. Hold the returned guard across the entire
-/// read-decide-write.
-pub fn lock_at(path: &Path) -> Result<RegistryLock, String> {
+/// Acquire the cross-process lock guarding an explicit path (its sibling `<path>.lock`), for a
+/// caller that runs its own load-modify-save rather than using [`update_at`]: the gateway's
+/// agent toggle (which interleaves audit + early returns), and the integrity pins/quarantine
+/// stores (SOU-165). Hold the returned guard across the entire read-decide-write.
+pub fn lock_at(path: &Path) -> Result<FileLock, String> {
     lock_for(path)
 }
 
@@ -2290,6 +2291,33 @@ mod tests {
             .any(|e| e.file_name().to_string_lossy().starts_with(&prefix));
         assert!(!leftover, "temp file left behind after a successful write");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn file_lock_excludes_a_second_holder_and_releases_on_drop() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("conduit-lock-{}.json", std::process::id()));
+        std::fs::remove_file(lock_path(&path)).ok();
+        let guard = lock_at(&path).expect("first lock acquires");
+        // A second, independent handle on the same sibling .lock must NOT acquire while held -
+        // this is what serializes two Toolport processes' read-modify-write (SOU-23 / SOU-165).
+        let second = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(lock_path(&path))
+            .unwrap();
+        assert!(
+            second.try_lock_exclusive().is_err(),
+            "a second holder acquired the lock while it was still held"
+        );
+        drop(guard);
+        // Once the guard drops the OS releases the advisory lock, so the same handle can take it.
+        assert!(
+            second.try_lock_exclusive().is_ok(),
+            "lock was not released after the guard dropped"
+        );
+        let _ = second.unlock();
+        std::fs::remove_file(lock_path(&path)).ok();
     }
 
     #[cfg(unix)]

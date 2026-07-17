@@ -317,11 +317,34 @@ fn save_pins(profile: Option<&str>, pins: &Pins) {
     }
 }
 
+/// Run a load-modify-save of an on-disk integrity store while holding the cross-process lock
+/// that guards `path` (its sibling `<path>.lock`), so two Toolport gateways detecting drift at
+/// the same moment serialize instead of read-modify-writing over each other. Without it a stale
+/// writer can clobber a peer's quarantine set and silently un-block a just-quarantined tool, or
+/// lose a peer's pin re-baseline (SOU-165). Best-effort: if the lock can't be acquired (a peer
+/// held it past the deadline) we log and run anyway, so this never regresses below today's
+/// atomic-but-unlocked write.
+fn with_store_lock<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    let _lock = crate::registry::lock_at(path)
+        .map_err(|e| eprintln!("conduit: proceeding without the integrity lock on {path:?}: {e}"))
+        .ok();
+    f()
+}
+
 /// Diff `current` tools against the pinned baseline for `profile` and record a
 /// security event for each drift. Returns the drift events (also written to
 /// `security.jsonl`). A tool whose server has never been pinned is treated as a
 /// fresh baseline (no drift); only servers we've already seen can "drift".
 pub fn check(profile: Option<&str>, current: &[Value]) -> Vec<Value> {
+    // Serialize the pin baseline's load-modify-save so a concurrent gateway's re-baseline can't
+    // clobber this one (SOU-165). No pins path (no config dir) = nothing to persist, run direct.
+    match pins_path(profile) {
+        Some(path) => with_store_lock(&path, || check_inner(profile, current)),
+        None => check_inner(profile, current),
+    }
+}
+
+fn check_inner(profile: Option<&str>, current: &[Value]) -> Vec<Value> {
     let mut events: Vec<Value> = Vec::new();
     let pins = match load_pins(profile) {
         PinsLoad::Loaded(p) => p,
@@ -642,12 +665,17 @@ pub fn all_quarantined() -> Vec<Value> {
 /// rebuild. `check` has already re-baselined the current definition, so a re-approved
 /// tool won't immediately re-flag. Returns whether the tool was actually quarantined.
 pub fn release(profile: Option<&str>, tool: &str) -> bool {
-    let mut q = load_quarantine(profile);
-    if q.remove(tool).is_some() {
-        save_quarantine(profile, &q);
-        return true;
-    }
-    false
+    let Some(path) = quarantine_path(profile) else { return false };
+    // Under the cross-process lock so a concurrent gateway's quarantine write can't clobber this
+    // release (or vice versa) via a stale read-modify-write (SOU-165).
+    with_store_lock(&path, || {
+        let mut q = load_quarantine(profile);
+        if q.remove(tool).is_some() {
+            save_quarantine(profile, &q);
+            return true;
+        }
+        false
+    })
 }
 
 /// From `check`'s drift `events` and the `current` tool list, quarantine the HIGH-RISK
@@ -657,6 +685,13 @@ pub fn release(profile: Option<&str>, tool: &str) -> bool {
 /// blocked. (High-risk-by-auth — a drift on a credential-bearing server — is a later
 /// pass; it needs server-secret context the integrity layer doesn't hold here.)
 pub fn apply_quarantine(profile: Option<&str>, current: &[Value], events: &[Value]) -> bool {
+    let Some(path) = quarantine_path(profile) else { return false };
+    // Under the cross-process lock so two gateways quarantining a drift at the same moment
+    // serialize instead of one clobbering the other's set (SOU-165).
+    with_store_lock(&path, || apply_quarantine_inner(profile, current, events))
+}
+
+fn apply_quarantine_inner(profile: Option<&str>, current: &[Value], events: &[Value]) -> bool {
     let mut q = load_quarantine(profile);
     let mut added = false;
     for e in events {
