@@ -1912,10 +1912,14 @@ fn emit_team_review(app: &tauri::AppHandle, outcome: teams::MergeOutcome) {
 
 /// Member-facing Team Instructions status (spec W4): the org content on this machine, its
 /// version, and each installed client's on-disk state. `None` when the team has no active
-/// instructions. Read-only.
+/// instructions. Read-only. Async + `spawn_blocking` because it scans every installed client's
+/// rules file, which must not run on the UI thread.
 #[tauri::command]
-fn team_instructions_status() -> Option<teams::InstructionsStatusView> {
-    teams::instructions_status()
+async fn team_instructions_status() -> Option<teams::InstructionsStatusView> {
+    tauri::async_runtime::spawn_blocking(teams::instructions_status)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Leave the team: remove its merged servers, clear the connection and the token.
