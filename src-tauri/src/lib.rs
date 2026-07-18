@@ -10,6 +10,7 @@ pub mod codemode;
 pub mod downstream;
 pub mod gateway_publish;
 pub mod inspect;
+pub mod instructions;
 pub mod integrity;
 pub mod oauth;
 pub mod registry;

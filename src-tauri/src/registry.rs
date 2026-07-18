@@ -452,6 +452,17 @@ pub struct TeamConnection {
     /// the report window (today + yesterday) on every successful report.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub usage_reported: HashMap<String, HashMap<String, [u64; 2]>>,
+    /// Hash of the org instructions content last written to disk (see [`crate::instructions`]).
+    /// A sync whose pulled content hashes to this value skips the client-file writes entirely,
+    /// so the ~25s sync loop only touches rules files when the org content actually changed.
+    /// `None` = nothing written yet (or the config carries no instructions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_instructions_hash: Option<String>,
+    /// Absolute paths of the client rules files this member's app actually wrote. Cleanup on
+    /// team-leave iterates THIS recorded list rather than re-resolving clients, so a file
+    /// survives cleanup even if the client was later uninstalled or its detection changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub team_instructions_targets: Vec<String>,
 }
 
 /// Settings for embedding-based search re-ranking. The embedding API key, if the

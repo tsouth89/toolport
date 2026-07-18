@@ -521,12 +521,19 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
         last_version: 0,
         last_etag: None,
         usage_reported: HashMap::new(),
+        team_instructions_hash: None,
+        team_instructions_targets: Vec::new(),
     };
     // Pull BEFORE loading the registry, then load a FRESH copy AFTER the (possibly
     // multi-second) network round trip and apply onto that — mirroring `sync_inner`.
     // Loading first and saving here would clobber any change another command made to the
     // registry while we were waiting on the join window's pull.
     let pulled = pull_config(&base(server_url), &joined.team_id, &joined.member_token, 0, None, 0)?;
+    // Capture the org instructions before the closure consumes `pulled`; applied to disk after
+    // the save (outside the lock).
+    let desired_instr = pulled
+        .as_ref()
+        .map(|(version, cfg, _)| (*version, desired_instructions(cfg)));
     // Load-modify-save the fresh registry under the cross-process lock, so a concurrent write
     // during the join window's pull isn't reverted (SOU-23).
     let (reg, outcome) = crate::registry::update(|reg| {
@@ -541,6 +548,9 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
         }
         Ok(outcome)
     })?;
+    if let Some((version, desired)) = desired_instr {
+        apply_instructions(&joined.team_id, version, desired.as_deref());
+    }
     let conn = reg.team.clone().ok_or_else(|| "team connection lost after save".to_string())?;
     Ok((conn, outcome))
 }
@@ -607,6 +617,11 @@ fn sync_inner(wait_secs: u64) -> Result<SyncResult, String> {
         wait_secs,
     )?;
 
+    // Capture the org instructions before the closure consumes `pulled`; applied to disk after
+    // the save (outside the lock). `None` on a 304 (config unchanged) — nothing to reconcile.
+    let desired_instr = pulled
+        .as_ref()
+        .map(|(version, cfg, _)| (*version, desired_instructions(cfg)));
     // Re-load a FRESH registry now, AFTER the (possibly multi-second) network round
     // trips, and apply the deltas to it. Loading at the top and saving here would clobber
     // any change another command made to the registry while we were on the network.
@@ -643,6 +658,11 @@ fn sync_inner(wait_secs: u64) -> Result<SyncResult, String> {
         None => return Ok(SyncResult::Ok { role, role_changed, applied: None }),
         Some(applied) => applied,
     };
+    // Write/refresh the org instructions to each installed client's rules file (skips unless the
+    // content actually changed). Outside the lock, best-effort, never fails the sync.
+    if let Some((version, desired)) = desired_instr {
+        apply_instructions(&conn.team_id, version, desired.as_deref());
+    }
     // Best-effort showback after the config work: report today's/yesterday's per-server
     // usage rollup to the team server. Any failure here must never affect the sync
     // result — the member's config is already applied and saved.
@@ -763,8 +783,93 @@ fn report_usage(conn: &TeamConnection, token: &str) {
     });
 }
 
+/// The org instructions the pulled config wants applied: the `content` string when the block
+/// is present, enabled, and non-empty; `None` (meaning "remove any managed files") when the key
+/// is absent, disabled, or blank. A Free/lapsed team never receives the key (the server
+/// soft-drops it), so those members degrade to clean removal here automatically.
+fn desired_instructions(cfg: &serde_json::Value) -> Option<String> {
+    let i = cfg.get("instructions")?;
+    let enabled = i.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let content = i.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    (enabled && !content.trim().is_empty()).then(|| content.to_string())
+}
+
+/// Write (or remove) the org Team Instructions across every installed client's rules file after
+/// a config change (spec "W2"). Best-effort and run OUTSIDE the registry lock — a failure here
+/// must never affect the already-applied, already-saved server config. Skips entirely when the
+/// org content is unchanged since the last write (hash match), so the ~25s sync loop only ever
+/// touches rules files when an admin actually edits the instructions.
+fn apply_instructions(team_id: &str, version: i64, desired: Option<&str>) {
+    use crate::instructions::{self, ApplyState};
+    // Prior state: only act if still connected to THIS team.
+    let (prev_hash, prev_targets) = match crate::registry::load() {
+        Ok(reg) => match reg.team.as_ref() {
+            Some(t) if t.team_id == team_id => (
+                t.team_instructions_hash.clone(),
+                t.team_instructions_targets.clone(),
+            ),
+            _ => return,
+        },
+        Err(_) => return,
+    };
+    let new_hash = desired.map(instructions::content_hash);
+    if new_hash == prev_hash {
+        return; // unchanged — nothing to write or clean up
+    }
+
+    let mut written: Vec<String> = Vec::new();
+    if let Some(content) = desired {
+        let mut seen_paths = std::collections::HashSet::new();
+        for client in crate::clients::detect_clients() {
+            // Only write into clients that are actually installed, so we never scatter rules
+            // files into an absent client's home.
+            if !client.app_present {
+                continue;
+            }
+            let Some(target) = crate::clients::client_rules_target(&client.id) else {
+                continue; // unsupported or covered transitively (Antigravity/Copilot)
+            };
+            let key = target.path.to_string_lossy().to_string();
+            if !seen_paths.insert(key.clone()) {
+                continue; // a shared file (e.g. Gemini/Antigravity) already handled this round
+            }
+            if instructions::write_target(&target, team_id, version, content) == ApplyState::Applied
+            {
+                written.push(key);
+            }
+        }
+    }
+    // Remove any file we wrote before but did NOT (re)write now: instructions were removed or
+    // disabled, a client was uninstalled, or a target path changed. Iterating the RECORDED list
+    // (not a fresh client scan) means cleanup survives a client that has since disappeared.
+    for old in &prev_targets {
+        if !written.iter().any(|w| w == old) {
+            instructions::remove_recorded(std::path::Path::new(old));
+        }
+    }
+
+    // Persist the new hash + written set so the next sync can skip and `disconnect` can clean up.
+    let _ = crate::registry::update(|reg| {
+        if let Some(t) = reg.team.as_mut() {
+            if t.team_id == team_id {
+                t.team_instructions_hash = new_hash.clone();
+                t.team_instructions_targets = written.clone();
+            }
+        }
+        Ok(())
+    });
+}
+
 /// Leave the team: remove its merged servers, clear the connection and the token.
 pub fn disconnect() -> Result<(), String> {
+    // Capture the recorded instructions files before clearing the connection, so we can delete
+    // them AFTER the registry lock releases (FS side-effects on external client files don't
+    // belong inside the lock — same discipline as the writer and `report_usage`).
+    let instr_targets = crate::registry::load()
+        .ok()
+        .and_then(|r| r.team)
+        .map(|t| t.team_instructions_targets)
+        .unwrap_or_default();
     crate::registry::update(|reg| {
         if let Some(conn) = reg.team.clone() {
             remove_team(reg, &conn.team_id);
@@ -772,6 +877,9 @@ pub fn disconnect() -> Result<(), String> {
         reg.team = None;
         Ok(())
     })?;
+    for path in &instr_targets {
+        crate::instructions::remove_recorded(std::path::Path::new(path));
+    }
     let _ = clear_token();
     Ok(())
 }
@@ -1145,6 +1253,27 @@ pub fn remove_team(reg: &mut Registry, team_id: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn desired_instructions_reads_enabled_nonempty_content() {
+        let cfg = json!({ "instructions": { "enabled": true, "content": "Rule one" } });
+        assert_eq!(desired_instructions(&cfg).as_deref(), Some("Rule one"));
+        // `enabled` defaults to true when omitted.
+        let cfg = json!({ "instructions": { "content": "Implied on" } });
+        assert_eq!(desired_instructions(&cfg).as_deref(), Some("Implied on"));
+    }
+
+    #[test]
+    fn desired_instructions_treats_disabled_blank_or_absent_as_removal() {
+        for cfg in [
+            json!({ "instructions": { "enabled": false, "content": "hidden" } }),
+            json!({ "instructions": { "enabled": true, "content": "   \n  " } }),
+            json!({ "instructions": { "enabled": true } }),
+            json!({ "servers": [] }), // key absent (e.g. Free/lapsed team, soft-dropped)
+        ] {
+            assert_eq!(desired_instructions(&cfg), None, "should mean removal: {cfg}");
+        }
+    }
 
     #[test]
     fn merge_reported_takes_the_max_per_counter() {
