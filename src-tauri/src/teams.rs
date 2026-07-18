@@ -849,15 +849,24 @@ fn apply_instructions(team_id: &str, version: i64, desired: Option<&str>) {
     }
 
     // Persist the new hash + written set so the next sync can skip and `disconnect` can clean up.
-    let _ = crate::registry::update(|reg| {
+    // The compare-and-set returns false if the team changed or was cleared while we were writing
+    // (a race with `disconnect`/team-switch): in that case our just-written files have no record
+    // to clean them by, so roll them back here rather than orphan them on disk.
+    let recorded = crate::registry::update(|reg| {
         if let Some(t) = reg.team.as_mut() {
             if t.team_id == team_id {
                 t.team_instructions_hash = new_hash.clone();
                 t.team_instructions_targets = written.clone();
+                return Ok(true);
             }
         }
-        Ok(())
+        Ok(false)
     });
+    if !matches!(recorded, Ok((_, true))) {
+        for path in &written {
+            instructions::remove_recorded(std::path::Path::new(path));
+        }
+    }
 }
 
 /// Leave the team: remove its merged servers, clear the connection and the token.

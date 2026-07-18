@@ -365,7 +365,10 @@ fn resolve_rules_target(
     };
     let target = match client_id {
         // Strategy A — Toolport owns a whole file in the client's rules DIRECTORY.
-        "claude-code" => owned(
+        // Claude Code's `~/.claude/rules/` is also read by VS Code Copilot (Claude-compat
+        // paths), so both map here; path-dedup writes it once when both are installed and a
+        // standalone VS Code install is still covered.
+        "claude-code" | "vscode" => owned(
             home.join(".claude")
                 .join("rules")
                 .join("toolport-team-rules.md"),
@@ -390,8 +393,10 @@ fn resolve_rules_target(
             // AGENTS.override.md, if present, makes Codex ignore AGENTS.md entirely.
             blocked_if_present: Some(home.join(".codex").join("AGENTS.override.md")),
         },
-        // Shared with Antigravity — one write to GEMINI.md covers both.
-        "gemini-cli" => block(home.join(".gemini").join("GEMINI.md")),
+        // Gemini CLI and Antigravity share `~/.gemini/GEMINI.md`; both resolve to it so a
+        // standalone install of EITHER is covered, and `apply_instructions`' path-dedup writes
+        // it once when both are present.
+        "gemini-cli" | "antigravity" => block(home.join(".gemini").join("GEMINI.md")),
         "windsurf" => Target {
             path: home
                 .join(".codeium")
@@ -3863,14 +3868,12 @@ command = "npx"
     }
 
     #[test]
-    fn rules_target_unsupported_and_transitive_clients_return_none() {
-        // Cursor/Warp store globals in UI/cloud; Antigravity + VS Code Copilot are covered by
-        // Gemini's / Claude Code's file; Continue is deferred; chat apps have no rules file.
+    fn rules_target_unsupported_clients_return_none() {
+        // Cursor/Warp store globals in UI/cloud; Continue is deferred; chat/identity apps have
+        // no global rules file we manage.
         for id in [
             "cursor",
             "warp",
-            "antigravity",
-            "vscode",
             "continue",
             "claude-desktop",
             "lm-studio",
@@ -3882,6 +3885,25 @@ command = "npx"
                 "{id} should have no managed rules target"
             );
         }
+    }
+
+    #[test]
+    fn rules_target_transitive_clients_share_the_covering_file() {
+        // A standalone Antigravity / VS Code install must still be covered: each resolves to the
+        // same file as the client whose format it reads, and `apply_instructions` de-dupes the
+        // shared path so it's written once when both are installed.
+        let home = mock_home(Platform::MacOs);
+        let p = Platform::MacOs;
+        assert_eq!(
+            resolve_rules_target("antigravity", &home, p),
+            resolve_rules_target("gemini-cli", &home, p),
+            "Antigravity shares Gemini's GEMINI.md"
+        );
+        assert_eq!(
+            resolve_rules_target("vscode", &home, p),
+            resolve_rules_target("claude-code", &home, p),
+            "VS Code Copilot shares Claude Code's rules file"
+        );
     }
 
     /// Serializes tests that read or mutate the process-global XDG env vars. Rust

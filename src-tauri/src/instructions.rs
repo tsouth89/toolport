@@ -214,11 +214,12 @@ pub fn write_target(t: &Target, team_id: &str, version: i64, content: &str) -> A
             return ApplyState::BlockedOverride;
         }
     }
-    // Hard client cap on the global rules file (Windsurf): don't write something it will drop.
-    if let Some(cap) = t.char_cap {
-        if content.chars().count() > cap {
-            return ApplyState::TooLong;
-        }
+    // Org content that contains our own frozen markers would corrupt everything downstream: an
+    // embedded END would fool `find_block` into terminating the managed span early, and an
+    // embedded START would make `remove_recorded` misclassify an owned file as a sentinel one.
+    // Refuse rather than write something we can't later find and cleanly remove.
+    if content.contains(SENTINEL_START_PREFIX) || content.contains(SENTINEL_END) {
+        return ApplyState::Error;
     }
     let desired = match t.strategy {
         Strategy::OwnedFile => render_owned_file(team_id, version, content),
@@ -233,6 +234,14 @@ pub fn write_target(t: &Target, team_id: &str, version: i64, content: &str) -> A
             upsert_block(&existing, team_id, version, content)
         }
     };
+    // Hard client cap (Windsurf) applies to the WHOLE global-rules file we're about to write —
+    // the member's existing rules plus our block and markers — not just the org content. Check
+    // the fully rendered result so we never write a file the client will silently truncate.
+    if let Some(cap) = t.char_cap {
+        if desired.chars().count() > cap {
+            return ApplyState::TooLong;
+        }
+    }
     match write_atomic(&t.path, &desired) {
         Ok(()) => ApplyState::Applied,
         Err(_) => ApplyState::Error,
@@ -497,6 +506,43 @@ mod tests {
         };
         assert_eq!(write_target(&t, TEAM, 1, "way over the tiny cap"), ApplyState::TooLong);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn content_carrying_our_markers_is_refused() {
+        let s = Scratch::new();
+        // A START marker in owned content would make cleanup misclassify the file; an END marker
+        // in sentinel content would truncate the block. Both must be refused, nothing written.
+        let owned = owned_target(s.path("owned.md"));
+        assert_eq!(
+            write_target(&owned, TEAM, 1, &format!("evil {SENTINEL_START_PREFIX} x -->")),
+            ApplyState::Error
+        );
+        assert!(!owned.path.exists());
+        let block = block_target(s.path("block.md"));
+        assert_eq!(
+            write_target(&block, TEAM, 1, &format!("evil {SENTINEL_END} tail")),
+            ApplyState::Error
+        );
+        assert!(!block.path.exists());
+    }
+
+    #[test]
+    fn cap_counts_the_whole_rendered_file_not_just_content() {
+        let s = Scratch::new();
+        let path = s.path("global_rules.md");
+        // Pre-existing user rules already near the cap; a small org block tips the FILE over even
+        // though the org content alone is tiny.
+        std::fs::write(&path, "x".repeat(40)).unwrap();
+        let t = Target {
+            path: path.clone(),
+            strategy: Strategy::SentinelBlock,
+            char_cap: Some(50),
+            blocked_if_present: None,
+        };
+        assert_eq!(write_target(&t, TEAM, 1, "tiny"), ApplyState::TooLong);
+        // The user's file must be left exactly as it was.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x".repeat(40));
     }
 
     #[test]
