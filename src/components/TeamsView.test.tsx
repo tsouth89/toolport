@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   teamDisconnect: vi.fn(),
   teamPushPreview: vi.fn(),
   teamPush: vi.fn(),
+  teamInstructionsStatus: vi.fn().mockResolvedValue(null),
   setServerEnabled: vi.fn(),
 }));
 
