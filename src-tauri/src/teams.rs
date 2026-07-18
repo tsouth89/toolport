@@ -453,13 +453,20 @@ fn post_usage_day(
     token: &str,
     day: &str,
     rows: Vec<Value>,
+    instructions_status: Option<&Value>,
 ) -> Result<bool, String> {
     require_secure_team_url(server_url)?;
     let url = format!("{}/teams/{}/usage", base(server_url), team_id);
+    let mut body = json!({ "day": day, "rows": rows });
+    // The apply-status receipt rides the usage POST (spec W5). An older server ignores the extra
+    // key; a client without instructions omits it entirely.
+    if let Some(status) = instructions_status {
+        body["instructionsStatus"] = status.clone();
+    }
     match agent()
         .post(&url)
         .set("authorization", &format!("Bearer {token}"))
-        .send_json(json!({ "day": day, "rows": rows }))
+        .send_json(body)
     {
         Ok(_) => Ok(true),
         Err(ureq::Error::Status(404 | 405, _)) => Ok(false),
@@ -521,8 +528,10 @@ fn finish_connect(server_url: &str, member_name: Option<&str>, joined: Joined) -
         last_version: 0,
         last_etag: None,
         usage_reported: HashMap::new(),
-        team_instructions_hash: None,
+        team_instructions_content: None,
+        team_instructions_version: 0,
         team_instructions_targets: Vec::new(),
+        team_instructions_reported: None,
     };
     // Pull BEFORE loading the registry, then load a FRESH copy AFTER the (possibly
     // multi-second) network round trip and apply onto that — mirroring `sync_inner`.
@@ -667,6 +676,10 @@ fn sync_inner(wait_secs: u64) -> Result<SyncResult, String> {
     // usage rollup to the team server. Any failure here must never affect the sync
     // result — the member's config is already applied and saved.
     report_usage(&conn, &token);
+    // Report each installed client's instructions coverage (spec W5), every cycle, deduped so an
+    // unchanged receipt isn't re-sent. Independent of the config change above, so a client
+    // installed after the last edit is reflected as soon as it appears.
+    report_instructions_status(&conn, &token);
     Ok(SyncResult::Ok {
         role,
         role_changed,
@@ -750,7 +763,7 @@ fn report_usage(conn: &TeamConnection, token: &str) {
                 })
             })
             .collect();
-        match post_usage_day(&conn.server_url, &conn.team_id, token, &day, rows) {
+        match post_usage_day(&conn.server_url, &conn.team_id, token, &day, rows, None) {
             Ok(true) => {
                 new_state.insert(day, merged);
                 changed = true;
@@ -802,19 +815,19 @@ fn desired_instructions(cfg: &serde_json::Value) -> Option<String> {
 fn apply_instructions(team_id: &str, version: i64, desired: Option<&str>) {
     use crate::instructions::{self, ApplyState};
     // Prior state: only act if still connected to THIS team.
-    let (prev_hash, prev_targets) = match crate::registry::load() {
+    let (prev_content, prev_targets) = match crate::registry::load() {
         Ok(reg) => match reg.team.as_ref() {
             Some(t) if t.team_id == team_id => (
-                t.team_instructions_hash.clone(),
+                t.team_instructions_content.clone(),
                 t.team_instructions_targets.clone(),
             ),
             _ => return,
         },
         Err(_) => return,
     };
-    let new_hash = desired.map(instructions::content_hash);
-    if new_hash == prev_hash {
-        return; // unchanged — nothing to write or clean up
+    if desired == prev_content.as_deref() {
+        return; // content unchanged — nothing to write or clean up (coverage is re-checked and
+                // reported every cycle by `report_instructions_status`, independent of this)
     }
 
     let mut written: Vec<String> = Vec::new();
@@ -848,14 +861,17 @@ fn apply_instructions(team_id: &str, version: i64, desired: Option<&str>) {
         }
     }
 
-    // Persist the new hash + written set so the next sync can skip and `disconnect` can clean up.
-    // The compare-and-set returns false if the team changed or was cleared while we were writing
-    // (a race with `disconnect`/team-switch): in that case our just-written files have no record
-    // to clean them by, so roll them back here rather than orphan them on disk.
+    // Persist the content+version we just applied and the written set, so a steady-state cycle can
+    // recompute coverage and `disconnect` can clean up. The compare-and-set returns false if the
+    // team changed/cleared while we were writing (a race with `disconnect`/team-switch): our
+    // just-written files then have no record to clean them by, so roll them back rather than
+    // orphan them.
+    let new_content = desired.map(str::to_string);
     let recorded = crate::registry::update(|reg| {
         if let Some(t) = reg.team.as_mut() {
             if t.team_id == team_id {
-                t.team_instructions_hash = new_hash.clone();
+                t.team_instructions_content = new_content.clone();
+                t.team_instructions_version = version;
                 t.team_instructions_targets = written.clone();
                 return Ok(true);
             }
@@ -866,6 +882,89 @@ fn apply_instructions(team_id: &str, version: i64, desired: Option<&str>) {
         for path in &written {
             instructions::remove_recorded(std::path::Path::new(path));
         }
+    }
+}
+
+/// Build the apply-status receipt (spec W5): for each INSTALLED client, the current on-disk state
+/// of the org rules. Read-only — reflects reality every cycle, so a client added after the last
+/// write shows `Stale`, not silently missing. Includes unsupported installed clients (Cursor /
+/// Warp) so the admin sees they need a manual copy.
+fn build_instructions_receipt(
+    team_id: &str,
+    version: i64,
+    content: &str,
+) -> crate::instructions::Receipt {
+    use crate::instructions::{self, ApplyState, ClientReceipt};
+    let clients = crate::clients::detect_clients()
+        .into_iter()
+        .filter(|c| c.app_present)
+        .map(|c| {
+            let state = match crate::clients::client_rules_target(&c.id) {
+                Some(target) => instructions::current_state(&target, team_id, version, content),
+                None => ApplyState::Unsupported,
+            };
+            ClientReceipt { id: c.id, state }
+        })
+        .collect();
+    instructions::Receipt {
+        version,
+        content_hash: instructions::content_hash(content),
+        clients,
+    }
+}
+
+/// Report this member's instructions coverage to the team server, once per sync cycle. Sends only
+/// when the receipt CHANGED since the last successful send (dedup by hash), so an unchanged
+/// coverage state costs the server nothing. Best-effort; a failure just retries next cycle. No-op
+/// when the team has no active instructions.
+fn report_instructions_status(conn: &TeamConnection, token: &str) {
+    use crate::instructions;
+    let (content, version, reported) = {
+        let Ok(reg) = crate::registry::load() else {
+            return;
+        };
+        match reg.team.as_ref() {
+            Some(t) if t.team_id == conn.team_id => (
+                t.team_instructions_content.clone(),
+                t.team_instructions_version,
+                t.team_instructions_reported.clone(),
+            ),
+            _ => return,
+        }
+    };
+    let Some(content) = content else {
+        return; // no instructions active for this team
+    };
+    let receipt = build_instructions_receipt(&conn.team_id, version, &content);
+    let Ok(receipt_json) = serde_json::to_value(&receipt) else {
+        return;
+    };
+    let fingerprint = instructions::content_hash(&receipt_json.to_string());
+    if reported.as_deref() == Some(fingerprint.as_str()) {
+        return; // unchanged since the last successful send
+    }
+    let day = usage_report::utc_day_back(0);
+    match post_usage_day(
+        &conn.server_url,
+        &conn.team_id,
+        token,
+        &day,
+        Vec::new(),
+        Some(&receipt_json),
+    ) {
+        Ok(true) => {
+            let _ = crate::registry::update(|reg| {
+                if let Some(t) = reg.team.as_mut() {
+                    if t.team_id == conn.team_id {
+                        t.team_instructions_reported = Some(fingerprint.clone());
+                    }
+                }
+                Ok(())
+            });
+        }
+        // Old server without the endpoint, or a transient failure: leave `reported` unset so we
+        // retry on a later cycle.
+        _ => {}
     }
 }
 

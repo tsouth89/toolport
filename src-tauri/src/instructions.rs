@@ -46,12 +46,12 @@ pub struct Target {
     pub blocked_if_present: Option<std::path::PathBuf>,
 }
 
-/// The per-client outcome of applying (or skipping) the org instructions. Reported to the
+/// The per-client outcome of applying (or checking) the org instructions. Reported to the
 /// dashboard (spec W5) so an admin can prove which client actually loaded the current rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyState {
-    /// Written to disk (or already present and identical).
+    /// The current org content is present on disk for this client.
     Applied,
     /// This client has no supported global-rules location; nothing written.
     Unsupported,
@@ -59,8 +59,30 @@ pub enum ApplyState {
     BlockedOverride,
     /// Content exceeds the client's hard cap and can't be trimmed safely; not written.
     TooLong,
-    /// A filesystem/parse error prevented a safe write; the file was left untouched.
+    /// A filesystem/parse error prevented a safe read/write; the file was left untouched.
     Error,
+    /// The client is installed but the current org content is NOT (yet) on disk — never
+    /// written, drifted, or hand-edited. Distinct from `Applied` so the coverage panel shows a
+    /// truthful "not covered" for a client added after the last write (see [`current_state`]).
+    Stale,
+}
+
+/// One client's reported state, for the apply-status receipt (spec W5).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClientReceipt {
+    pub id: String,
+    pub state: ApplyState,
+}
+
+/// The "effective rules receipt" a member reports so the dashboard can prove per-client
+/// coverage: which version+content the member is on, and each installed client's state.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Receipt {
+    pub version: i64,
+    /// Hash of the org content this receipt is about — proves on-disk == pushed content.
+    pub content_hash: String,
+    pub clients: Vec<ClientReceipt>,
 }
 
 /// Sentinel markers. FROZEN compatibility contract — an older build must still recognize and
@@ -245,6 +267,46 @@ pub fn write_target(t: &Target, team_id: &str, version: i64, content: &str) -> A
     match write_atomic(&t.path, &desired) {
         Ok(()) => ApplyState::Applied,
         Err(_) => ApplyState::Error,
+    }
+}
+
+/// Read-only: what state IS this client's rules file in right now, relative to the current org
+/// `content`+`version`? Used to build the coverage receipt (spec W5) every report cycle, so the
+/// dashboard reflects reality — a client installed after the last write reports `Stale`, a
+/// deleted/hand-edited block reports `Stale`, a shadowed Codex reports `BlockedOverride`, etc.
+/// Never writes.
+pub fn current_state(t: &Target, team_id: &str, version: i64, content: &str) -> ApplyState {
+    if let Some(shadow) = &t.blocked_if_present {
+        if shadow.exists() {
+            return ApplyState::BlockedOverride;
+        }
+    }
+    if content.contains(SENTINEL_START_PREFIX) || content.contains(SENTINEL_END) {
+        return ApplyState::Error;
+    }
+    let existing = match read_existing(&t.path) {
+        Ok(s) => s,
+        Err(_) => return ApplyState::Error,
+    };
+    let (is_current, rendered_len) = match t.strategy {
+        Strategy::OwnedFile => {
+            let desired = render_owned_file(team_id, version, content);
+            (existing == desired, desired.chars().count())
+        }
+        Strategy::SentinelBlock => (
+            block_is_current(&existing, team_id, version, content),
+            upsert_block(&existing, team_id, version, content).chars().count(),
+        ),
+    };
+    if let Some(cap) = t.char_cap {
+        if rendered_len > cap {
+            return ApplyState::TooLong;
+        }
+    }
+    if is_current {
+        ApplyState::Applied
+    } else {
+        ApplyState::Stale
     }
 }
 
@@ -543,6 +605,53 @@ mod tests {
         assert_eq!(write_target(&t, TEAM, 1, "tiny"), ApplyState::TooLong);
         // The user's file must be left exactly as it was.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "x".repeat(40));
+    }
+
+    #[test]
+    fn current_state_reports_applied_stale_and_blocked() {
+        let s = Scratch::new();
+        // Owned file: absent -> Stale; after write -> Applied; hand-edited -> Stale.
+        let owned = owned_target(s.path("rules.md"));
+        assert_eq!(current_state(&owned, TEAM, 1, "c"), ApplyState::Stale);
+        write_target(&owned, TEAM, 1, "c");
+        assert_eq!(current_state(&owned, TEAM, 1, "c"), ApplyState::Applied);
+        // A newer version the writer hasn't applied yet reads as Stale.
+        assert_eq!(current_state(&owned, TEAM, 2, "c"), ApplyState::Stale);
+        std::fs::write(&owned.path, "user clobbered it").unwrap();
+        assert_eq!(current_state(&owned, TEAM, 1, "c"), ApplyState::Stale);
+
+        // Sentinel block in a shared file.
+        let path = s.path("AGENTS.md");
+        std::fs::write(&path, "# user\n").unwrap();
+        let block = block_target(path.clone());
+        assert_eq!(current_state(&block, TEAM, 1, "c"), ApplyState::Stale);
+        write_target(&block, TEAM, 1, "c");
+        assert_eq!(current_state(&block, TEAM, 1, "c"), ApplyState::Applied);
+
+        // Codex-style shadow file -> BlockedOverride regardless of the target's contents.
+        let shadow = s.path("AGENTS.override.md");
+        std::fs::write(&shadow, "opt out").unwrap();
+        let shadowed = Target {
+            path: s.path("codex-AGENTS.md"),
+            strategy: Strategy::SentinelBlock,
+            char_cap: None,
+            blocked_if_present: Some(shadow),
+        };
+        assert_eq!(current_state(&shadowed, TEAM, 1, "c"), ApplyState::BlockedOverride);
+    }
+
+    #[test]
+    fn current_state_reports_too_long() {
+        let s = Scratch::new();
+        let path = s.path("global_rules.md");
+        std::fs::write(&path, "x".repeat(40)).unwrap();
+        let t = Target {
+            path,
+            strategy: Strategy::SentinelBlock,
+            char_cap: Some(50),
+            blocked_if_present: None,
+        };
+        assert_eq!(current_state(&t, TEAM, 1, "tiny"), ApplyState::TooLong);
     }
 
     #[test]

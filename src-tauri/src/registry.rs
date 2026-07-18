@@ -452,17 +452,26 @@ pub struct TeamConnection {
     /// the report window (today + yesterday) on every successful report.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub usage_reported: HashMap<String, HashMap<String, [u64; 2]>>,
-    /// Hash of the org instructions content last written to disk (see [`crate::instructions`]).
-    /// A sync whose pulled content hashes to this value skips the client-file writes entirely,
-    /// so the ~25s sync loop only touches rules files when the org content actually changed.
-    /// `None` = nothing written yet (or the config carries no instructions).
+    /// The org instructions content last applied to disk (see [`crate::instructions`]). Persisted
+    /// so a steady-state sync (a 304, with no config in hand) can still recompute each client's
+    /// coverage for the apply-status receipt, and so the writer skips the client-file writes when
+    /// the content is unchanged. `None` = no instructions active (absent/disabled/blank).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub team_instructions_hash: Option<String>,
+    pub team_instructions_content: Option<String>,
+    /// The config version at which `team_instructions_content` was last written — the version the
+    /// on-disk block markers carry, and the one the coverage receipt reports. Advances only when
+    /// the content changes, so a server-only config edit doesn't make the marker look stale.
+    #[serde(default)]
+    pub team_instructions_version: i64,
     /// Absolute paths of the client rules files this member's app actually wrote. Cleanup on
     /// team-leave iterates THIS recorded list rather than re-resolving clients, so a file
     /// survives cleanup even if the client was later uninstalled or its detection changed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub team_instructions_targets: Vec<String>,
+    /// Hash of the apply-status receipt last successfully sent to the server, so an unchanged
+    /// receipt isn't re-POSTed every ~25s sync. `None` = nothing reported yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_instructions_reported: Option<String>,
 }
 
 /// Settings for embedding-based search re-ranking. The embedding API key, if the

@@ -7074,8 +7074,10 @@ mod tests {
             last_version: 42,
             last_etag: Some("\"v42\"".into()),
             usage_reported: usage,
-            team_instructions_hash: None,
+            team_instructions_content: None,
+            team_instructions_version: 0,
             team_instructions_targets: Vec::new(),
+            team_instructions_reported: None,
         });
         assert_eq!(
             router_relevant(&reg),
