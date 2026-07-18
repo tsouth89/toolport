@@ -405,6 +405,16 @@ export function teamSyncWait(waitSecs: number): Promise<Registry> {
   return invoke<Registry>("team_sync_wait", { waitSecs });
 }
 
+/**
+ * Whether the main window is currently shown (vs hidden to the tray). Used to seed the
+ * team-sync loop's visibility gate on mount, for the case where the app launched straight to
+ * the tray; live changes arrive via the `team-window-visible` event. Defaults to visible on
+ * any error so sync never wedges off.
+ */
+export function mainWindowVisible(): Promise<boolean> {
+  return invoke<boolean>("main_window_visible");
+}
+
 /** Leave the team: remove its merged servers and clear the saved token. */
 export function teamDisconnect(): Promise<Registry> {
   return invoke<Registry>("team_disconnect");

@@ -27,6 +27,7 @@ import {
   getRegistry,
   takeRegistryRecoveryNotice,
   importServers,
+  mainWindowVisible,
   previewImportServers,
   probeServers,
   removeServer,
@@ -295,12 +296,19 @@ function App() {
   // ~1s while staying cheap when idle. Not tied to the Teams view. Keyed on the team id so it
   // starts on connect and tears down on disconnect/removal.
   //
-  // While the app is backgrounded (minimized / hidden to the tray) the loop PAUSES entirely:
-  // a connected-but-idle client otherwise re-polls every ~25s forever, and each poll touches
-  // the team server's database, which pins a scale-to-zero Postgres (Neon) awake 24/7 and
-  // burns compute even when nobody is using Toolport (SOU-256). We resume the instant the
-  // window is shown again with an immediate poll, so a policy change that landed while we were
-  // hidden is picked up the moment the user comes back.
+  // While the app is hidden to the tray the loop PAUSES entirely (zero requests): a
+  // connected-but-idle client otherwise re-polls every ~25s forever, and each poll hits the
+  // team server's database, which pins a scale-to-zero Postgres (Neon) awake around the clock
+  // and burns compute even when nobody is using Toolport (SOU-256). We resume with an immediate
+  // catch-up poll the instant the window is shown, so a policy change that landed while hidden
+  // is picked up the moment the user comes back.
+  //
+  // The visibility signal comes from the Rust side: the `team-window-visible` event emitted on
+  // show/hide, seeded by an initial `mainWindowVisible()` pull for a straight-to-tray launch.
+  // The webview's own Page Visibility API is NOT reliable here - on Windows, hiding a Tauri
+  // window to the tray does not flip `document.hidden`, so a purely web-based gate kept polling
+  // from the tray. We still fold in `document.hidden` as a secondary signal for the platforms
+  // where it does fire (e.g. a real minimize).
   const teamId = registry?.team?.teamId;
   useEffect(() => {
     if (!teamId) return;
@@ -313,19 +321,36 @@ function App() {
     const FLOOR_MS = 3000;
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-    // Resolve when the window becomes visible again, so a backgrounded loop parks here (issuing
-    // zero requests) instead of hammering the server, and wakes on show or on teardown.
+    // Window visibility, source of truth = Rust; `hidden()` also folds in the webview signal.
+    // A backgrounded loop parks in `waitUntilVisible` (issuing zero requests) and wakes on show
+    // or on teardown.
+    let windowVisible = true;
+    const hidden = () => !windowVisible || document.hidden;
     let wake: (() => void) | null = null;
-    const onVisible = () => {
-      if (!document.hidden && wake) {
+    const maybeWake = () => {
+      if (!hidden() && wake) {
         wake();
         wake = null;
       }
     };
-    document.addEventListener("visibilitychange", onVisible);
+    const setWindowVisible = (v: boolean) => {
+      windowVisible = v;
+      maybeWake();
+    };
+    document.addEventListener("visibilitychange", maybeWake);
+    // Seed initial state (covers a launch that goes straight to the tray via --hidden), then
+    // track live show/hide from the Rust side.
+    void mainWindowVisible()
+      .then((v) => {
+        if (!cancelled) setWindowVisible(v);
+      })
+      .catch(() => {});
+    const unlisten = listen<boolean>("team-window-visible", (e) => {
+      if (!cancelled) setWindowVisible(e.payload);
+    });
     const waitUntilVisible = () =>
       new Promise<void>((resolve) => {
-        if (!document.hidden || cancelled) {
+        if (!hidden() || cancelled) {
           resolve();
           return;
         }
@@ -334,7 +359,7 @@ function App() {
 
     const loop = async () => {
       while (!cancelled) {
-        if (document.hidden) {
+        if (hidden()) {
           await waitUntilVisible();
           if (cancelled) break;
           // Fall straight through to a poll so we resync immediately on show.
@@ -361,7 +386,8 @@ function App() {
     void loop();
     return () => {
       cancelled = true;
-      document.removeEventListener("visibilitychange", onVisible);
+      document.removeEventListener("visibilitychange", maybeWake);
+      void unlisten.then((f) => f());
       // Unblock a loop parked in waitUntilVisible so its cancelled check runs and it exits.
       if (wake) {
         wake();
