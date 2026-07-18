@@ -6,6 +6,19 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.9.3] - 2026-07-18
+
+Makes the v1.9.2 teams cost fix actually work when the app is in the tray.
+
+### Fixed
+
+**Team sync really does pause in the tray now.** v1.9.2 tried to pause syncing when the app
+was backgrounded, but it relied on a browser signal that doesn't fire when a window is hidden
+to the tray on Windows, so a tray'd app kept polling the team server and kept its database
+awake. The pause now runs off the app's own window show/hide, so a connected app sitting in
+the tray makes no requests at all and resumes with an immediate sync the moment you open it.
+(#360)
+
 ## [1.9.2] - 2026-07-18
 
 A cost fix for teams: an idle connected app no longer keeps the team server's database awake.
