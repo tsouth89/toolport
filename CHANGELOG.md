@@ -6,6 +6,20 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-07-18
+
+A cost fix for teams: an idle connected app no longer keeps the team server's database awake.
+
+### Fixed
+
+**Team sync pauses when the app is in the background.** A Toolport app connected to a team
+long-polled the team server every ~25 seconds for as long as it was running, even minimized to
+the tray with nobody using it. Each poll touched the server's database, which on a scale-to-zero
+Postgres kept the compute awake around the clock. The sync loop now pauses entirely while the app
+is hidden (tray/minimized) and resumes with an immediate catch-up sync the moment you bring it
+back, so a backgrounded app stops hitting the server. Paired with a server-side write throttle so
+even a foreground app only records presence every few minutes. (#359)
+
 ## [1.9.1] - 2026-07-16
 
 A fast follow-up to v1.9.0: make code mode reachable, correct the activity total, and stop
