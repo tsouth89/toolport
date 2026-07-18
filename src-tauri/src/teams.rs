@@ -913,6 +913,57 @@ fn build_instructions_receipt(
     }
 }
 
+/// One client's row in the member-facing instructions status view (spec W4).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstructionsClientStatus {
+    pub id: String,
+    pub name: String,
+    pub state: crate::instructions::ApplyState,
+}
+
+/// The member-facing view of the org instructions on THIS machine (spec W4): the exact content
+/// the org pushed, its version, and each installed client's current on-disk state. `None` when
+/// the team has no active instructions. Read-only; drives the Teams-tab status row.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstructionsStatusView {
+    pub content: String,
+    pub version: i64,
+    pub clients: Vec<InstructionsClientStatus>,
+}
+
+/// Build the member-facing instructions status for the currently-connected team, or `None` if
+/// there's no connection or no active instructions. Reuses the same read-only per-client check
+/// as the coverage receipt, so what the member sees matches what the admin's coverage panel sees.
+pub fn instructions_status() -> Option<InstructionsStatusView> {
+    use crate::instructions::{self, ApplyState};
+    let reg = crate::registry::load().ok()?;
+    let team = reg.team.as_ref()?;
+    let content = team.team_instructions_content.clone()?;
+    let version = team.team_instructions_version;
+    let team_id = team.team_id.clone();
+    let clients = crate::clients::detect_clients()
+        .into_iter()
+        .filter(|c| c.app_present)
+        .map(|c| {
+            let state = match crate::clients::client_rules_target(&c.id) {
+                Some(target) => instructions::current_state(&target, &team_id, version, &content),
+                None => ApplyState::Unsupported,
+            };
+            InstructionsClientStatus {
+                id: c.id,
+                name: c.name,
+                state,
+            }
+        })
+        .collect();
+    Some(InstructionsStatusView {
+        content,
+        version,
+        clients,
+    })
+}
+
 /// Report this member's instructions coverage to the team server, once per sync cycle. Sends only
 /// when the receipt CHANGED since the last successful send (dedup by hash), so an unchanged
 /// coverage state costs the server nothing. Best-effort; a failure just retries next cycle. No-op

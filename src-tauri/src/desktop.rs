@@ -1910,6 +1910,14 @@ fn emit_team_review(app: &tauri::AppHandle, outcome: teams::MergeOutcome) {
     }
 }
 
+/// Member-facing Team Instructions status (spec W4): the org content on this machine, its
+/// version, and each installed client's on-disk state. `None` when the team has no active
+/// instructions. Read-only.
+#[tauri::command]
+fn team_instructions_status() -> Option<teams::InstructionsStatusView> {
+    teams::instructions_status()
+}
+
 /// Leave the team: remove its merged servers, clear the connection and the token.
 #[tauri::command]
 fn team_disconnect(state: State<RegistryState>) -> Result<Registry, String> {
@@ -2861,6 +2869,7 @@ pub fn run() {
             team_sync,
             team_sync_wait,
             main_window_visible,
+            team_instructions_status,
             team_disconnect,
             team_push_preview,
             team_push,

@@ -7,6 +7,11 @@ import {
   Users,
   Server,
   AlertTriangle,
+  Check,
+  Clock,
+  Ban,
+  Minus,
+  FileText,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Badge } from "@/components/ui/badge";
@@ -22,12 +27,42 @@ import {
   teamDisconnect,
   teamPushPreview,
   teamPush,
+  teamInstructionsStatus,
   setServerEnabled,
 } from "@/lib/api";
 import { teamUrlError } from "@/lib/teamUrl";
 import { isEnabled, activeProfile } from "@/lib/types";
 import type { TeamPushPreview } from "@/lib/api";
-import type { Registry } from "@/lib/types";
+import type {
+  Registry,
+  InstructionsStatusView,
+  InstructionsApplyState,
+} from "@/lib/types";
+
+/** How each per-client instructions state renders in the member's Teams tab (spec W4). */
+const INSTR_STATE_META: Record<
+  InstructionsApplyState,
+  { label: string; className: string; Icon: typeof Check }
+> = {
+  applied: { label: "Applied", className: "text-success", Icon: Check },
+  stale: { label: "Not applied yet", className: "text-warning", Icon: Clock },
+  blocked_override: {
+    label: "Blocked by a local override",
+    className: "text-warning",
+    Icon: Ban,
+  },
+  too_long: {
+    label: "Too long for this client",
+    className: "text-warning",
+    Icon: AlertTriangle,
+  },
+  unsupported: {
+    label: "Copy manually",
+    className: "text-muted-foreground",
+    Icon: Minus,
+  },
+  error: { label: "Write error", className: "text-destructive", Icon: AlertTriangle },
+};
 
 /** The hosted Toolport Teams instance, prefilled as the default. Self-hosters replace
  * it with their own server URL. */
@@ -60,6 +95,25 @@ export function TeamsView({
   const [notice, setNotice] = useState<string | null>(null);
   const [skipNote, setSkipNote] = useState<string | null>(null);
   const [pushPreview, setPushPreview] = useState<TeamPushPreview | null>(null);
+  // The member-facing Team Instructions status on this machine (spec W4): what the org pushed
+  // and how each installed AI client currently holds it. Refetched on connect and whenever a sync
+  // bumps the config version, so it tracks the files the writer just wrote.
+  const [instr, setInstr] = useState<InstructionsStatusView | null>(null);
+  useEffect(() => {
+    // The command returns null when there's no team (or no active instructions), so there's no
+    // synchronous clear here — the result always lands via the async resolution.
+    let cancelled = false;
+    teamInstructionsStatus()
+      .then((s) => {
+        if (!cancelled) setInstr(s);
+      })
+      .catch(() => {
+        if (!cancelled) setInstr(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [team?.teamId, team?.lastVersion]);
   // Set while an approval-gated join waits for an admin. Holds the connect inputs so a poll
   // uses the values from when the request was made, not whatever the fields say later.
   const [pending, setPending] = useState<{
@@ -559,6 +613,49 @@ export function TeamsView({
               </>
             )}
           </div>
+
+          {instr && (
+            <div className="rounded-xl border bg-card p-5">
+              <div className="mb-1 flex items-center gap-2">
+                <FileText className="size-4 text-muted-foreground" />
+                <h3 className="text-sm font-medium">Team instructions</h3>
+                <span className="text-xs text-muted-foreground">v{instr.version}</span>
+              </div>
+              <p className="mb-3 text-xs text-muted-foreground">
+                Org-managed agent rules, written to your AI clients alongside — never over
+                — your own instructions. Leaving the team removes them.
+              </p>
+              <pre className="mb-3 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg border bg-muted/20 p-3 font-mono text-xs text-foreground">
+                {instr.content}
+              </pre>
+              {instr.clients.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No supported AI clients detected on this machine.
+                </p>
+              ) : (
+                <ul className="grid gap-1.5">
+                  {instr.clients.map((c) => {
+                    const meta = INSTR_STATE_META[c.state];
+                    const Icon = meta.Icon;
+                    return (
+                      <li
+                        key={c.id}
+                        className="flex items-center justify-between gap-3 text-sm"
+                      >
+                        <span className="truncate">{c.name}</span>
+                        <span
+                          className={`flex shrink-0 items-center gap-1 text-xs ${meta.className}`}
+                        >
+                          <Icon className="size-3.5" />
+                          {meta.label}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -8,6 +8,7 @@ import type {
   FolderProfile,
   ImportItem,
   InspectEntry,
+  InstructionsStatusView,
   McpPrompt,
   McpResource,
   McpTool,
@@ -413,6 +414,14 @@ export function teamSyncWait(waitSecs: number): Promise<Registry> {
  */
 export function mainWindowVisible(): Promise<boolean> {
   return invoke<boolean>("main_window_visible");
+}
+
+/**
+ * The member-facing Team Instructions status on this machine: the org content, its version, and
+ * each installed client's on-disk state. `null` when the team has no active instructions.
+ */
+export function teamInstructionsStatus(): Promise<InstructionsStatusView | null> {
+  return invoke<InstructionsStatusView | null>("team_instructions_status");
 }
 
 /** Leave the team: remove its merged servers and clear the saved token. */

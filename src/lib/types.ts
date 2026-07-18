@@ -474,6 +474,23 @@ export interface TeamConnection {
   lastVersion?: number;
 }
 
+/** Per-client on-disk state of the org Team Instructions (spec W4/W5). */
+export type InstructionsApplyState =
+  "applied" | "stale" | "blocked_override" | "too_long" | "unsupported" | "error";
+
+export interface InstructionsClientStatus {
+  id: string;
+  name: string;
+  state: InstructionsApplyState;
+}
+
+/** The member-facing view of the org instructions on this machine (`team_instructions_status`). */
+export interface InstructionsStatusView {
+  content: string;
+  version: number;
+  clients: InstructionsClientStatus[];
+}
+
 export function activeProfile(registry: Registry): Profile | undefined {
   return (
     registry.profiles.find((p) => p.id === registry.activeProfileId) ??
