@@ -294,6 +294,13 @@ function App() {
   // instant the team config view changes (or the wait elapses), so a dashboard edit lands in
   // ~1s while staying cheap when idle. Not tied to the Teams view. Keyed on the team id so it
   // starts on connect and tears down on disconnect/removal.
+  //
+  // While the app is backgrounded (minimized / hidden to the tray) the loop PAUSES entirely:
+  // a connected-but-idle client otherwise re-polls every ~25s forever, and each poll touches
+  // the team server's database, which pins a scale-to-zero Postgres (Neon) awake 24/7 and
+  // burns compute even when nobody is using Toolport (SOU-256). We resume the instant the
+  // window is shown again with an immediate poll, so a policy change that landed while we were
+  // hidden is picked up the moment the user comes back.
   const teamId = registry?.team?.teamId;
   useEffect(() => {
     if (!teamId) return;
@@ -305,8 +312,33 @@ function App() {
     // be a hot loop; with it, an old server degrades to a polite ~3s poll.
     const FLOOR_MS = 3000;
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    // Resolve when the window becomes visible again, so a backgrounded loop parks here (issuing
+    // zero requests) instead of hammering the server, and wakes on show or on teardown.
+    let wake: (() => void) | null = null;
+    const onVisible = () => {
+      if (!document.hidden && wake) {
+        wake();
+        wake = null;
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    const waitUntilVisible = () =>
+      new Promise<void>((resolve) => {
+        if (!document.hidden || cancelled) {
+          resolve();
+          return;
+        }
+        wake = resolve;
+      });
+
     const loop = async () => {
       while (!cancelled) {
+        if (document.hidden) {
+          await waitUntilVisible();
+          if (cancelled) break;
+          // Fall straight through to a poll so we resync immediately on show.
+        }
         const started = Date.now();
         try {
           const fresh = await teamSyncWait(WAIT_SECS);
@@ -329,6 +361,12 @@ function App() {
     void loop();
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      // Unblock a loop parked in waitUntilVisible so its cancelled check runs and it exits.
+      if (wake) {
+        wake();
+        wake = null;
+      }
     };
   }, [teamId]);
 
