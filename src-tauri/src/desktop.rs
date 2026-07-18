@@ -2608,7 +2608,23 @@ fn show_main_window(app: &AppHandle) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        // Tell the frontend the window is visible again so the team-sync loop resumes and does
+        // an immediate catch-up poll. The webview's Page Visibility API doesn't report Tauri
+        // tray show/hide on Windows, so this event is the authoritative signal (see the
+        // team-sync effect in App.tsx and `main_window_visible`).
+        let _ = app.emit("team-window-visible", true);
     }
+}
+
+/// Whether the main window is currently shown (vs hidden to the tray). Seeds the frontend
+/// team-sync loop's visibility gate on mount - live changes come via the `team-window-visible`
+/// event emitted from show/hide. Defaults to visible if the window is missing or the platform
+/// query fails, so sync never wedges off on an unexpected error.
+#[tauri::command]
+fn main_window_visible(app: AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(true)
 }
 
 /// Reflect the pending-approval count on the tray tooltip, so a glance at the tray
@@ -2844,6 +2860,7 @@ pub fn run() {
             team_join_poll,
             team_sync,
             team_sync_wait,
+            main_window_visible,
             team_disconnect,
             team_push_preview,
             team_push,
@@ -2881,6 +2898,10 @@ pub fn run() {
                     let _ = window.hide();
                     // Hidden to the tray => menu-bar only, so drop the Dock icon (macOS).
                     set_dock_icon_visible(window.app_handle(), false);
+                    // Tell the frontend the window is hidden so the team-sync loop parks and
+                    // stops polling the team server (each poll would otherwise keep a
+                    // scale-to-zero Postgres awake). Resumes via show_main_window's emit.
+                    let _ = window.app_handle().emit("team-window-visible", false);
                     maybe_show_tray_hint(window.app_handle());
                 }
             }
