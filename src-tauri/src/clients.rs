@@ -198,6 +198,7 @@ fn resolve_client_config_path(
         "cursor" => home.join(".cursor").join("mcp.json"),
         "boltai" => home.join(".boltai").join("mcp.json"),
         "pi" => home.join(".pi").join("agent").join("mcp.json"),
+        "omp" => home.join(".omp").join("agent").join("mcp.json"),
         "vscode" => config.join("Code").join("User").join("mcp.json"),
         "windsurf" => home
             .join(".codeium")
@@ -292,6 +293,7 @@ fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> 
         "cursor" => home.join(".cursor").join("mcp.json"),
         "boltai" => home.join(".boltai").join("mcp.json"),
         "pi" => home.join(".pi").join("agent").join("mcp.json"),
+        "omp" => home.join(".omp").join("agent").join("mcp.json"),
         "vscode" => config.join("Code").join("User").join("mcp.json"),
         "windsurf" => home
             .join(".codeium")
@@ -409,6 +411,7 @@ fn resolve_rules_target(
         },
         "goose" => block(home.join(".config").join("goose").join(".goosehints")),
         "pi" => block(home.join(".pi").join("agent").join("AGENTS.md")),
+        "omp" => block(home.join(".omp").join("agent").join("AGENTS.md")),
         "zed" => match platform {
             Platform::Windows => block(config.join("Zed").join("AGENTS.md")),
             Platform::MacOs | Platform::Linux => {
@@ -477,6 +480,12 @@ fn boltai_path() -> Option<PathBuf> {
 /// left unset so it uses its defaults). Home-anchored, identical on every OS.
 fn pi_path() -> Option<PathBuf> {
     client_config_path("pi")
+}
+
+/// Oh My Pi (omp) is a fork of Pi with its own config directory (~/.omp).
+/// Same `mcpServers` JSON format as Pi; home-anchored, identical on every OS.
+fn omp_path() -> Option<PathBuf> {
+    client_config_path("omp")
 }
 
 fn vscode_path() -> Option<PathBuf> {
@@ -829,6 +838,14 @@ fn defs() -> Vec<ClientDef> {
             format: Format::JsonMcpServers,
             uses_connectors: false,
             path: pi_path,
+            plugin_scan: None,
+        },
+        ClientDef {
+            id: "omp",
+            name: "Oh My Pi",
+            format: Format::JsonMcpServers,
+            uses_connectors: false,
+            path: omp_path,
             plugin_scan: None,
         },
         ClientDef {
@@ -3699,6 +3716,13 @@ command = "npx"
     fn goose_is_registered_as_yaml_extensions() {
         let d = defs().into_iter().find(|d| d.id == "goose").unwrap();
         assert!(matches!(d.format, Format::YamlExtensions));
+        assert!((d.path)().is_some());
+    }
+
+    #[test]
+    fn omp_is_registered_as_json_mcp_servers() {
+        let d = defs().into_iter().find(|d| d.id == "omp").unwrap();
+        assert!(matches!(d.format, Format::JsonMcpServers));
         assert!((d.path)().is_some());
     }
 
