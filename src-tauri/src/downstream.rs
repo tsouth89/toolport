@@ -2484,10 +2484,10 @@ mod tests {
         let our_pgid = unsafe { libc_getpgrp() };
 
         // Build a Command with the same isolation applied to downstream spawns.
-        // Use `sleep` (not `true`) so the child stays alive long enough for
-        // getpgid to read its group before it exits.
+        // Use a longer sleep so the child reliably stays alive during the getpgid
+        // check, then kill it immediately to avoid delaying the test suite.
         let mut cmd = std::process::Command::new("sleep");
-        cmd.arg("1");
+        cmd.arg("10");
         super::apply_process_group_isolation(&mut cmd);
 
         // Spawn and read the child's actual pgid via getpgid(child_pid).
@@ -2506,7 +2506,8 @@ mod tests {
             "process_group(0) should set pgid = child pid"
         );
 
-        // Clean up: wait for the child so it doesn't become a zombie.
+        // Clean up: kill the child to exit early, then wait to prevent a zombie.
+        let _ = child.kill();
         let _ = child.wait();
     }
 
