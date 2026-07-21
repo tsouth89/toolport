@@ -63,6 +63,13 @@ export function ProfileBar({ registry, onChange }: Props) {
     }
   }
 
+  function handleOpenChange(nextOpen: boolean) {
+    setOpen(nextOpen);
+    if (!nextOpen) {
+      setName("");
+    }
+  }
+
   return (
     <div className="flex items-center gap-1.5">
       <Select value={activeId} onValueChange={handleSwitch}>
@@ -108,7 +115,7 @@ export function ProfileBar({ registry, onChange }: Props) {
         />
       )}
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>New profile</DialogTitle>
@@ -132,7 +139,7 @@ export function ProfileBar({ registry, onChange }: Props) {
             />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>
+            <Button variant="outline" onClick={() => handleOpenChange(false)}>
               Cancel
             </Button>
             <Button onClick={handleCreate} disabled={!name.trim()}>
