@@ -44,6 +44,7 @@ use conduit_lib::savings;
 use conduit_lib::searchtrace;
 use conduit_lib::secrets;
 use conduit_lib::semantic;
+use conduit_lib::semantic::SemanticConfig;
 use conduit_lib::shaping;
 
 fn success(id: Value, result: Value) -> Value {
@@ -9510,6 +9511,173 @@ mod tests {
         assert_eq!(outcome.broadened, 3);
         assert_eq!(outcome.matches.len(), 4);
         assert_eq!(outcome.matches[0]["name"], "homes__lookup");
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[test]
+    fn end_to_end_lexical_semantic_blend() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let cat = vec![
+            json!({
+                "name": "email__send_email",
+                "description": "Send a welcome email to a new signup",
+                "inputSchema": {}
+            }),
+            json!({
+                "name": "stripe__create_payment",
+                "description": "Charge a customer's credit card",
+                "inputSchema": {}
+            }),
+            json!({
+                "name": "github__create_pull_request",
+                "description": "Open a pull request for a branch",
+                "inputSchema": {}
+            })
+            
+        ];
+
+        let listener = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = listener.server_addr().to_ip().unwrap().port();
+        let endpoint = format!("http://127.0.0.1:{port}/v1/embeddings");
+        let server = std::thread::spawn(move || {
+            // request 1: embed_query
+            let request = listener.recv().unwrap();
+            let query_body1 = r#"
+            {
+            "data": [
+                {
+                "embedding": [1.0, 0.0]
+                }
+            ]
+            }
+            "#;
+
+            let content_type = tiny_http::Header::from_bytes(
+                &b"Content-Type"[..],
+                &b"application/json"[..],
+            )
+            .unwrap();
+
+            request
+                .respond(
+                    tiny_http::Response::from_string(query_body1)
+                        .with_header(content_type),
+                )
+                .unwrap();
+            // request 2: embed_tools
+            let request = listener.recv().unwrap();
+            let tools_body1 = r#"
+            {
+            "data": [
+                {
+                "embedding": [1.0, 0.0]
+                },
+                {
+                "embedding": [0.0, 1.0]
+                },
+                {
+                "embedding": [0.5, 0.5]
+                }
+            ]
+            }
+            "#;
+
+            let content_type = tiny_http::Header::from_bytes(
+                &b"Content-Type"[..],
+                &b"application/json"[..],
+            )
+            .unwrap();
+
+            request
+                .respond(
+                    tiny_http::Response::from_string(tools_body1)
+                        .with_header(content_type),
+                )
+                .unwrap();
+            // request 3: embed_query
+            let request = listener.recv().unwrap();
+            let query_body2 = r#"
+            {
+            "data": [
+                {
+                "embedding": [0.0, 1.0]
+                }
+            ]
+            }
+            "#;
+
+            let content_type = tiny_http::Header::from_bytes(
+                &b"Content-Type"[..],
+                &b"application/json"[..],
+            )
+            .unwrap();
+
+            request
+                .respond(
+                    tiny_http::Response::from_string(query_body2)
+                        .with_header(content_type),
+                )
+                .unwrap();
+            // request 4: embed_tools
+            let request = listener.recv().unwrap();
+            let tools_body2 = r#"
+            {
+            "data": [
+                {
+                "embedding": [1.0, 0.0]
+                },
+                {
+                "embedding": [-1.0, 0.0]
+                },
+                {
+                "embedding": [0.0, 1.0]
+                }
+            ]
+            }
+            "#;
+            let content_type = tiny_http::Header::from_bytes(
+                &b"Content-Type"[..],
+                &b"application/json"[..],
+            )
+            .unwrap();
+
+            request
+                .respond(
+                    tiny_http::Response::from_string(tools_body2)
+                        .with_header(content_type),
+                )
+                .unwrap();
+        });
+        let cfg1 = SemanticConfig {
+            enabled: true,
+            endpoint: endpoint.clone(),
+            model: "test-model".to_string(),
+            blend: 0.5,
+        };
+        let cfg2 = SemanticConfig {
+            enabled: true,
+            endpoint: endpoint.clone(),
+            model: "test-model-2".to_string(),
+            blend: 0.6,
+        };
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "conduit-semantic-test-{}",
+            std::process::id()
+        ));
+
+        std::fs::create_dir_all(&path).unwrap();
+        std::env::set_var("CONDUIT_DATA_DIR", &path);
+
+        let outcome1 = search_catalog_with(&cat, "send a welcome email", None, 25, Some(&cfg1));
+        assert_eq!(outcome1.matches[0]["name"], "email__send_email");
+
+        let outcome2 = search_catalog_with(&cat,"send a welcome email", None, 25, Some(&cfg2));
+        assert_eq!(outcome2.matches[0]["name"], "github__create_pull_request");
+
+        server.join().unwrap();
+        std::fs::remove_dir_all(&path).ok();
     }
 
     #[test]
