@@ -268,6 +268,7 @@ fn resolve_client_config_path(
                 .join("anythingllm_mcp_servers.json"),
         },
         "hermes" => home.join(".hermes").join("config.yaml"),
+        "witsy" => config.join("Witsy").join("settings.json"),
         _ => return None,
     };
     Some(path)
@@ -330,6 +331,7 @@ fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> 
             .join("anythingllm_mcp_servers.json"),
         "continue" => home.join(".continue").join("config.yaml"),
         "hermes" => home.join(".hermes").join("config.yaml"),
+        "witsy" => config.join("Witsy").join("settings.json"),
         _ => return None,
     };
     Some(path)
@@ -581,6 +583,17 @@ fn hermes_path() -> Option<PathBuf> {
 
 fn continue_path() -> Option<PathBuf> {
     Some(home()?.join(".continue").join("config.yaml"))
+}
+
+/// Witsy keeps MCP servers in a top-level `mcpServers` object inside its main
+/// settings.json (alongside all other app settings), in the Claude-compatible
+/// `{command, args, env}` shape. Electron's userData dir is "Witsy" on every OS:
+/// ~/Library/Application Support/Witsy on macOS, %APPDATA%\Witsy on Windows,
+/// ~/.config/Witsy on Linux. Confirmed against the app's own source
+/// (src/main/mcp.ts reads/writes config.mcpServers directly) and the project's
+/// file-location wiki page.
+fn witsy_path() -> Option<PathBuf> {
+    client_config_path("witsy")
 }
 
 fn cursor_plugins_dir() -> Option<PathBuf> {
@@ -853,6 +866,14 @@ fn defs() -> Vec<ClientDef> {
             format: Format::YamlMcpServersList,
             uses_connectors: false,
             path: continue_path,
+            plugin_scan: None,
+        },
+        ClientDef {
+            id: "witsy",
+            name: "Witsy",
+            format: Format::JsonMcpServers,
+            uses_connectors: false,
+            path: witsy_path,
             plugin_scan: None,
         },
     ]
@@ -3616,9 +3637,10 @@ command = "npx"
 
     #[test]
     fn new_json_clients_are_registered() {
-        // Warp, Amazon Q, Kiro, LM Studio, Jan, and AnythingLLM all use the standard mcpServers JSON
-        // shape, so a ClientDef + path is all they need. Lock in their registration,
-        // format, and that their config paths resolve on this OS.
+        // Warp, Amazon Q, Kiro, LM Studio, Jan, AnythingLLM, and Witsy all use the
+        // standard mcpServers JSON shape, so a ClientDef + path is all they need.
+        // Lock in their registration, format, and that their config paths resolve
+        // on this OS.
         for id in [
             "warp",
             "amazon-q",
@@ -3626,6 +3648,7 @@ command = "npx"
             "lm-studio",
             "jan",
             "anythingllm",
+            "witsy",
         ] {
             let d = defs()
                 .into_iter()
@@ -4003,6 +4026,13 @@ command = "npx"
                     .join("Jan")
                     .join("data")
                     .join("mcp_config.json"),
+            }),
+            // Confirmed against Witsy's own file-location wiki: same "Witsy" folder
+            // name under the OS-standard roaming config root on every platform.
+            ("witsy", |home, platform| {
+                roaming_config_dir(home, platform)
+                    .join("Witsy")
+                    .join("settings.json")
             }),
         ];
 
