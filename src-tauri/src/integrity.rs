@@ -619,6 +619,44 @@ pub fn quarantined(profile: Option<&str>) -> BTreeSet<String> {
     load_quarantine(profile).into_keys().collect()
 }
 
+/// Like [`quarantined`], but reports an unreadable or unparseable store as an ERROR
+/// instead of as "nothing is quarantined", and never renames anything.
+///
+/// [`load_quarantine`] treats a corrupt file as empty (and moves it aside). That is
+/// tolerable at startup, where there is no prior state to preserve and empty is the only
+/// answer available. It is NOT safe for a caller that reconciles a LIVE quarantine set:
+/// reading a failed load as an empty set is indistinguishable from "the user re-approved
+/// everything", so it would silently un-block every quarantined tool. Callers that can
+/// keep enforcing their current set should use this and fail closed on `Err`.
+///
+/// Deliberately non-destructive. `load_quarantine` renames a corrupt file to `.corrupt`,
+/// which would turn the very next read into a legitimate-looking empty set and re-open
+/// the same hole one tick later.
+pub fn quarantined_checked(profile: Option<&str>) -> Result<BTreeSet<String>, String> {
+    let Some(path) = quarantine_path(profile) else {
+        // No resolvable data dir means nothing can have been persisted in the first
+        // place, so an empty set is the truth here rather than a failure.
+        return Ok(BTreeSet::new());
+    };
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        // Missing is the normal first-run state: nothing quarantined yet.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) => return Err(format!("quarantine store at {path:?} is unreadable: {e}")),
+    };
+    if raw.trim().is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    match serde_json::from_str::<Quarantine>(&raw) {
+        Ok(q) => Ok(q
+            .into_iter()
+            .filter(|(_, v)| !is_legacy_added(v))
+            .map(|(k, _)| k)
+            .collect()),
+        Err(e) => Err(format!("quarantine store at {path:?} is corrupt: {e}")),
+    }
+}
+
 /// Full quarantine records for `profile` (server, tool, reason, ts) for the UI.
 pub fn quarantine_list(profile: Option<&str>) -> Vec<Value> {
     load_quarantine(profile).into_values().collect()
