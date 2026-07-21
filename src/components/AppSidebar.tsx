@@ -30,7 +30,12 @@ import {
   type SavingsSummary,
   type View,
 } from "@/lib/types";
-import { gatherDiagnostics, getSavingsSummary, openDataDir } from "@/lib/api";
+import {
+  gatherDiagnostics,
+  getSavingsSummary,
+  listQuarantined,
+  openDataDir,
+} from "@/lib/api";
 import { fmtTokens } from "@/lib/utils";
 import { checkForUpdate, installUpdate } from "@/lib/updater";
 import { Button } from "@/components/ui/button";
@@ -404,6 +409,7 @@ export function AppSidebar({
 }: Props) {
   const [showMissing, setShowMissing] = useState(false);
   const [savings, setSavings] = useState<SavingsSummary | null>(null);
+  const [quarantinedCount, setQuarantinedCount] = useState(0);
   const sorted = sortClients(clients);
   const detectedClients = sorted.filter((c) => statusOf(c) !== "missing");
   const missingClients = sorted.filter((c) => statusOf(c) === "missing");
@@ -424,6 +430,23 @@ export function AppSidebar({
     };
   }, []);
 
+  // Keep a blocked-tool count on the Settings row, so the state stays discoverable after
+  // the QuarantineAlert card is dismissed (SOU-293). Slower than the card's own poll:
+  // this is a persistent indicator, not the thing that has to catch your eye.
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      listQuarantined()
+        .then((q) => alive && setQuarantinedCount(q.length))
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 10_000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
   // One sidebar nav row. The active row gets the accent background, a foreground
   // icon (not muted), and aria-current so screen readers announce the selection.
   const navItem = (
@@ -431,6 +454,7 @@ export function AppSidebar({
     label: string,
     active: boolean,
     onClick: () => void,
+    badge?: number,
   ) => (
     <button
       onClick={onClick}
@@ -441,6 +465,14 @@ export function AppSidebar({
         className={`size-4 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`}
       />
       <span>{label}</span>
+      {badge !== undefined && badge > 0 && (
+        <span
+          className="ml-auto inline-flex shrink-0 items-center rounded-full bg-warning/15 px-1.5 text-[10px] font-medium text-warning"
+          aria-label={`${badge} tool${badge === 1 ? "" : "s"} blocked`}
+        >
+          {badge}
+        </span>
+      )}
     </button>
   );
 
@@ -504,8 +536,12 @@ export function AppSidebar({
             onSelectView("activity"),
           )}
           {navItem(Users, "Teams", view === "teams", () => onSelectView("teams"))}
-          {navItem(Settings, "Settings", view === "settings", () =>
-            onSelectView("settings"),
+          {navItem(
+            Settings,
+            "Settings",
+            view === "settings",
+            () => onSelectView("settings"),
+            quarantinedCount,
           )}
         </nav>
 

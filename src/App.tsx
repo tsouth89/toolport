@@ -55,6 +55,7 @@ import {
 import { AppSidebar } from "@/components/AppSidebar";
 import { ClientLogo } from "@/components/ClientLogo";
 import { PendingApprovals } from "@/components/PendingApprovals";
+import { QuarantineAlert } from "@/components/QuarantineAlert";
 import { RegistryServerRow } from "@/components/RegistryServerRow";
 import { ServerDialog } from "@/components/ServerDialog";
 import { ImportReviewDialog } from "@/components/ImportReviewDialog";
@@ -884,6 +885,9 @@ function App() {
         </Suspense>
       )}
       <PendingApprovals />
+      {/* Quarantine has no global signal otherwise: the first sign used to be an agent
+          call failing, with the only fix buried in Settings (SOU-293). */}
+      <QuarantineAlert onReview={() => selectView("settings")} />
       <ConfirmDialog
         open={confirmDisableAll}
         onOpenChange={setConfirmDisableAll}
