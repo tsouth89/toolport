@@ -648,7 +648,6 @@ function CallRow({ e }: { e: AuditEntry }) {
               }
             : undefined
         }
-        {...(hasDetail ? { role: "button", "aria-expanded": open, tabIndex: 0 } : {})}
       >
         {hasDetail ? (
           <ChevronRight
