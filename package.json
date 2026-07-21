@@ -70,7 +70,10 @@
     "vitest": "^4.1.9"
   },
   "overrides": {
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "eslint-plugin-jsx-a11y": {
+      "eslint": "$eslint"
+    }
   },
   "lint-staged": {
     "*.{ts,tsx,css,mjs,json,md}": "prettier --write",
