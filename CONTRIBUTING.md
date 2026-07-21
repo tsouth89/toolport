@@ -301,8 +301,12 @@ Follow the existing conventions — at minimum:
   also update `client_config_paths_honor_xdg_dirs_on_linux`.
 
 - If the config file stores broader app settings instead of only MCP servers,
-  add the client to `config_is_whole_app_state()` so reads and writes use the
-  lenient whole-file path.
+  add the client to `config_is_whole_app_state()`. This records that the file is
+  whole-app state and is threaded through the write paths as the `lenient` flag.
+  It is a declaration of intent rather than a behavior switch today: the
+  never-wipe protection (a non-empty file that won't parse is always an error,
+  never silently replaced) already applies to every client regardless. See the
+  comment on `read_existing_json` for the history.
 
 - A round-trip test if you added a new `Format` variant: write servers → read
   them back → verify they match. See `json_mcpservers_round_trips` for the
