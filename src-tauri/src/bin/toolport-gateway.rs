@@ -6722,6 +6722,29 @@ fn main() {
         std::process::exit(0);
     }
 
+    // Detach from the spawning client's session so the gateway and its
+    // downstream server children run in their own session/process group with
+    // no controlling terminal. Without this, the gateway and every downstream
+    // server it spawns share the AI client's process group, so terminal
+    // job-control signals (SIGTTIN/SIGTTOU) generated during child startup
+    // can propagate to the client and disrupt its terminal I/O. TUI clients
+    // holding the terminal in raw mode around a blocking stdin read are
+    // especially sensitive. A multi-spawn gateway should not share a process
+    // group with its parent client.
+    //
+    // setsid() creates a new session; EPERM (already a session leader) is
+    // harmless. Unix only: Windows has no controlling-terminal analog.
+    #[cfg(unix)]
+    unsafe {
+        extern "C" {
+            fn setsid() -> i32;
+        }
+        // SAFETY: setsid() is a POSIX syscall taking no pointers and returning
+        // an integer. The worst case is EPERM (already a session leader),
+        // which we ignore. The signature matches libc::setsid exactly.
+        let _ = setsid();
+    }
+
     // Discovery mode resolves from an explicit env override first (per-client), then
     // the registry (its `discovery_mode` override, else the `lazy_discovery` bool), so
     // it applies to EVERY client, including ones that don't forward env vars to the
