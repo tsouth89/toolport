@@ -9698,6 +9698,57 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_quarantine_reads_the_persisted_set_and_clears_a_release() {
+        // Covers `reconcile_quarantine` itself, the function the watcher actually calls.
+        // The other tests exercise `reconcile_to`, its pure half, which leaves the
+        // composition with `effective_quarantine` (and that function's ON branch, the one
+        // that touches disk) unverified. Given SOU-292 was a correct function nothing
+        // invoked, the composition is worth asserting directly.
+        //
+        // Only writable because SOU-301 landed DataDirOverride: `set_var` cannot redirect
+        // conduit_dir() once anything has resolved it, so this would otherwise read and
+        // write the developer's real data dir and be order-dependent.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("toolport-sou292-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _data_dir = conduit_lib::registry::DataDirOverride::set(&dir);
+
+        let profile = Some("sou292-e2e");
+        let current = vec![json!({ "name": "srv__wipe", "description": "x", "inputSchema": {} })];
+        let events = vec![json!({
+            "server": "srv", "tool": "srv__wipe", "change": "poison", "severity": "high"
+        })];
+        assert!(
+            conduit_lib::integrity::apply_quarantine(profile, &current, &events),
+            "fixture should have quarantined the tool"
+        );
+
+        let mut reg = Registry::default();
+        reg.quarantine_on_drift = true;
+        let registry = Arc::new(Mutex::new(reg));
+        let router = Arc::new(Mutex::new(Arc::new(Router::new())));
+        let stdout = Arc::new(Mutex::new(std::io::stdout()));
+
+        // Picks the persisted set up off disk (effective_quarantine's ON branch).
+        assert!(reconcile_quarantine(&registry, &router, &stdout, profile));
+        assert!(router.lock().unwrap().quarantined().contains("srv__wipe"));
+
+        // Steady state: no churn while nothing changes.
+        assert!(!reconcile_quarantine(&registry, &router, &stdout, profile));
+
+        // The user re-approves. This is the SOU-292 regression, end to end.
+        assert!(conduit_lib::integrity::release(profile, "srv__wipe"));
+        assert!(reconcile_quarantine(&registry, &router, &stdout, profile));
+        assert!(
+            router.lock().unwrap().quarantined().is_empty(),
+            "a released tool must stop being enforced"
+        );
+
+        drop(_data_dir);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn data_dir_override_redirects_and_reverts() {
         // The revert half matters as much as the redirect: the override is
         // process-global, so one that outlived its test would silently point the app
