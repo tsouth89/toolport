@@ -36,7 +36,7 @@ describe("QuarantineAlert", () => {
     listQuarantined.mockResolvedValue([]);
     render(<QuarantineAlert />);
     await waitFor(() => expect(listQuarantined).toHaveBeenCalled());
-    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region")).not.toBeInTheDocument();
   });
 
   it("surfaces the blocked tool and the reason it was blocked", async () => {
@@ -45,7 +45,7 @@ describe("QuarantineAlert", () => {
     listQuarantined.mockResolvedValue([tool()]);
     render(<QuarantineAlert />);
 
-    expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+    expect(await screen.findByRole("region")).toBeInTheDocument();
     expect(screen.getByText("linear__save_issue")).toBeInTheDocument();
     expect(
       screen.getByText("a destructive tool's definition changed"),
@@ -63,9 +63,7 @@ describe("QuarantineAlert", () => {
     await userEvent.click(await screen.findByRole("button", { name: /re-approve/i }));
 
     expect(releaseQuarantine).toHaveBeenCalledWith("work", "linear__save_issue");
-    await waitFor(() =>
-      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.queryByRole("region")).not.toBeInTheDocument());
   });
 
   it("keeps the card up and reports the error when re-approval fails", async () => {
@@ -78,7 +76,7 @@ describe("QuarantineAlert", () => {
     await userEvent.click(await screen.findByRole("button", { name: /re-approve/i }));
 
     await waitFor(() => expect(toastError).toHaveBeenCalled());
-    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(screen.getByRole("region")).toBeInTheDocument();
   });
 
   it("stays hidden after dismissal, but reopens when a NEW tool is quarantined", async () => {
@@ -89,24 +87,40 @@ describe("QuarantineAlert", () => {
     render(<QuarantineAlert />);
 
     await userEvent.click(await screen.findByRole("button", { name: /keep blocked/i }));
-    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region")).not.toBeInTheDocument();
 
     listQuarantined.mockResolvedValue([tool(), tool({ tool: "linear__delete_issue" })]);
     // Longer than the 2s poll interval, since the reopen depends on the next poll landing.
-    expect(
-      await screen.findByRole("alertdialog", {}, { timeout: 4000 }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("region", {}, { timeout: 4000 })).toBeInTheDocument();
     expect(screen.getByText("linear__delete_issue")).toBeInTheDocument();
+  });
+
+  it("reopens when the SAME tool is quarantined again after being released", async () => {
+    // Regression for a CodeRabbit finding. Keyed on name alone, a tool that was
+    // dismissed, later re-approved, then drifted AGAIN produced an identical signature
+    // and stayed hidden behind the stale dismissal - silently suppressing a brand new
+    // quarantine, the exact failure this surface exists to prevent. The entry's ts is
+    // what makes the second quarantine distinguishable from the first.
+    const first = tool({ ts: 1_000 });
+    listQuarantined.mockResolvedValue([first]);
+    render(<QuarantineAlert />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /keep blocked/i }));
+    expect(screen.queryByRole("region")).not.toBeInTheDocument();
+
+    // Released elsewhere, then quarantined again: same tool, same profile, new event.
+    listQuarantined.mockResolvedValue([tool({ ts: 2_000 })]);
+    expect(await screen.findByRole("region", {}, { timeout: 4000 })).toBeInTheDocument();
   });
 
   it("keeps the current list when a poll fails instead of flashing all-clear", async () => {
     listQuarantined.mockResolvedValueOnce([tool()]);
     render(<QuarantineAlert />);
-    expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+    expect(await screen.findByRole("region")).toBeInTheDocument();
 
     listQuarantined.mockRejectedValue(new Error("backend down"));
     // Give the poll a chance to land and (incorrectly) clear the list.
     await new Promise((r) => setTimeout(r, 2100));
-    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(screen.getByRole("region")).toBeInTheDocument();
   });
 });
