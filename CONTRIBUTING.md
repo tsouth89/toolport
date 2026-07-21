@@ -242,18 +242,24 @@ Check the client's config file and match it to a `Format` variant:
 If the client uses a genuinely new format, add a variant to `enum Format` and a
 parse function (follow the pattern of `parse_json` or `parse_toml`).
 
-### 2. Add a path resolver
-
-Add a function that returns the config file path:
+### 2. Add the client path
 
 ```rust
+// In resolve_client_config_path():
+"my-client" => config.join("My Client").join("config.json"),
+
+// In resolve_client_config_path_linux():
+"my-client" => config.join("my-client").join("config.json"),
+
 fn my_client_path() -> Option<PathBuf> {
-    // Most clients keep config under ~/.<name>/ or ~/Library/Application Support/.
-    // Use home() for ~/. paths; see existing resolvers like cursor_path() or
-    // vscode_path() for patterns. Always anchor to home_dir, not env vars.
-    Some(home()?.join(".my-client").join("config.json"))
+    client_config_path("my-client")
 }
 ```
+
+Most clients should go through `client_config_path()` and add a match arm to both
+`resolve_client_config_path()` and `resolve_client_config_path_linux()`. The
+Linux resolver is separate so production paths can honor `XDG_CONFIG_HOME` and
+`XDG_DATA_HOME`.
 
 **Important:** the config file's parent directory is used as the "app installed?"
 heuristic. If the parent is too broad (like `~` itself) or too narrow (only
@@ -290,8 +296,13 @@ Follow the existing conventions — at minimum:
   }
   ```
 
-- A path stability test (only if the path logic is non-trivial). See
-  `client_config_paths_are_stable_across_platforms` for the pattern.
+- Path tests confirming the new match arms resolve correctly. Add the client to
+  `client_config_paths_are_stable_across_platforms`, and on Linux-aware paths
+  also update `client_config_paths_honor_xdg_dirs_on_linux`.
+
+- If the config file stores broader app settings instead of only MCP servers,
+  add the client to `config_is_whole_app_state()` so reads and writes use the
+  lenient whole-file path.
 
 - A round-trip test if you added a new `Format` variant: write servers → read
   them back → verify they match. See `json_mcpservers_round_trips` for the
