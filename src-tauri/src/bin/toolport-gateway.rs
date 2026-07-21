@@ -3651,19 +3651,48 @@ fn requarantine_if_needed(
 /// The quarantine set the router SHOULD be enforcing right now, mirroring how the
 /// initial build gates on the feature flag: when quarantine-on-drift is off, nothing is
 /// blocked even though the persisted set survives on disk for when it's turned back on.
-fn effective_quarantine(registry: &Arc<Mutex<Registry>>, profile: Option<&str>) -> BTreeSet<String> {
+fn effective_quarantine(
+    registry: &Arc<Mutex<Registry>>,
+    profile: Option<&str>,
+) -> Option<BTreeSet<String>> {
     let on = {
         let r = registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         r.quarantine_on_drift_effective()
     };
-    if on {
-        integrity::quarantined(profile)
-    } else {
-        BTreeSet::new()
+    if !on {
+        return Some(BTreeSet::new());
+    }
+    match integrity::quarantined_checked(profile) {
+        Ok(set) => {
+            // Recovered: let a future failure warn again.
+            QUARANTINE_READ_FAILED.store(false, Ordering::SeqCst);
+            Some(set)
+        }
+        // Fail CLOSED. An unreadable store is indistinguishable from an empty one, so
+        // treating it as empty would silently un-block every quarantined tool. Returning
+        // None keeps the router enforcing whatever it already has until the store is
+        // readable again.
+        Err(e) => {
+            // Warn once per failure streak: this runs on a 1s watcher tick, so logging
+            // unconditionally would bury the gateway log.
+            if !QUARANTINE_READ_FAILED.swap(true, Ordering::SeqCst) {
+                glog(&format!(
+                    "SECURITY: {e}; keeping the current quarantine set rather than \
+                     un-blocking. Re-approve tools once the store is readable."
+                ));
+                eprintln!("toolport: {e}; keeping the current quarantine set");
+            }
+            None
+        }
     }
 }
+
+/// Whether the last quarantine-store read failed, so the 1s watcher tick warns on the
+/// transition into failure rather than on every tick.
+static QUARANTINE_READ_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Reconcile the router's live quarantine set against what's persisted, and re-filter if
 /// they diverged. Returns whether anything changed.
@@ -3687,7 +3716,11 @@ fn reconcile_quarantine(
     stdout: &Arc<Mutex<std::io::Stdout>>,
     profile: Option<&str>,
 ) -> bool {
-    reconcile_to(router, stdout, effective_quarantine(registry, profile))
+    match effective_quarantine(registry, profile) {
+        Some(want) => reconcile_to(router, stdout, want),
+        // Store unreadable: keep enforcing the current set rather than weakening it.
+        None => false,
+    }
 }
 
 /// Apply a target quarantine set to the live router, re-filtering (and telling the client)
@@ -9694,7 +9727,122 @@ mod tests {
             "fixture must have the feature off"
         );
         let registry = Arc::new(Mutex::new(reg));
-        assert!(effective_quarantine(&registry, Some("unused-profile")).is_empty());
+        assert_eq!(
+            effective_quarantine(&registry, Some("unused-profile")),
+            Some(BTreeSet::new()),
+            "feature off is a known-empty set, not an unknown one"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_quarantine_store_keeps_the_current_set_instead_of_un_blocking() {
+        // `load_quarantine` reports a corrupt store as an EMPTY set (and moves the file
+        // aside). At startup that is the only answer available, but reconciling a LIVE set
+        // against it is a fail-OPEN: empty is indistinguishable from "the user re-approved
+        // everything", so a corrupt file would silently un-block every quarantined tool,
+        // and the rename would make the next tick read a legitimately-empty store and keep
+        // it that way. Reconciling must fail CLOSED.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir =
+            std::env::temp_dir().join(format!("toolport-corrupt-q-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _data_dir = conduit_lib::registry::DataDirOverride::set(&dir);
+
+        let profile = Some("corrupt-q");
+        let current = vec![json!({ "name": "srv__wipe", "description": "x", "inputSchema": {} })];
+        let events = vec![json!({
+            "server": "srv", "tool": "srv__wipe", "change": "poison", "severity": "high"
+        })];
+        assert!(conduit_lib::integrity::apply_quarantine(
+            profile, &current, &events
+        ));
+
+        let mut reg = Registry::default();
+        reg.quarantine_on_drift = true;
+        let registry = Arc::new(Mutex::new(reg));
+        let router = Arc::new(Mutex::new(Arc::new(Router::new())));
+        let stdout = Arc::new(Mutex::new(std::io::stdout()));
+
+        assert!(reconcile_quarantine(&registry, &router, &stdout, profile));
+        assert!(router.lock().unwrap().quarantined().contains("srv__wipe"));
+
+        // Corrupt the store underneath the running gateway.
+        let path = dir.join("quarantine-corrupt-q.json");
+        assert!(path.exists(), "fixture wrote where expected: {path:?}");
+        std::fs::write(&path, "{ not json at all").unwrap();
+
+        assert_eq!(
+            effective_quarantine(&registry, profile),
+            None,
+            "an unreadable store must be reported as unknown, not as empty"
+        );
+        assert!(
+            !reconcile_quarantine(&registry, &router, &stdout, profile),
+            "a corrupt store must not trigger a re-filter"
+        );
+        assert!(
+            router.lock().unwrap().quarantined().contains("srv__wipe"),
+            "the tool must STAY blocked while the store is unreadable"
+        );
+
+        // And it must recover once the store is readable again.
+        std::fs::write(&path, "{}").unwrap();
+        assert!(reconcile_quarantine(&registry, &router, &stdout, profile));
+        assert!(router.lock().unwrap().quarantined().is_empty());
+
+        drop(_data_dir);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reconcile_quarantine_reads_the_persisted_set_and_clears_a_release() {
+        // Covers `reconcile_quarantine` itself, the function the watcher actually calls.
+        // The other tests exercise `reconcile_to`, its pure half, which leaves the
+        // composition with `effective_quarantine` (and that function's ON branch, the one
+        // that touches disk) unverified. Given SOU-292 was a correct function nothing
+        // invoked, the composition is worth asserting directly.
+        //
+        // Only writable because SOU-301 landed DataDirOverride: `set_var` cannot redirect
+        // conduit_dir() once anything has resolved it, so this would otherwise read and
+        // write the developer's real data dir and be order-dependent.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("toolport-sou292-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _data_dir = conduit_lib::registry::DataDirOverride::set(&dir);
+
+        let profile = Some("sou292-e2e");
+        let current = vec![json!({ "name": "srv__wipe", "description": "x", "inputSchema": {} })];
+        let events = vec![json!({
+            "server": "srv", "tool": "srv__wipe", "change": "poison", "severity": "high"
+        })];
+        assert!(
+            conduit_lib::integrity::apply_quarantine(profile, &current, &events),
+            "fixture should have quarantined the tool"
+        );
+
+        let mut reg = Registry::default();
+        reg.quarantine_on_drift = true;
+        let registry = Arc::new(Mutex::new(reg));
+        let router = Arc::new(Mutex::new(Arc::new(Router::new())));
+        let stdout = Arc::new(Mutex::new(std::io::stdout()));
+
+        // Picks the persisted set up off disk (effective_quarantine's ON branch).
+        assert!(reconcile_quarantine(&registry, &router, &stdout, profile));
+        assert!(router.lock().unwrap().quarantined().contains("srv__wipe"));
+
+        // Steady state: no churn while nothing changes.
+        assert!(!reconcile_quarantine(&registry, &router, &stdout, profile));
+
+        // The user re-approves. This is the SOU-292 regression, end to end.
+        assert!(conduit_lib::integrity::release(profile, "srv__wipe"));
+        assert!(reconcile_quarantine(&registry, &router, &stdout, profile));
+        assert!(
+            router.lock().unwrap().quarantined().is_empty(),
+            "a released tool must stop being enforced"
+        );
+
+        drop(_data_dir);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
