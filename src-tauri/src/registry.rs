@@ -1152,11 +1152,70 @@ pub fn conduit_dir_resolution() -> DirResolution {
     resolve_conduit_dir().1
 }
 
+/// Process-global test override for [`conduit_dir`]. See [`DataDirOverride`].
+///
+/// The `AtomicBool` is a fast path so production never pays for the lock: it is only
+/// ever flipped by a test, so a normal run does one relaxed load per lookup and skips
+/// the `RwLock` entirely.
+static DATA_DIR_OVERRIDE_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static DATA_DIR_OVERRIDE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Points [`conduit_dir`] at a scratch directory until the guard drops. **Tests only.**
+///
+/// Setting `CONDUIT_DATA_DIR` does NOT work from a test: [`resolve_conduit_dir`]
+/// memoizes in a `OnceLock`, so whichever test resolves the dir first wins and every
+/// later `set_var` is silently ignored, leaving the test reading and writing the
+/// developer's REAL data dir. That made suite results order-dependent and leaked
+/// fixture files into `Conduit-dev` (SOU-301).
+///
+/// Deliberately not `#[cfg(test)]`-gated: the gateway binary's tests link this library
+/// compiled WITHOUT `cfg(test)`, so a cfg-gated hook would be invisible in exactly the
+/// place that needs it.
+///
+/// The override is process-global, so tests that use it must serialize against each
+/// other (the gateway tests hold a shared `ENV_LOCK` for this).
+#[doc(hidden)]
+#[must_use = "the override is reverted when the guard drops, so it must be bound"]
+pub struct DataDirOverride(());
+
+impl DataDirOverride {
+    pub fn set(path: impl Into<PathBuf>) -> Self {
+        *DATA_DIR_OVERRIDE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.into());
+        DATA_DIR_OVERRIDE_ACTIVE.store(true, Ordering::SeqCst);
+        Self(())
+    }
+}
+
+impl Drop for DataDirOverride {
+    fn drop(&mut self) {
+        // Clear the flag first so a lookup racing the drop falls through to the real
+        // resolution rather than reading a half-cleared override.
+        DATA_DIR_OVERRIDE_ACTIVE.store(false, Ordering::SeqCst);
+        *DATA_DIR_OVERRIDE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
 /// Resolve the data dir once and cache it: the container check and the UNC
 /// reachability probe should not run on every path lookup, and a stable answer
 /// keeps every consumer (registry, watcher, tool cache, approval endpoint) on
 /// one directory for the process lifetime.
 fn resolve_conduit_dir() -> (Option<PathBuf>, DirResolution) {
+    // Checked ahead of the memoized value so a test can redirect the dir even after
+    // something else in the process has already resolved it.
+    if DATA_DIR_OVERRIDE_ACTIVE.load(Ordering::SeqCst) {
+        if let Some(p) = DATA_DIR_OVERRIDE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return (Some(p), DirResolution::Direct);
+        }
+    }
     static RESOLVED: std::sync::OnceLock<(Option<PathBuf>, DirResolution)> =
         std::sync::OnceLock::new();
     RESOLVED
