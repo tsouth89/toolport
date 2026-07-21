@@ -18,13 +18,30 @@ reviews:
     drafts: false
     # Review once when the PR opens, not again on each subsequent commit.
     auto_incremental_review: false
+    # Don't spend review quota on PRs that carry no production logic. Matching is
+    # case-insensitive substring against the PR title, and the repo uses
+    # conventional-commit prefixes, so "docs:", "chore:", "style:" and friends are
+    # caught. Deliberately NOT skipped: "ci"/"build"/"deps", where a workflow or
+    # dependency change can be security-relevant and is worth a look.
+    ignore_title_keywords:
+      - docs
+      - chore
+      - style
+      - typo
+      - release
+      - WIP
   # Skip generated / vendored / build output so reviews stay signal-heavy.
+  # Prose is excluded too, so a docs-only PR has nothing left to review even if
+  # its title doesn't match the keywords above.
   path_filters:
     - "!**/package-lock.json"
     - "!**/*.lock"
     - "!dist/**"
     - "!src-tauri/target/**"
     - "!**/*.min.*"
+    - "!**/*.md"
+    - "!**/*.mdx"
+    - "!**/LICENSE"
   path_instructions:
     - path: "src/**/*.{ts,tsx}"
       instructions: >-
