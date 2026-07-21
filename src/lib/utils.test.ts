@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fmtTokens } from "./utils";
+import { fmtPercent, fmtTokens } from "./utils";
 
 describe("fmtTokens", () => {
   it("renders small numbers as-is", () => {
@@ -35,5 +35,25 @@ describe("fmtTokens", () => {
     expect(fmtTokens(0)).toBe("0");
     expect(fmtTokens(-1)).toBe("-1");
     expect(fmtTokens(-12345)).toBe("-12345");
+  });
+});
+
+describe("fmtPercent", () => {
+  it("always includes the percent suffix for zero values", () => {
+    expect(fmtPercent(0)).toBe("0%");
+  });
+
+  it("uses adaptive precision below ten percent", () => {
+    expect(fmtPercent(0.002)).toBe("0.2%");
+    expect(fmtPercent(0.099)).toBe("9.9%");
+    expect(fmtPercent(0.1)).toBe("10%");
+  });
+
+  it("floors tiny nonzero values instead of rounding them to zero", () => {
+    expect(fmtPercent(0.0004, { floorNonZero: true })).toBe("<0.1%");
+  });
+
+  it("can use the nonzero floor when the count is nonzero but the rate rounded away", () => {
+    expect(fmtPercent(0, { floorNonZero: true })).toBe("<0.1%");
   });
 });

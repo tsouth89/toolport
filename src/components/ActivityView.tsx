@@ -18,7 +18,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import { fmtTokens } from "@/lib/utils";
+import { fmtPercent, fmtTokens } from "@/lib/utils";
 import { toastError } from "@/lib/toast";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Input } from "@/components/ui/input";
@@ -531,7 +531,7 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
 }
 
 function errCell(errors: number, errorRate: number) {
-  return errors > 0 ? `${(errorRate * 100).toFixed(0)}%` : "0";
+  return fmtPercent(errorRate, { floorNonZero: errors > 0 });
 }
 
 /** One server row that expands to reveal its per-tool breakdown. */
@@ -700,7 +700,7 @@ function StatsPanel({ stats }: { stats: AuditStats }) {
   // below the security lane. It's one tap when you actually want the breakdown.
   const [tableOpen, setTableOpen] = useState(false);
   if (stats.total === 0) return null;
-  const errPct = (stats.errorRate * 100).toFixed(stats.errorRate < 0.1 ? 1 : 0);
+  const errPct = fmtPercent(stats.errorRate, { floorNonZero: stats.errors > 0 });
   // Surface how many servers have errors on the collapsed toggle: the aggregate error % can
   // dilute a single fully-broken server among many healthy ones, so a per-server signal has
   // to be visible without expanding the table.
@@ -720,7 +720,7 @@ function StatsPanel({ stats }: { stats: AuditStats }) {
           >
             {stats.errors}
           </div>
-          <div className="text-xs text-muted-foreground">errors ({errPct}%)</div>
+          <div className="text-xs text-muted-foreground">errors ({errPct})</div>
         </div>
         <div className="rounded-lg border p-3">
           <div className="text-2xl font-semibold tabular-nums">
