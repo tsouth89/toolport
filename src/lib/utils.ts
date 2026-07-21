@@ -18,3 +18,18 @@ export function fmtTokens(n: number): string {
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return `${n}`;
 }
+
+/**
+ * Format a ratio as a percent with the same adaptive precision everywhere.
+ * When `floorNonZero` is true, tiny positive rates render as "<0.1%" instead
+ * of rounding down to a misleading "0%".
+ */
+export function fmtPercent(
+  rate: number,
+  options: { floorNonZero?: boolean } = {},
+): string {
+  const percent = rate * 100;
+  if (options.floorNonZero && percent > 0 && percent < 0.1) return "<0.1%";
+  if (options.floorNonZero && percent === 0) return "<0.1%";
+  return `${percent.toFixed(percent > 0 && percent < 10 ? 1 : 0)}%`;
+}
