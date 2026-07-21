@@ -1,5 +1,6 @@
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
+import jsxA11y from "eslint-plugin-jsx-a11y";
 import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 import prettierConfig from "eslint-config-prettier";
@@ -26,12 +27,23 @@ export default tseslint.config(
       },
     },
     plugins: {
+      "jsx-a11y": jsxA11y,
       "react-hooks": reactHooks,
       "react-refresh": reactRefresh,
     },
     rules: {
+      ...jsxA11y.flatConfigs.recommended.rules,
       ...reactHooks.configs.recommended.rules,
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
+      "jsx-a11y/label-has-associated-control": [
+        "error",
+        {
+          controlComponents: ["Input", "Switch", "Textarea"],
+        },
+      ],
+      // Dialogs and command surfaces intentionally move focus to the primary
+      // input when they open.
+      "jsx-a11y/no-autofocus": "off",
       // React 19's hooks plugin added set-state-in-effect and refs-during-render
       // as errors. In a Tauri desktop app there's no Suspense or RSC, so loading
       // data from the Rust backend via setState-in-useEffect is the standard
@@ -39,6 +51,20 @@ export default tseslint.config(
       // to warnings so they surface without blocking the build.
       "react-hooks/set-state-in-effect": "warn",
       "react-hooks/refs": "warn",
+    },
+  },
+
+  // These components intentionally attach keyboard or mouse handling to
+  // non-button containers while preserving a separate accessible control.
+  {
+    files: [
+      "src/components/PendingApprovals.tsx",
+      "src/components/RegistryServerRow.tsx",
+    ],
+    rules: {
+      "jsx-a11y/click-events-have-key-events": "off",
+      "jsx-a11y/no-noninteractive-element-interactions": "off",
+      "jsx-a11y/no-static-element-interactions": "off",
     },
   },
 

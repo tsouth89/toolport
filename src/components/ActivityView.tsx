@@ -634,6 +634,9 @@ function CallRow({ e }: { e: AuditEntry }) {
         className={`flex items-center gap-3 rounded-md px-3 py-2 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${
           hasDetail ? "cursor-pointer hover:bg-muted/30" : ""
         }`}
+        role={hasDetail ? "button" : undefined}
+        tabIndex={hasDetail ? 0 : undefined}
+        aria-expanded={hasDetail ? open : undefined}
         onClick={() => hasDetail && setOpen((o) => !o)}
         onKeyDown={
           hasDetail
