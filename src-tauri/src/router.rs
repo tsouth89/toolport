@@ -555,6 +555,13 @@ impl Router {
         self.rebuild_aggregation();
     }
 
+    /// The quarantine set this router is currently enforcing. Lets a caller diff the
+    /// live set against the persisted one and skip `requarantine` (and the client
+    /// `list_changed` that follows it) when nothing actually changed.
+    pub fn quarantined(&self) -> &BTreeSet<String> {
+        &self.policy.quarantined
+    }
+
     /// Re-derive the exposed tool/resource/prompt aggregation from the current
     /// servers' (possibly refreshed) lists, in the original add order so exposed
     /// names and their `_2` collision suffixes stay stable. The server set itself
@@ -1281,6 +1288,65 @@ mod tests {
         assert!(err.contains("disabled"), "unexpected: {err}");
         // The allowed tool still routes.
         assert!(router.route_call("github__add", json!({})).is_ok());
+    }
+
+    #[test]
+    fn requarantine_restores_a_re_approved_tool_without_a_rebuild() {
+        // Regression for SOU-292: re-approving a quarantined tool left it blocked in the
+        // running gateway. The refresh path could ADD to the quarantine set but never
+        // REMOVE from it, and because `route_call` reads the materialized `blocked` map,
+        // a client that already held its catalog stayed broken even though the app showed
+        // nothing quarantined. Shrinking the set must restore the tool in place, with no
+        // rebuild and no downstream re-query.
+        let mut policy = ToolPolicy::default();
+        policy.quarantined = ["github__echo".to_string()].into_iter().collect();
+        let mut router = Router::with_policy(policy);
+        router.add(mock_server("github"));
+
+        // Quarantined: hidden from the catalog AND blocked on a direct call.
+        let names: Vec<String> = router
+            .aggregated_tools()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert_eq!(names, vec!["github__add"]);
+        let err = router.route_call("github__echo", json!({})).unwrap_err();
+        assert!(err.contains("quarantined"), "unexpected: {err}");
+
+        // Re-approval: the persisted set no longer holds the tool.
+        router.requarantine(BTreeSet::new());
+
+        // It must be routable again immediately, not "on the next rebuild".
+        assert!(
+            router.route_call("github__echo", json!({})).is_ok(),
+            "a re-approved tool must route again without a rebuild"
+        );
+        let names: Vec<String> = router
+            .aggregated_tools()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert!(
+            names.contains(&"github__echo".to_string()),
+            "and be re-exposed"
+        );
+    }
+
+    #[test]
+    fn quarantined_accessor_reflects_the_live_set() {
+        // The watcher diffs this against the persisted set to decide whether to re-filter,
+        // so it has to track `requarantine` exactly. If it went stale the reconciler would
+        // either spin (re-filtering every tick) or never fire at all.
+        let mut router = Router::new();
+        router.add(mock_server("github"));
+        assert!(router.quarantined().is_empty());
+
+        let set: BTreeSet<String> = ["github__echo".to_string()].into_iter().collect();
+        router.requarantine(set.clone());
+        assert_eq!(router.quarantined(), &set);
+
+        router.requarantine(BTreeSet::new());
+        assert!(router.quarantined().is_empty());
     }
 
     #[test]

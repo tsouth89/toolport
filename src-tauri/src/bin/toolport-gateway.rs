@@ -18,7 +18,7 @@
 //!   model searches and calls on demand, keeping context flat.
 //! - Records every tool call to a local audit log.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io::{BufRead, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -44,7 +44,6 @@ use conduit_lib::savings;
 use conduit_lib::searchtrace;
 use conduit_lib::secrets;
 use conduit_lib::semantic;
-use conduit_lib::semantic::SemanticConfig;
 use conduit_lib::shaping;
 
 fn success(id: Value, result: Value) -> Value {
@@ -3649,6 +3648,79 @@ fn requarantine_if_needed(
     }
 }
 
+/// The quarantine set the router SHOULD be enforcing right now, mirroring how the
+/// initial build gates on the feature flag: when quarantine-on-drift is off, nothing is
+/// blocked even though the persisted set survives on disk for when it's turned back on.
+fn effective_quarantine(registry: &Arc<Mutex<Registry>>, profile: Option<&str>) -> BTreeSet<String> {
+    let on = {
+        let r = registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        r.quarantine_on_drift_effective()
+    };
+    if on {
+        integrity::quarantined(profile)
+    } else {
+        BTreeSet::new()
+    }
+}
+
+/// Reconcile the router's live quarantine set against what's persisted, and re-filter if
+/// they diverged. Returns whether anything changed.
+///
+/// Why this exists (SOU-292): `requarantine_if_needed` only refreshes when a NEW drift is
+/// quarantined, so the refresh path could ADD to the set but never REMOVE from it.
+/// Re-approving a tool rewrites `quarantine.json`, a file the registry watcher never
+/// looks at, so the router kept blocking a tool the user had already released — and
+/// since `route_call` reads the materialized `blocked` map, a client that already had
+/// its catalog stayed broken even though the app showed nothing quarantined. Running
+/// this from the watcher fixes the call path too, not just `tools/list`.
+///
+/// Diffing the SET rather than the file's mtime matters: this gateway writes
+/// `quarantine.json` itself in `apply_quarantine`, so keying off mtime would make it
+/// react to its own writes and emit a spurious `list_changed` every time it quarantined
+/// something. It also self-corrects for any writer — the desktop app's release, a second
+/// gateway, or a hand edit.
+fn reconcile_quarantine(
+    registry: &Arc<Mutex<Registry>>,
+    router: &Arc<Mutex<Arc<Router>>>,
+    stdout: &Arc<Mutex<std::io::Stdout>>,
+    profile: Option<&str>,
+) -> bool {
+    reconcile_to(router, stdout, effective_quarantine(registry, profile))
+}
+
+/// Apply a target quarantine set to the live router, re-filtering (and telling the client)
+/// only if it actually differs. Split out from the disk read so the decision logic is
+/// testable without touching `conduit_dir()`, which memoizes per process and so can't be
+/// redirected from a test once anything else has resolved it.
+fn reconcile_to(
+    router: &Arc<Mutex<Arc<Router>>>,
+    stdout: &Arc<Mutex<std::io::Stdout>>,
+    want: BTreeSet<String>,
+) -> bool {
+    let changed = {
+        let mut guard = router
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.quarantined() == &want {
+            false
+        } else {
+            // make_mut clones only if an in-flight request still holds the old Arc, so a
+            // request mid-flight keeps serving its snapshot until it finishes.
+            let r = Arc::make_mut(&mut guard);
+            r.requarantine(want);
+            true
+        }
+    };
+    // Notify outside the router lock so a slow client write can't stall a request.
+    if changed {
+        eprintln!("toolport: quarantine set changed on disk; re-filtering exposed tools");
+        notify_tools_changed(stdout);
+    }
+    changed
+}
+
 fn persist_and_emit(
     tools: &[Value],
     cached_tools: &Arc<Mutex<Vec<Value>>>,
@@ -3858,6 +3930,17 @@ fn watch_registry(
     );
     loop {
         std::thread::sleep(Duration::from_millis(1000));
+        // Re-approving a tool rewrites quarantine.json, which is NOT the registry file
+        // this loop watches, so it has to be reconciled on its own. Deliberately ahead of
+        // the early-continue below: a release changes neither the registry mtime nor the
+        // downstream flag, so gating it on either would skip it entirely (SOU-292).
+        {
+            let p = profile
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            reconcile_quarantine(&registry, &router, &stdout, p.as_deref());
+        }
         // A live downstream server that changed its own tool set (sent
         // tools/list_changed) sets this. Swap before acting so a notification
         // arriving mid-refresh is caught on the next tick rather than lost.
@@ -7076,6 +7159,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test-only: the blend-ranking test builds these directly. Kept here rather than at
+    // module scope so a non-test build doesn't warn about an unused import.
+    use conduit_lib::semantic::SemanticConfig;
 
     #[test]
     fn router_relevant_ignores_team_metadata_but_tracks_real_changes() {
@@ -9537,6 +9623,80 @@ mod tests {
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The router wrapped the way the gateway holds it, plus a stdout sink.
+    fn reconcile_harness() -> (Arc<Mutex<Arc<Router>>>, Arc<Mutex<std::io::Stdout>>) {
+        (
+            Arc::new(Mutex::new(Arc::new(Router::new()))),
+            Arc::new(Mutex::new(std::io::stdout())),
+        )
+    }
+
+    fn set_of(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn reconcile_to_clears_a_re_approved_tool() {
+        // Regression for SOU-292. Re-approving a tool rewrote quarantine.json, but nothing
+        // told the running gateway: the refresh path only fired when a NEW drift was
+        // quarantined, so it could ADD to the set and never REMOVE from it. The registry
+        // watcher doesn't look at that file either, so the router kept the stale entry and
+        // `route_call` (which reads the materialized `blocked` map) failed with
+        // "quarantined ... re-approve to restore" while the app showed nothing quarantined.
+        let (router, stdout) = reconcile_harness();
+
+        // A drift quarantines a tool.
+        assert!(reconcile_to(&router, &stdout, set_of(&["srv__wipe"])));
+        assert_eq!(router.lock().unwrap().quarantined(), &set_of(&["srv__wipe"]));
+
+        // The same set again is a no-op, so the gateway's own quarantine writes can't
+        // churn the catalog or spam the client with list_changed.
+        assert!(!reconcile_to(&router, &stdout, set_of(&["srv__wipe"])));
+
+        // The user re-approves and the set SHRINKS. This is the assertion that fails
+        // without the fix.
+        assert!(
+            reconcile_to(&router, &stdout, BTreeSet::new()),
+            "a release must be reconciled into the live router"
+        );
+        assert!(
+            router.lock().unwrap().quarantined().is_empty(),
+            "the router must stop blocking a re-approved tool"
+        );
+
+        // Idempotent: the next watcher tick does nothing.
+        assert!(!reconcile_to(&router, &stdout, BTreeSet::new()));
+    }
+
+    #[test]
+    fn reconcile_to_detects_a_partial_release() {
+        // Releasing one of several must still re-filter. A cheaper "is it empty vs
+        // non-empty" check would miss this and leave the released tool blocked.
+        let (router, stdout) = reconcile_harness();
+        assert!(reconcile_to(&router, &stdout, set_of(&["a__x", "b__y"])));
+
+        assert!(reconcile_to(&router, &stdout, set_of(&["a__x"])));
+        assert_eq!(router.lock().unwrap().quarantined(), &set_of(&["a__x"]));
+        assert!(!reconcile_to(&router, &stdout, set_of(&["a__x"])));
+    }
+
+    #[test]
+    fn effective_quarantine_is_empty_while_the_feature_is_off() {
+        // Mirrors how the initial router build gates: the persisted set stays on disk so
+        // it can be restored when the feature is switched back on, but while
+        // quarantine-on-drift is OFF nothing may be enforced. The off branch returns
+        // without reading a profile file, so this stays independent of conduit_dir().
+        let mut reg = Registry::default();
+        reg.quarantine_on_drift = false;
+        assert!(
+            !reg.quarantine_on_drift_effective(),
+            "fixture must have the feature off"
+        );
+        let registry = Arc::new(Mutex::new(reg));
+        assert!(effective_quarantine(&registry, Some("unused-profile")).is_empty());
+    }
+
     #[test]
     fn end_to_end_lexical_semantic_blend() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
