@@ -9698,6 +9698,31 @@ mod tests {
     }
 
     #[test]
+    fn data_dir_override_redirects_and_reverts() {
+        // The revert half matters as much as the redirect: the override is
+        // process-global, so one that outlived its test would silently point the app
+        // (and every other test) at a scratch directory.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let before = conduit_lib::registry::conduit_dir();
+        let scratch =
+            std::env::temp_dir().join(format!("toolport-ddo-{}", std::process::id()));
+        {
+            let _guard = conduit_lib::registry::DataDirOverride::set(&scratch);
+            assert_eq!(
+                conduit_lib::registry::conduit_dir().as_deref(),
+                Some(scratch.as_path()),
+                "conduit_dir must follow the override even though it memoizes"
+            );
+        }
+        assert_eq!(
+            conduit_lib::registry::conduit_dir(),
+            before,
+            "the override must revert when the guard drops"
+        );
+    }
+
+    #[test]
     fn end_to_end_lexical_semantic_blend() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -9851,15 +9876,22 @@ mod tests {
         ));
 
         std::fs::create_dir_all(&path).unwrap();
-        std::env::set_var("CONDUIT_DATA_DIR", &path);
+        // Must be the override, NOT `set_var("CONDUIT_DATA_DIR", ..)`: conduit_dir()
+        // memoizes, so the env var is silently ignored unless this test happens to be the
+        // first in the process to resolve the dir. That made this test order-dependent
+        // (green alone, red in the full suite) and pointed its embeddings cache at the
+        // developer's real data dir, where a warm cache stops embed_tools from firing and
+        // the mock server's later responses are never consumed. See SOU-301.
+        let _data_dir = conduit_lib::registry::DataDirOverride::set(&path);
 
         let outcome1 = search_catalog_with(&cat, "send a welcome email", None, 25, Some(&cfg1));
         assert_eq!(outcome1.matches[0]["name"], "email__send_email");
 
-        let outcome2 = search_catalog_with(&cat,"send a welcome email", None, 25, Some(&cfg2));
+        let outcome2 = search_catalog_with(&cat, "send a welcome email", None, 25, Some(&cfg2));
         assert_eq!(outcome2.matches[0]["name"], "github__create_pull_request");
 
         server.join().unwrap();
+        drop(_data_dir);
         std::fs::remove_dir_all(&path).ok();
     }
 
