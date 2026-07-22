@@ -121,9 +121,10 @@ fn refresh_token_with_expiry(server_id: &str) -> Result<RefreshedToken, String> 
         .ok_or("no refresh token available")?;
     // Block a rebind to the internal network unless the token endpoint is itself a
     // local/LAN host (a self-hosted auth server). Fail closed (block) if the stored
-    // endpoint host can't be parsed.
+    // endpoint host can't be parsed OR can't be positively confirmed local, so an
+    // unresolvable stored endpoint stays screened rather than opening the guard (#422).
     let block_private = oauth::host_of_url(&state.token_endpoint)
-        .map(|h| !oauth::host_is_private(&h))
+        .map(|h| !oauth::host_is_definitely_private(&h))
         .unwrap_or(true);
     let tokens = oauth::refresh(
         &state.token_endpoint,
