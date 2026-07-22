@@ -64,6 +64,10 @@ enum Format {
     JsonMcpServers,
     /// JSON with a top-level `servers` object (VS Code).
     JsonServers,
+    /// JSON/JSONC with a top-level `mcp` object (OpenCode). Local entries store
+    /// the full argv in `command` and env vars in `environment`; remote entries
+    /// use `type: "remote"` plus `url` and optional `headers`.
+    JsonOpenCodeMcp,
     /// JSONC with a top-level `context_servers` object (Zed). Same per-server shape
     /// as mcpServers; the file is read leniently (comments + trailing commas) and
     /// never wiped on a parse failure (it holds the user's whole editor config).
@@ -204,6 +208,7 @@ fn resolve_client_config_path(
             .join(".codeium")
             .join("windsurf")
             .join("mcp_config.json"),
+        "opencode" => home.join(".config").join("opencode").join("opencode.json"),
         "codex" => home.join(".codex").join("config.toml"),
         "claude-code" => home.join(".claude.json"),
         "gemini-cli" => home.join(".gemini").join("settings.json"),
@@ -300,6 +305,9 @@ fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> 
             .join(".codeium")
             .join("windsurf")
             .join("mcp_config.json"),
+        // OpenCode documents this literal home-relative path on every platform;
+        // unlike most Linux clients it does not follow XDG_CONFIG_HOME here.
+        "opencode" => home.join(".config").join("opencode").join("opencode.json"),
         "codex" => home.join(".codex").join("config.toml"),
         "claude-code" => home.join(".claude.json"),
         "gemini-cli" => home.join(".gemini").join("settings.json"),
@@ -535,6 +543,12 @@ fn roo_code_path() -> Option<PathBuf> {
     client_config_path("roo-code")
 }
 
+/// OpenCode stores its global config at the literal
+/// `~/.config/opencode/opencode.json` on every supported OS.
+fn opencode_path() -> Option<PathBuf> {
+    client_config_path("opencode")
+}
+
 /// Warp reads file-based MCP servers from `~/.warp/.mcp.json` (keyed under
 /// `mcpServers`), alongside its in-app UI. The file is home-anchored on every OS.
 fn warp_path() -> Option<PathBuf> {
@@ -738,6 +752,14 @@ fn defs() -> Vec<ClientDef> {
             format: Format::JsonMcpServers,
             uses_connectors: false,
             path: windsurf_path,
+            plugin_scan: None,
+        },
+        ClientDef {
+            id: "opencode",
+            name: "OpenCode",
+            format: Format::JsonOpenCodeMcp,
+            uses_connectors: false,
+            path: opencode_path,
             plugin_scan: None,
         },
         ClientDef {
@@ -1273,6 +1295,31 @@ fn parse_json_snippet(
 ) -> Result<Vec<ParsedSnippetServer>, String> {
     let value = parse_json_value(content)?;
 
+    if let Some(mcp) = value.get("mcp") {
+        let obj = mcp
+            .as_object()
+            .ok_or_else(|| "OpenCode 'mcp' must be an object".to_string())?;
+        let mut malformed = Vec::new();
+        let mut servers = Vec::new();
+        for (name, definition) in obj {
+            match opencode_server_with_values(name, definition) {
+                Ok(Some(server)) => servers.push(server),
+                Ok(None) => {}
+                Err(error) => malformed.push(format!("{name} ({error})")),
+            }
+        }
+        if !malformed.is_empty() {
+            malformed.sort();
+            return Err(format!(
+                "malformed OpenCode 'mcp' entry: {}",
+                malformed.join(", ")
+            ));
+        }
+        if !servers.is_empty() {
+            return Ok(servers);
+        }
+    }
+
     // Try each wrapper key.
     for key in ["mcpServers", "servers", "context_servers"] {
         if let Some(obj) = value.get(key).and_then(|v| v.as_object()) {
@@ -1626,6 +1673,121 @@ fn parse_json(content: &str, key: &str) -> Result<Vec<McpServer>, String> {
     Ok(servers)
 }
 
+/// Parse one OpenCode `mcp` entry while retaining env/header values. OpenCode
+/// stores local commands as one argv array and uses `environment` instead of
+/// `env`; remote entries use `url` plus optional `headers`.
+fn opencode_server_with_values(
+    name: &str,
+    def: &serde_json::Value,
+) -> Result<Option<ParsedSnippetServer>, String> {
+    let obj = def
+        .as_object()
+        .ok_or_else(|| "expected an object".to_string())?;
+
+    let type_hint = obj.get("type").and_then(|value| value.as_str());
+    let (command, args) = match obj.get("command") {
+        None => (None, Vec::new()),
+        Some(value) => {
+            let argv = value
+                .as_array()
+                .ok_or_else(|| "'command' must be an array of strings".to_string())?;
+            let mut parts = Vec::with_capacity(argv.len());
+            for part in argv {
+                let Some(part) = part.as_str() else {
+                    return Err("'command' must contain only strings".to_string());
+                };
+                parts.push(part.to_string());
+            }
+            let command = parts.first().filter(|part| !part.is_empty()).cloned();
+            let args = parts.into_iter().skip(1).collect();
+            (command, args)
+        }
+    };
+
+    let url = obj
+        .get("url")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(String::from);
+
+    if type_hint == Some("local") && command.is_none() {
+        return Err("a local server requires a non-empty 'command' array".into());
+    }
+    if type_hint == Some("remote") && url.is_none() {
+        return Err("a remote server requires a non-empty 'url'".into());
+    }
+    // OpenCode also allows a config entry that only overrides `enabled` for a
+    // server inherited from elsewhere. It is not a complete server definition,
+    // so leave it in the config but omit it from Toolport's import inventory.
+    if command.is_none() && url.is_none() {
+        return Ok(None);
+    }
+
+    let mut env = Vec::new();
+    for key in ["environment", "headers"] {
+        let Some(value) = obj.get(key) else {
+            continue;
+        };
+        let values = value
+            .as_object()
+            .ok_or_else(|| format!("'{key}' must be an object"))?;
+        env.extend(values.iter().map(|(key, value)| SnippetEnvVar {
+            key: key.clone(),
+            value: json_value_to_string(value),
+        }));
+    }
+    env.sort_by(|left, right| left.key.cmp(&right.key));
+    env.dedup_by(|left, right| left.key == right.key);
+
+    Ok(Some(ParsedSnippetServer {
+        name: name.to_string(),
+        transport: if command.is_some() {
+            "stdio".into()
+        } else {
+            "http".into()
+        },
+        command,
+        args,
+        url,
+        env,
+    }))
+}
+
+fn parse_opencode_json(content: &str) -> Result<Vec<McpServer>, String> {
+    let value = parse_json_value(content)?;
+    let obj = match value.get("mcp") {
+        None => return Ok(Vec::new()),
+        Some(value) if value.is_object() => value.as_object().unwrap(),
+        Some(_) => return Err("'mcp' must be an object mapping server names to definitions".into()),
+    };
+
+    let mut malformed = Vec::new();
+    let mut servers = Vec::new();
+    for (name, definition) in obj {
+        match opencode_server_with_values(name, definition) {
+            Ok(Some(server)) => servers.push(McpServer {
+                name: server.name,
+                transport: server.transport,
+                command: server.command,
+                args: server.args,
+                env_keys: server.env.into_iter().map(|entry| entry.key).collect(),
+                url: server.url,
+            }),
+            Ok(None) => {}
+            Err(error) => malformed.push(format!("{name} ({error})")),
+        }
+    }
+    if !malformed.is_empty() {
+        malformed.sort();
+        return Err(format!(
+            "malformed 'mcp' entry: {}",
+            malformed.join(", ")
+        ));
+    }
+    servers.sort_by_key(|server| server.name.to_lowercase());
+    Ok(servers)
+}
+
 fn parse_toml(content: &str) -> Result<Vec<McpServer>, String> {
     let value: toml::Value =
         toml::from_str(content).map_err(|e| format!("TOML syntax error: {e}"))?;
@@ -1824,6 +1986,7 @@ fn read_client(def: &ClientDef) -> DetectedClient {
     let parsed = match def.format {
         Format::JsonMcpServers => parse_json(&content, "mcpServers"),
         Format::JsonServers => parse_json(&content, "servers"),
+        Format::JsonOpenCodeMcp => parse_opencode_json(&content),
         Format::JsonContextServers => parse_json(&content, "context_servers"),
         Format::TomlMcpServers => parse_toml(&content),
         Format::YamlExtensions => parse_yaml_extensions(&content),
@@ -1977,6 +2140,47 @@ fn entry_to_json(entry: &ServerEntry) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+fn entry_to_opencode_json(entry: &ServerEntry) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert("enabled".into(), serde_json::Value::Bool(true));
+
+    if let Some(command) = &entry.command {
+        map.insert("type".into(), serde_json::Value::String("local".into()));
+        map.insert(
+            "command".into(),
+            serde_json::Value::Array(
+                std::iter::once(command)
+                    .chain(entry.args.iter())
+                    .map(|part| serde_json::Value::String(part.clone()))
+                    .collect(),
+            ),
+        );
+    } else if let Some(url) = &entry.url {
+        map.insert("type".into(), serde_json::Value::String("remote".into()));
+        map.insert("url".into(), serde_json::Value::String(url.clone()));
+    }
+
+    let values: serde_json::Map<String, serde_json::Value> = entry
+        .env
+        .iter()
+        .filter_map(|env| {
+            env.value
+                .as_ref()
+                .map(|value| (env.key.clone(), serde_json::Value::String(value.clone())))
+        })
+        .collect();
+    if !values.is_empty() {
+        let key = if entry.command.is_some() {
+            "environment"
+        } else {
+            "headers"
+        };
+        map.insert(key.into(), serde_json::Value::Object(values));
+    }
+
+    serde_json::Value::Object(map)
+}
+
 fn entry_to_toml(entry: &ServerEntry) -> toml::Value {
     let mut t = toml::map::Map::new();
     if let Some(cmd) = &entry.command {
@@ -2044,6 +2248,50 @@ fn write_json(
 
     let json = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     atomic_write(path, &json)
+}
+
+fn opencode_mcp_mut(
+    root: &mut serde_json::Value,
+) -> Result<&mut serde_json::Map<String, serde_json::Value>, String> {
+    if !root.is_object() {
+        return Err("OpenCode config root must be an object; leaving it untouched.".into());
+    }
+    let object = root.as_object_mut().unwrap();
+    if object
+        .get("mcp")
+        .map(|value| !value.is_object())
+        .unwrap_or(false)
+    {
+        return Err("OpenCode 'mcp' must be an object; leaving the config untouched.".into());
+    }
+    if !object.contains_key("mcp") {
+        object.insert(
+            "mcp".into(),
+            serde_json::Value::Object(serde_json::Map::new()),
+        );
+    }
+    Ok(object.get_mut("mcp").unwrap().as_object_mut().unwrap())
+}
+
+fn read_existing_opencode_json(path: &Path) -> Result<serde_json::Value, String> {
+    if !path.exists() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    let content = read_config_file(path)?;
+    read_existing_json(&content, true)
+}
+
+fn write_opencode_json(path: &Path, servers: &[ServerEntry]) -> Result<(), String> {
+    let mut root = read_existing_opencode_json(path)?;
+    let mcp = opencode_mcp_mut(&mut root)?;
+    mcp.clear();
+    mcp.extend(
+        servers
+            .iter()
+            .map(|server| (server.name.clone(), entry_to_opencode_json(server))),
+    );
+    let output = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
+    atomic_write(path, &output)
 }
 
 fn write_toml(path: &Path, servers: &[ServerEntry]) -> Result<(), String> {
@@ -2605,6 +2853,7 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
     match def.format {
         Format::JsonMcpServers => write_json(&path, "mcpServers", servers, lenient)?,
         Format::JsonServers => write_json(&path, "servers", servers, lenient)?,
+        Format::JsonOpenCodeMcp => write_opencode_json(&path, servers)?,
         Format::JsonContextServers => write_json(&path, "context_servers", servers, true)?,
         Format::TomlMcpServers => write_toml(&path, servers)?,
         Format::YamlExtensions => write_yaml_extensions(&path, servers)?,
@@ -2818,6 +3067,32 @@ fn edit_json_gateway(
     atomic_write(path, &out)
 }
 
+fn edit_opencode_gateway(
+    path: &Path,
+    install: bool,
+    profile: Option<&str>,
+    client_id: &str,
+) -> Result<(), String> {
+    let mut root = read_existing_opencode_json(path)?;
+    let mcp = opencode_mcp_mut(&mut root)?;
+    mcp.retain(|name, definition| {
+        let command = definition
+            .get("command")
+            .and_then(|value| value.as_array())
+            .and_then(|parts| parts.first())
+            .and_then(|value| value.as_str());
+        !gateway_identity_matches(name, name, command)
+    });
+    if install {
+        mcp.insert(
+            GATEWAY_ENTRY_NAME.into(),
+            entry_to_opencode_json(&gateway_entry(profile, client_id)?),
+        );
+    }
+    let output = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
+    atomic_write(path, &output)
+}
+
 fn edit_toml_gateway(
     path: &Path,
     install: bool,
@@ -2874,7 +3149,7 @@ fn edit_toml_gateway(
 /// Studio, ...), which keep the harmless start-fresh behavior. (Zed's whole-editor
 /// settings.json is already lenient via its JsonContextServers format.)
 fn config_is_whole_app_state(client_id: &str) -> bool {
-    matches!(client_id, "claude-code" | "gemini-cli")
+    matches!(client_id, "claude-code" | "gemini-cli" | "opencode")
 }
 
 fn install_or_remove(
@@ -2892,6 +3167,9 @@ fn install_or_remove(
         }
         Format::JsonServers => {
             edit_json_gateway(&path, "servers", install, profile, lenient, client_id)?
+        }
+        Format::JsonOpenCodeMcp => {
+            edit_opencode_gateway(&path, install, profile, client_id)?
         }
         Format::JsonContextServers => {
             edit_json_gateway(&path, "context_servers", install, profile, true, client_id)?
@@ -3142,6 +3420,53 @@ mod tests {
         assert_eq!(parsed[0].name, "filesystem");
         assert_eq!(parsed[0].command.as_deref(), Some("npx"));
         assert_eq!(parsed[0].env_keys, vec!["TOKEN".to_string()]);
+    }
+
+    #[test]
+    fn opencode_json_parses_local_remote_and_override_entries() {
+        let content = r#"{
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": {
+                "local-tools": {
+                    "type": "local",
+                    "command": ["npx", "-y", "@example/mcp"],
+                    "environment": {"TOKEN": "secret"},
+                    "enabled": true
+                },
+                "remote-tools": {
+                    "type": "remote",
+                    "url": "https://mcp.example.com/mcp",
+                    "headers": {"Authorization": "Bearer secret"},
+                    "enabled": true
+                },
+                "inherited-toggle": {
+                    "enabled": false
+                }
+            }
+        }"#;
+
+        let parsed = parse_opencode_json(content).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "local-tools");
+        assert_eq!(parsed[0].transport, "stdio");
+        assert_eq!(parsed[0].command.as_deref(), Some("npx"));
+        assert_eq!(parsed[0].args, vec!["-y", "@example/mcp"]);
+        assert_eq!(parsed[0].env_keys, vec!["TOKEN"]);
+        assert_eq!(parsed[1].name, "remote-tools");
+        assert_eq!(parsed[1].transport, "http");
+        assert_eq!(
+            parsed[1].url.as_deref(),
+            Some("https://mcp.example.com/mcp")
+        );
+        assert_eq!(parsed[1].env_keys, vec!["Authorization"]);
+    }
+
+    #[test]
+    fn opencode_json_rejects_malformed_command_arrays() {
+        let content = r#"{"mcp":{"broken":{"type":"local","command":"npx"}}}"#;
+        let error = parse_opencode_json(content).unwrap_err();
+        assert!(error.contains("broken"), "got: {error}");
+        assert!(error.contains("array of strings"), "got: {error}");
     }
 
     #[test]
@@ -3639,6 +3964,7 @@ command = "npx"
         // the client's entire state, so an unparseable file must never be wiped.
         assert!(config_is_whole_app_state("claude-code"));
         assert!(config_is_whole_app_state("gemini-cli"));
+        assert!(config_is_whole_app_state("opencode"));
         // Single-purpose mcpServers files keep the start-fresh behavior.
         assert!(!config_is_whole_app_state("claude-desktop"));
         assert!(!config_is_whole_app_state("vscode"));
@@ -3652,6 +3978,119 @@ command = "npx"
         assert!(edit_json_gateway(&path, "mcpServers", true, None, true, "claude-code").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn opencode_round_trip_preserves_other_settings() {
+        let path = temp_path("opencode.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "$schema": "https://opencode.ai/config.json",
+                "model": "anthropic/claude-sonnet-4-5",
+                "mcp": {
+                    "existing": {
+                        "type": "local",
+                        "command": ["node", "server.mjs"],
+                        "environment": {"SECRET": "keep-me"},
+                        "enabled": false
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        edit_opencode_gateway(&path, true, Some("Work"), "opencode").unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            root.get("$schema").and_then(|value| value.as_str()),
+            Some("https://opencode.ai/config.json")
+        );
+        assert_eq!(
+            root.get("model").and_then(|value| value.as_str()),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        let mcp = root.get("mcp").and_then(|value| value.as_object()).unwrap();
+        assert_eq!(
+            mcp["existing"]["environment"]["SECRET"],
+            serde_json::Value::String("keep-me".into())
+        );
+        assert_eq!(mcp["existing"]["enabled"], false);
+        assert_eq!(mcp["conduit"]["type"], "local");
+        assert_eq!(mcp["conduit"]["enabled"], true);
+        let command = mcp["conduit"]["command"].as_array().unwrap();
+        assert_eq!(command.len(), 1);
+        assert!(command[0]
+            .as_str()
+            .unwrap()
+            .contains("toolport-gateway"));
+        assert_eq!(
+            mcp["conduit"]["environment"]["CONDUIT_CLIENT_ID"],
+            "opencode"
+        );
+        assert_eq!(
+            mcp["conduit"]["environment"]["CONDUIT_PROFILE"],
+            "Work"
+        );
+
+        edit_opencode_gateway(&path, false, None, "opencode").unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(after["mcp"].get("conduit").is_none());
+        assert!(after["mcp"].get("existing").is_some());
+        assert_eq!(after["model"], "anthropic/claude-sonnet-4-5");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn opencode_write_servers_round_trips_local_and_remote() {
+        let path = temp_path("opencode-write.json");
+        std::fs::remove_file(&path).ok();
+        let mut remote = stdio("remote");
+        remote.transport = "http".into();
+        remote.command = None;
+        remote.args.clear();
+        remote.url = Some("https://mcp.example.com/mcp".into());
+
+        write_opencode_json(&path, &[stdio("filesystem"), remote]).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed = parse_opencode_json(&content).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].command.as_deref(), Some("npx"));
+        assert_eq!(parsed[1].transport, "http");
+        assert_eq!(
+            parsed[1].url.as_deref(),
+            Some("https://mcp.example.com/mcp")
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn opencode_edit_never_wipes_unparseable_config() {
+        let path = temp_path("opencode-bad.json");
+        let garbage = r#"{"model":"keep-me","mcp":{"broken": not-json"#;
+        std::fs::write(&path, garbage).unwrap();
+        assert!(edit_opencode_gateway(&path, true, None, "opencode").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+
+        let wrong_shape = r#"{"model":"keep-me","mcp":"not-an-object"}"#;
+        std::fs::write(&path, wrong_shape).unwrap();
+        assert!(edit_opencode_gateway(&path, true, None, "opencode").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), wrong_shape);
+        assert!(write_opencode_json(&path, &[stdio("filesystem")]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), wrong_shape);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn opencode_is_registered_with_its_native_format() {
+        let definition = defs()
+            .into_iter()
+            .find(|definition| definition.id == "opencode")
+            .unwrap();
+        assert!(matches!(definition.format, Format::JsonOpenCodeMcp));
+        assert!((definition.path)().is_some());
     }
 
     #[test]
@@ -4051,6 +4490,9 @@ command = "npx"
     fn client_config_paths_are_stable_across_platforms() {
         let cases: &[(&str, fn(&Path, Platform) -> PathBuf)] = &[
             ("cursor", |home, _| home.join(".cursor").join("mcp.json")),
+            ("opencode", |home, _| {
+                home.join(".config").join("opencode").join("opencode.json")
+            }),
             ("pi", |home, _| {
                 home.join(".pi").join("agent").join("mcp.json")
             }),
@@ -4151,6 +4593,7 @@ command = "npx"
         let home = home().expect("home dir");
         let vscode = client_config_path("vscode").unwrap();
         let jan = client_config_path("jan").unwrap();
+        let opencode = client_config_path("opencode").unwrap();
 
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("XDG_DATA_HOME");
@@ -4164,7 +4607,10 @@ command = "npx"
             jan,
             xdg_data.join("Jan").join("data").join("mcp_config.json")
         );
-        let _ = home;
+        assert_eq!(
+            opencode,
+            home.join(".config").join("opencode").join("opencode.json")
+        );
     }
 
     // --- parse_snippet tests ---
@@ -4190,6 +4636,27 @@ command = "npx"
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "my-server");
         assert_eq!(servers[0].transport, "stdio");
+    }
+
+    #[test]
+    fn parse_opencode_json_snippet() {
+        let json = r#"{
+            "mcp": {
+                "my-server": {
+                    "type": "local",
+                    "command": ["npx", "-y", "foo"],
+                    "environment": {"TOKEN": "value"},
+                    "enabled": true
+                }
+            }
+        }"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "my-server");
+        assert_eq!(servers[0].command.as_deref(), Some("npx"));
+        assert_eq!(servers[0].args, vec!["-y", "foo"]);
+        assert_eq!(servers[0].env[0].key, "TOKEN");
+        assert_eq!(servers[0].env[0].value.as_deref(), Some("value"));
     }
 
     #[test]
