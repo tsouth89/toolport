@@ -131,8 +131,8 @@ fn vendors() -> &'static [Vendor] {
 }
 
 fn match_vendor(url: &str) -> Option<&'static Vendor> {
-    let lower = url.to_lowercase();
-    vendors().iter().find(|v| lower.contains(v.needle))
+    let host = url::Url::parse(url).ok()?.host_str()?.to_lowercase();
+    vendors().iter().find(|v| host.contains(v.needle))
 }
 
 /// Decide what a server needs: try connecting with no auth; if it works it needs
@@ -169,12 +169,26 @@ mod tests {
 
     #[test]
     fn matches_known_vendors() {
-        assert_eq!(match_vendor("https://mcp.stripe.com").unwrap().name, "Stripe");
+        assert_eq!(
+            match_vendor("https://mcp.stripe.com").unwrap().name,
+            "Stripe"
+        );
         assert_eq!(
             match_vendor("https://mcp.revenuecat.ai/mcp").unwrap().name,
             "RevenueCat"
         );
         assert!(match_vendor("https://unknown.example.com").is_none());
+
+        assert!(match_vendor("https://mcp.composio.dev/github").is_none());
+
+        assert_eq!(
+            match_vendor("https://api.githubcopilot.com/mcp")
+                .unwrap()
+                .name,
+            "GitHub"
+        );
+
+        assert!(match_vendor("https://mcp.composio.dev/clerk").is_none());
     }
 
     #[test]

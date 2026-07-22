@@ -617,7 +617,7 @@ fn hermes_path() -> Option<PathBuf> {
 }
 
 fn continue_path() -> Option<PathBuf> {
-    Some(home()?.join(".continue").join("config.yaml"))
+    client_config_path("continue")
 }
 
 /// Witsy keeps MCP servers in a top-level `mcpServers` object inside its main
@@ -4598,6 +4598,70 @@ command = "npx"
     }
 
     #[test]
+    fn continue_yaml_round_trip_preserves_config() {
+        let path = temp_path("continue.yaml");
+        std::fs::write(
+            &path,
+            "models:\n  - title: GPT-4o\n    provider: openai\n    model: gpt-4o\nrules:\n  - Keep responses concise\nmcpServers:\n  - name: old-server\n    command: old-command\n",
+        )
+        .unwrap();
+
+        let servers = vec![stdio("filesystem"), stdio("github")];
+        write_continue_yaml_servers(&path, &servers).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed = parse_continue_yaml_servers(&content).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "filesystem");
+        assert_eq!(parsed[0].command.as_deref(), Some("npx"));
+        assert_eq!(
+            parsed[0].args,
+            vec!["-y", "@modelcontextprotocol/server-filesystem"]
+        );
+        assert_eq!(parsed[0].env_keys, vec!["TOKEN".to_string()]);
+        assert_eq!(parsed[1].name, "github");
+
+        let root: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(
+            root.get("models")
+                .and_then(|models| models.as_sequence())
+                .and_then(|models| models.first())
+                .and_then(|model| model.get("title"))
+                .and_then(|title| title.as_str()),
+            Some("GPT-4o")
+        );
+        assert_eq!(
+            root.get("rules")
+                .and_then(|rules| rules.as_sequence())
+                .and_then(|rules| rules.first())
+                .and_then(|rule| rule.as_str()),
+            Some("Keep responses concise")
+        );
+        assert!(content.contains("plain-value"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn continue_yaml_write_never_wipes_unparseable() {
+        let path = temp_path("continue-bad.yaml");
+        let garbage = "models:\n  - title: GPT-4o\nmcpServers: [unbalanced\n";
+        std::fs::write(&path, garbage).unwrap();
+
+        assert!(write_continue_yaml_servers(&path, &[stdio("github")]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn continue_is_registered_as_yaml_mcp_servers_list() {
+        let d = defs().into_iter().find(|d| d.id == "continue").unwrap();
+        assert!(matches!(d.format, Format::YamlMcpServersList));
+        assert!((d.path)().is_some());
+    }
+
+    #[test]
     fn hermes_yaml_round_trip_preserves_config() {
         let path = temp_path("hermes.yaml");
         // A real config.yaml has model settings AND mcp_servers; touch neither but ours.
@@ -4816,6 +4880,9 @@ command = "npx"
             }),
             ("qwen-code", |home, _| {
                 home.join(".qwen").join("settings.json")
+            }),
+            ("continue", |home, _| {
+                home.join(".continue").join("config.yaml")
             }),
             ("pi", |home, _| {
                 home.join(".pi").join("agent").join("mcp.json")
