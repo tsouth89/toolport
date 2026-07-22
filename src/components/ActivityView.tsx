@@ -18,7 +18,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import { fmtPercent, fmtTokens } from "@/lib/utils";
+import { fmtPercent, fmtTokens, fmtTs } from "@/lib/utils";
 import { toastError } from "@/lib/toast";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Input } from "@/components/ui/input";
@@ -325,12 +325,7 @@ function SecurityNotices({
                     )}
                     <span className="ml-auto text-muted-foreground">
                       {count > 1 ? "last " : ""}
-                      {new Date(e.ts).toLocaleString(undefined, {
-                        month: "short",
-                        day: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
+                      {fmtTs(e.ts)}
                     </span>
                     <button
                       onClick={() => onDismiss(e)}
@@ -414,14 +409,7 @@ function QuietDriftHistory({
                   {e.change === "added" ? "new tool" : "changed"}
                 </span>
                 <code className="font-mono text-muted-foreground">{e.tool}</code>
-                <span className="ml-auto text-muted-foreground/70">
-                  {new Date(e.ts).toLocaleString(undefined, {
-                    month: "short",
-                    day: "numeric",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </span>
+                <span className="ml-auto text-muted-foreground/70">{fmtTs(e.ts)}</span>
                 <button
                   onClick={() => onDismiss(e)}
                   aria-label="Dismiss this change"
@@ -444,13 +432,7 @@ function SavingsBanner({ savings }: { savings: SavingsSummary }) {
   const [modelLabel, setModelLabel] = useState("Claude Sonnet");
   const price = SAVINGS_MODEL_PRICE.get(modelLabel) ?? 3;
   const dollars = (savings.tokensSaved / 1_000_000) * price;
-  const since =
-    savings.sinceTs > 0
-      ? new Date(savings.sinceTs).toLocaleDateString(undefined, {
-          month: "short",
-          day: "numeric",
-        })
-      : null;
+  const since = savings.sinceTs > 0 ? fmtTs(savings.sinceTs, "monthDay") : null;
   const details = [
     `across ${savings.listLoads.toLocaleString()} tool-list load${savings.listLoads === 1 ? "" : "s"}`,
     savings.peakCatalog > 4
@@ -681,9 +663,7 @@ function CallRow({ e }: { e: AuditEntry }) {
         <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
           {fmtMs(e.durationMs ?? e.heldMs ?? null)}
         </span>
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {new Date(e.ts).toLocaleString()}
-        </span>
+        <span className="shrink-0 text-xs text-muted-foreground">{fmtTs(e.ts)}</span>
       </div>
       {open && e.error && (
         <div className="border-t border-border/50 bg-destructive/5 px-3 py-2 pl-9">
@@ -832,7 +812,7 @@ function InspectRow({ e }: { e: InspectEntry }) {
           {fmtMs(e.durationMs ?? null)}
         </span>
         <span className="shrink-0 text-xs text-muted-foreground">
-          {new Date(e.ts).toLocaleTimeString()}
+          {fmtTs(e.ts, "time")}
         </span>
       </div>
       {open && (
@@ -911,7 +891,7 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
           {resultSummary}
         </span>
         <span className="shrink-0 text-xs text-muted-foreground">
-          {new Date(t.ts).toLocaleTimeString()}
+          {fmtTs(t.ts, "time")}
         </span>
       </div>
       {open && (
@@ -1057,7 +1037,7 @@ function DiscoveryTraces({ refreshKey }: { refreshKey: number }) {
 function ToolIdentityRow({ t }: { t: ToolIdentity }) {
   const [open, setOpen] = useState(false);
   const fpShort = t.fingerprint.replace(/^v\d+:/, "").slice(0, 12) || "-";
-  const fmtDate = (ms: number) => (ms > 0 ? new Date(ms).toLocaleDateString() : "-");
+  const fmtDate = (ms: number) => (ms > 0 ? fmtTs(ms, "date") : "-");
   return (
     <div className="rounded-md border border-border/50 text-sm">
       <div
