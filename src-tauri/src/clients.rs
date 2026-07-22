@@ -1389,7 +1389,7 @@ fn yaml_value_to_string(v: &serde_yaml::Value) -> Option<String> {
     }
 }
 
-/// Parse a YAML snippet (Hermes `mcp_servers:` or Goose `extensions:`).
+/// Parse a YAML snippet (Hermes `mcp_servers:`, Goose `extensions:`, or Continue `mcpServers:`).
 fn parse_yaml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String> {
     let value: serde_yaml::Value = serde_yaml::from_str(content).map_err(|e| e.to_string())?;
 
@@ -1493,6 +1493,67 @@ fn parse_yaml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String>
         }
     }
 
+    // Try Continue format: `mcpServers:` sequence.
+    if let Some(entries) = value.get("mcpServers").and_then(|v| v.as_sequence()) {
+        let servers: Vec<ParsedSnippetServer> = entries
+            .iter()
+            .filter_map(|server| {
+                let def = server.as_mapping()?;
+
+                let str_of =
+                    |key: &str| def.get(key).and_then(|v| v.as_str()).map(String::from);
+
+                let name = str_of("name")?;
+                let command = str_of("command").filter(|s| !s.is_empty());
+                let url = str_of("url").filter(|s| !s.is_empty());
+
+                if command.is_none() && url.is_none() {
+                    return None;
+                }
+
+                let args = def
+                    .get("args")
+                    .and_then(|v| v.as_sequence())
+                    .map(|seq| {
+                        seq.iter()
+                            .filter_map(|item| item.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let env = def
+                    .get("env")
+                    .and_then(|v| v.as_mapping())
+                    .map(|mapping| {
+                        mapping
+                            .iter()
+                            .filter_map(|(key, value)| {
+                                Some(SnippetEnvVar {
+                                    key: key.as_str()?.to_string(),
+                                    value: yaml_value_to_string(value),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let transport = classify(&command, &url, str_of("type").as_deref());
+
+                Some(ParsedSnippetServer {
+                    name,
+                    transport,
+                    command,
+                    args,
+                    url,
+                    env,
+                })
+            })
+            .collect();
+
+        if !servers.is_empty() {
+            return Ok(servers);
+        }
+    }
     Ok(Vec::new())
 }
 
@@ -4275,6 +4336,27 @@ extensions:
         assert_eq!(servers[0].command.as_deref(), Some("npx"));
         assert_eq!(servers[0].env[0].key, "KEY");
         assert_eq!(servers[0].env[0].value.as_deref(), Some("val"));
+    }
+
+    #[test]
+    fn parse_continue_yaml_snippet() {
+        let yaml = r#"
+mcpServers:
+- name: fetch
+  command: uvx
+  args:
+    - mcp-server-fetch
+  env:
+    TOKEN: abc123
+"#;
+        let servers = parse_snippet(yaml).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "fetch");
+        assert_eq!(servers[0].command.as_deref(), Some("uvx"));
+        assert_eq!(servers[0].args, vec!["mcp-server-fetch"]);
+        assert_eq!(servers[0].env.len(), 1);
+        assert_eq!(servers[0].env[0].key, "TOKEN");
+        assert_eq!(servers[0].env[0].value.as_deref(), Some("abc123"));
     }
 
     #[test]
