@@ -1160,6 +1160,20 @@ pub fn conduit_dir_resolution() -> DirResolution {
 static DATA_DIR_OVERRIDE_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static DATA_DIR_OVERRIDE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+#[cfg(test)]
+static DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Serialize tests that resolve [`conduit_dir`] with tests that override it.
+///
+/// The override is process-global, so this lock is required even for tests that only
+/// read the normal data directory; otherwise they can observe another test's scratch
+/// directory while that test holds a [`DataDirOverride`].
+#[cfg(test)]
+pub(crate) fn data_dir_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    DATA_DIR_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Points [`conduit_dir`] at a scratch directory until the guard drops. **Tests only.**
 ///
@@ -1173,8 +1187,9 @@ static DATA_DIR_OVERRIDE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock
 /// compiled WITHOUT `cfg(test)`, so a cfg-gated hook would be invisible in exactly the
 /// place that needs it.
 ///
-/// The override is process-global, so tests that use it must serialize against each
-/// other (the gateway tests hold a shared `ENV_LOCK` for this).
+/// The override is process-global. Every test in the same test binary that resolves
+/// [`conduit_dir`] directly or indirectly must hold `data_dir_test_lock`, whether
+/// or not that test installs an override itself.
 #[doc(hidden)]
 #[must_use = "the override is reverted when the guard drops, so it must be bound"]
 pub struct DataDirOverride(());
@@ -2347,6 +2362,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn conduit_dir_is_direct_outside_a_container() {
+        let _data_dir = data_dir_test_lock();
         assert_eq!(conduit_dir_resolution(), DirResolution::Direct);
         let dir = conduit_dir().expect("home dir resolves");
         assert!(dir.ends_with(format!("AppData\\Roaming\\{}", data_dir_leaf_name())));

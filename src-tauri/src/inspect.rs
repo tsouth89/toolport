@@ -165,12 +165,6 @@ pub fn clear() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // The inspect file path is process-global (one file per machine), so these
-    // tests can't run concurrently against it. Serialize them, and reset the file
-    // at the start of each so they don't see each other's writes.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn reset() {
         clear();
@@ -178,7 +172,7 @@ mod tests {
 
     #[test]
     fn record_then_read_recent_returns_it() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _data_dir = crate::registry::data_dir_test_lock();
         reset();
         record(
             Some("cursor"),
@@ -204,7 +198,7 @@ mod tests {
 
     #[test]
     fn ring_caps_at_fifty() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _data_dir = crate::registry::data_dir_test_lock();
         reset();
         for i in 0..60 {
             record(
@@ -228,7 +222,7 @@ mod tests {
 
     #[test]
     fn oversized_request_is_truncated_not_stored() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _data_dir = crate::registry::data_dir_test_lock();
         reset();
         // A request whose serialized JSON is well over the 4 KB cap.
         let big = "x".repeat(8 * 1024);
