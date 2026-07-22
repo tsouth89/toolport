@@ -2393,8 +2393,9 @@ fn extract_array(result: &Value, key: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cwd_validation_error, expand_cwd, file_uri_to_path, resolve_command, resolve_root_token,
-        screen_resolved_addrs, screen_spawn_command, screen_spawn_env, validate_cwd, CancelRegistry,
+        cwd_validation_error, empty_cwd_variables, expand_cwd, file_uri_to_path, resolve_command,
+        resolve_root_token, screen_resolved_addrs, screen_spawn_command, screen_spawn_env,
+        validate_cwd, CancelRegistry,
     };
     use serde_json::json;
     use std::path::Path;
@@ -2616,6 +2617,52 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(validate_cwd(dir.to_str().unwrap()).unwrap(), dir);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The two tests above cover the message shape and the happy path, and both
+    /// still pass if `validate_cwd` is reduced to `Ok(expand_cwd(dir))`. These
+    /// two pin the behaviour the change actually adds, so a later refactor can't
+    /// drop the check and stay green.
+    #[test]
+    fn validate_cwd_rejects_a_missing_directory() {
+        let missing = std::env::temp_dir()
+            .join(format!("toolport-cwd-absent-{}", std::process::id()))
+            .join("nope");
+        let error = validate_cwd(missing.to_str().unwrap()).unwrap_err();
+        assert!(error.contains("does not exist"), "got: {error}");
+        // The message formats paths with `{:?}`, which escapes separators on
+        // Windows, so compare against the debug form rather than the raw path.
+        assert!(
+            error.contains(&format!("{missing:?}")),
+            "the error must name the expanded path; got: {error}"
+        );
+    }
+
+    #[test]
+    fn empty_cwd_variables_reports_only_unset_names() {
+        let set = format!("TP_TEST_CWD_SET_{}", std::process::id());
+        let unset = format!("TP_TEST_CWD_UNSET_{}", std::process::id());
+        std::env::set_var(&set, "value");
+        std::env::remove_var(&unset);
+
+        // An unset var is reported, a set one is not.
+        assert_eq!(
+            empty_cwd_variables(&format!("${{{unset}}}/project")),
+            vec![unset.clone()]
+        );
+        assert!(empty_cwd_variables(&format!("${{{set}}}/project")).is_empty());
+        // ROOT is resolved upstream by resolve_root_token, so it is never a
+        // "you forgot to set this" hint.
+        assert!(empty_cwd_variables("${ROOT}/project").is_empty());
+        // A var set to the empty string counts as empty.
+        std::env::set_var(&unset, "");
+        assert_eq!(
+            empty_cwd_variables(&format!("${{{unset}}}/p")),
+            vec![unset.clone()]
+        );
+
+        std::env::remove_var(&set);
+        std::env::remove_var(&unset);
     }
 
     #[test]
