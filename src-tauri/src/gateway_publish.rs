@@ -181,6 +181,99 @@ pub fn stop_spawned_gateways() -> u32 {
     0
 }
 
+/// Terminate only gateway processes running a version OTHER than the installed one, and
+/// report the image names killed. Unlike [`stop_spawned_gateways`] this leaves current
+/// gateways alone, so it is safe to run on every launch.
+///
+/// Why this exists (SOU-306): the launch-time cleanup used to be gated on
+/// `repoint_stale_gateways()` returning a non-empty list. That call is idempotent, so once
+/// client configs point at the new binary it returns empty forever and the cleanup never
+/// runs again. The gate was a proxy for "is a running gateway on an old version?", and the
+/// two come apart exactly when the repoint already happened - after a manual install, or on
+/// any launch after the first. Six 1.9.3 gateways survived a 1.9.4 update that way, two of
+/// them across an app restart.
+///
+/// This matters because the gateway is where fixes like SOU-292 live: a user who updates to
+/// get one, while their client keeps an old gateway alive, still has the bug and reasonably
+/// concludes the update did nothing. Clients respawn the gateway on their next request, so
+/// killing is enough; nothing needs relaunching here.
+#[cfg(windows)]
+pub fn stop_stale_gateways() -> Vec<String> {
+    let images = running_gateway_images();
+    let mut killed = Vec::new();
+    for image in stale_gateway_images(&images, env!("CARGO_PKG_VERSION")) {
+        let ok = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", &image])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            killed.push(image);
+        }
+    }
+    killed
+}
+
+/// Which of `images` are gateways running a version other than `current`.
+///
+/// Split from the process enumeration and the killing so the decision is testable without
+/// spawning anything: getting this wrong is expensive in both directions - too eager and a
+/// launch kills the gateway it just published, too shy and the stale one survives and the
+/// user silently keeps running old code.
+fn stale_gateway_images(images: &[String], current: &str) -> Vec<String> {
+    // Names the current install may legitimately be running under. The unversioned forms are
+    // kept because a dev/unpackaged run uses them and carries no version to compare, so
+    // killing them would take out a running `tauri dev` gateway. `conduit-gateway` is the
+    // pre-rename form, kept so an in-place upgrade from an old install can't self-kill.
+    let keep = [
+        format!("toolport-gateway-{current}.exe"),
+        format!("conduit-gateway-{current}.exe"),
+        "toolport-gateway.exe".to_string(),
+        "conduit-gateway.exe".to_string(),
+    ];
+    images
+        .iter()
+        .filter(|image| !keep.iter().any(|k| k.eq_ignore_ascii_case(image)))
+        .cloned()
+        .collect()
+}
+
+/// Distinct image names of running gateway processes, e.g. `toolport-gateway-1.9.3.exe`.
+/// Matched on the `*-gateway*` shape rather than an exact name because the published binary
+/// clients actually run is versioned; nothing else on the system uses that shape.
+#[cfg(windows)]
+fn running_gateway_images() -> Vec<String> {
+    let Ok(out) = std::process::Command::new("tasklist")
+        .args(["/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut names: Vec<String> = Vec::new();
+    for line in text.lines() {
+        // CSV rows look like: "image.exe","1234","Console","1","12,345 K"
+        let Some(name) = line.trim().strip_prefix('"').and_then(|r| r.split('"').next())
+        else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        let ours = (lower.starts_with("toolport-gateway") || lower.starts_with("conduit-gateway"))
+            && lower.ends_with(".exe");
+        if ours && !names.iter().any(|n: &String| n.eq_ignore_ascii_case(name)) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+#[cfg(not(windows))]
+pub fn stop_stale_gateways() -> Vec<String> {
+    Vec::new()
+}
+
 /// Last path segment, regardless of OS path separator (client configs store Windows paths).
 fn path_basename(stored: &str) -> &str {
     stored.rsplit(['\\', '/']).next().unwrap_or(stored)
@@ -215,6 +308,51 @@ mod tests {
         assert!(is_unversioned_install_gateway_path(
             "/Applications/Toolport.app/Contents/MacOS/conduit-gateway"
         ));
+    }
+
+    #[test]
+    fn stale_gateway_images_keeps_current_and_kills_older() {
+        // Regression for SOU-306. A 1.9.4 update left six 1.9.3 gateways running because the
+        // cleanup was gated on a repoint that had already happened, so users kept running old
+        // gateway code and did not receive the fix they had just updated for.
+        let running = vec![
+            "toolport-gateway-1.9.3.exe".to_string(),
+            "toolport-gateway-1.9.4.exe".to_string(),
+            "toolport-gateway-1.8.0.exe".to_string(),
+            "conduit-gateway-1.7.2.exe".to_string(),
+        ];
+        let stale = stale_gateway_images(&running, "1.9.4");
+
+        assert!(
+            !stale.contains(&"toolport-gateway-1.9.4.exe".to_string()),
+            "must never kill the version it just published"
+        );
+        assert!(stale.contains(&"toolport-gateway-1.9.3.exe".to_string()));
+        assert!(stale.contains(&"toolport-gateway-1.8.0.exe".to_string()));
+        assert!(
+            stale.contains(&"conduit-gateway-1.7.2.exe".to_string()),
+            "the pre-rename image is still stale when its version differs"
+        );
+        assert_eq!(stale.len(), 3);
+    }
+
+    #[test]
+    fn stale_gateway_images_spares_unversioned_and_a_clean_launch() {
+        // Unversioned images are dev/unpackaged runs with no version to compare; killing them
+        // would take out a running `tauri dev` gateway.
+        let dev = vec![
+            "toolport-gateway.exe".to_string(),
+            "conduit-gateway.exe".to_string(),
+        ];
+        assert!(stale_gateway_images(&dev, "1.9.4").is_empty());
+
+        // The common case: nothing stale, so a normal launch kills nothing.
+        let current = vec!["toolport-gateway-1.9.4.exe".to_string()];
+        assert!(stale_gateway_images(&current, "1.9.4").is_empty());
+
+        // And the pre-rename image at the current version is the same install, not a leftover.
+        let renamed = vec!["conduit-gateway-1.9.4.exe".to_string()];
+        assert!(stale_gateway_images(&renamed, "1.9.4").is_empty());
     }
 
     #[test]
