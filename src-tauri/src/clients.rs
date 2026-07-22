@@ -2281,10 +2281,23 @@ fn read_existing_opencode_json(path: &Path) -> Result<serde_json::Value, String>
     read_existing_json(&content, true)
 }
 
+fn opencode_entry_is_override_only(definition: &serde_json::Value) -> bool {
+    let Some(object) = definition.as_object() else {
+        return false;
+    };
+    object.get("type").is_none()
+        && object.get("command").is_none()
+        && object.get("url").is_none()
+        && object.get("enabled").is_some_and(|value| value.is_boolean())
+}
+
 fn write_opencode_json(path: &Path, servers: &[ServerEntry]) -> Result<(), String> {
     let mut root = read_existing_opencode_json(path)?;
     let mcp = opencode_mcp_mut(&mut root)?;
-    mcp.clear();
+    // Complete server definitions are replaced by Toolport's inventory, but an
+    // `enabled`-only entry may override a server inherited from another OpenCode
+    // config layer and has no inventory representation of its own.
+    mcp.retain(|_, definition| opencode_entry_is_override_only(definition));
     mcp.extend(
         servers
             .iter()
@@ -4046,7 +4059,23 @@ command = "npx"
     #[test]
     fn opencode_write_servers_round_trips_local_and_remote() {
         let path = temp_path("opencode-write.json");
-        std::fs::remove_file(&path).ok();
+        std::fs::write(
+            &path,
+            r#"{
+                "model": "anthropic/claude-sonnet-4-5",
+                "mcp": {
+                    "inherited-toggle": {
+                        "enabled": false
+                    },
+                    "stale-server": {
+                        "type": "local",
+                        "command": ["node", "stale.mjs"],
+                        "enabled": true
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
         let mut remote = stdio("remote");
         remote.transport = "http".into();
         remote.command = None;
@@ -4055,6 +4084,10 @@ command = "npx"
 
         write_opencode_json(&path, &[stdio("filesystem"), remote]).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(root["model"], "anthropic/claude-sonnet-4-5");
+        assert_eq!(root["mcp"]["inherited-toggle"]["enabled"], false);
+        assert!(root["mcp"].get("stale-server").is_none());
         let parsed = parse_opencode_json(&content).unwrap();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].command.as_deref(), Some("npx"));
