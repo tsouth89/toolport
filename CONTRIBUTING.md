@@ -233,6 +233,7 @@ Check the client's config file and match it to a `Format` variant:
 | -------------------- | -------------------------------------------------- | -------------------------------- |
 | `JsonMcpServers`     | `{"mcpServers": {...}}`                            | Claude Desktop, Cursor, Windsurf |
 | `JsonServers`        | `{"servers": {...}}`                               | VS Code                          |
+| `JsonOpenCodeMcp`    | `{"mcp": {"name": {"command": [...]}}}`            | OpenCode                         |
 | `JsonContextServers` | `{"context_servers": {...}}` (JSONC)               | Zed                              |
 | `TomlMcpServers`     | `[mcp_servers.name]`                               | Codex                            |
 | `YamlExtensions`     | `extensions:` map (Goose shape: `cmd`/`envs`)      | Goose                            |
