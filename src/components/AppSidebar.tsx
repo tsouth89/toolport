@@ -435,10 +435,18 @@ export function AppSidebar({
   // this is a persistent indicator, not the thing that has to catch your eye.
   useEffect(() => {
     let alive = true;
-    const load = () =>
-      listQuarantined()
-        .then((q) => alive && setQuarantinedCount(q.length))
+    // Monotonic request id alongside `alive`: that flag only covers unmount, so a slow
+    // response could still land after a newer one and pin the badge to a stale count
+    // until the next tick. Only the newest request may write.
+    let latest = 0;
+    const load = () => {
+      const id = ++latest;
+      return listQuarantined()
+        .then((q) => {
+          if (alive && id === latest) setQuarantinedCount(q.length);
+        })
         .catch(() => {});
+    };
     load();
     const id = setInterval(load, 10_000);
     return () => {
