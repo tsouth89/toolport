@@ -370,8 +370,8 @@ pub fn resolve_command(command: &str) -> String {
 /// A PATH that includes the user's real shell PATH plus common install dirs.
 /// Expand a per-server working directory string (issue #239): a leading `~`
 /// (or `~/`) becomes the home dir, and `${VAR}` is replaced with the environment
-/// value (unset vars expand to empty). Returns the expanded path; the caller sets
-/// it as the child's cwd, and the OS reports a clear error if it doesn't exist.
+/// value (unset vars expand to empty). Returns the expanded path; the caller
+/// validates it before setting the child's cwd.
 pub fn expand_cwd(dir: &str) -> std::path::PathBuf {
     // Env vars first, so `~` inside an expanded value is still honored below.
     let mut out = String::with_capacity(dir.len());
@@ -397,6 +397,47 @@ pub fn expand_cwd(dir: &str) -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from(out)
+}
+
+fn empty_cwd_variables(dir: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = dir;
+    while let Some(start) = rest.find("${") {
+        rest = &rest[start + 2..];
+        let Some(end) = rest.find('}') else { break };
+        let name = &rest[..end];
+        if name != "ROOT" && std::env::var_os(name).is_none_or(|value| value.is_empty()) {
+            names.push(name.to_string());
+        }
+        rest = &rest[end + 1..];
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn cwd_validation_error(dir: &str, expanded: &Path, empty_variables: &[String]) -> String {
+    let mut message = format!(
+        "configured working directory {dir:?} expanded to {:?}, but that directory does not exist",
+        expanded
+    );
+    if !empty_variables.is_empty() {
+        let variables = empty_variables
+            .iter()
+            .map(|name| format!("${{{name}}}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!("; expanded empty environment variables: {variables}"));
+    }
+    message
+}
+
+fn validate_cwd(dir: &str) -> Result<std::path::PathBuf, String> {
+    let expanded = expand_cwd(dir);
+    if expanded.is_dir() {
+        return Ok(expanded);
+    }
+    Err(cwd_validation_error(dir, &expanded, &empty_cwd_variables(dir)))
 }
 
 /// Resolve the reserved `${ROOT}` token in a per-server working directory
@@ -1426,10 +1467,10 @@ impl StdioTransport {
         strip_gateway_control_env(&mut cmd, &configured);
         // Optional per-server working directory (issue #239). Unset (or blank)
         // means inherit the gateway's cwd, the previous behavior. `~` and `${VAR}`
-        // are expanded so a config can pin a server to a project dir. If the dir
-        // doesn't exist the spawn fails with a clear error, surfaced by the probe.
+        // are expanded so a config can pin a server to a project dir. Validate the
+        // expansion first so a missing dir reports the configured and expanded paths.
         if let Some(dir) = cwd.map(str::trim).filter(|d| !d.is_empty()) {
-            cmd.current_dir(expand_cwd(dir));
+            cmd.current_dir(validate_cwd(dir)?);
         }
         // Give the child the augmented PATH too, so e.g. `npx` can find `node`.
         #[cfg(not(windows))]
@@ -2352,10 +2393,11 @@ fn extract_array(result: &Value, key: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        expand_cwd, file_uri_to_path, resolve_command, resolve_root_token, screen_resolved_addrs,
-        screen_spawn_command, screen_spawn_env, CancelRegistry,
+        cwd_validation_error, expand_cwd, file_uri_to_path, resolve_command, resolve_root_token,
+        screen_resolved_addrs, screen_spawn_command, screen_spawn_env, validate_cwd, CancelRegistry,
     };
     use serde_json::json;
+    use std::path::Path;
 
     /// Minimal FFI for getpgrp (test-only, avoids adding libc as a dependency).
     #[cfg(unix)]
@@ -2553,6 +2595,27 @@ mod tests {
             assert_eq!(expand_cwd("~"), home);
             assert_eq!(expand_cwd("~/proj"), home.join("proj"));
         }
+    }
+
+    #[test]
+    fn cwd_validation_error_names_config_expansion_and_empty_variables() {
+        let error = cwd_validation_error(
+            "${MISSING}/project",
+            Path::new("/project"),
+            &["MISSING".to_string()],
+        );
+
+        assert!(error.contains(r#"configured working directory "${MISSING}/project""#));
+        assert!(error.contains(r#"expanded to "/project""#));
+        assert!(error.contains("expanded empty environment variables: ${MISSING}"));
+    }
+
+    #[test]
+    fn validate_cwd_accepts_an_existing_directory() {
+        let dir = std::env::temp_dir().join(format!("toolport-cwd-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(validate_cwd(dir.to_str().unwrap()).unwrap(), dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
