@@ -1259,6 +1259,71 @@ mod tests {
     }
 
     #[test]
+    fn renamed_tool_quarantines_and_releases_end_to_end() {
+        // #423 end-to-end through REAL integrity persistence and a REAL router, beyond the
+        // unit tests that hand-set the quarantine set: a tool renamed to an exposed name
+        // with no `__` drifts, integrity quarantines that renamed name to disk, the router
+        // reads it back and blocks the call, then a re-approve restores it. This is the
+        // whole chain the app relies on. Uses a throwaway profile under the real data dir,
+        // matching the existing integrity tests (see #400/#409 for the isolation cleanup).
+        use crate::integrity;
+        let profile = Some("sou423-rename-e2e");
+        let _ = integrity::release(profile, "search"); // start clean if a prior run lingered
+
+        // Rename srv/echo -> "search" (an exposed name with NO `server__` prefix).
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "echo".to_string(),
+            ToolOverride { name: Some("search".into()), description: None },
+        );
+        let mut router = Router::new();
+        router.set_overrides(HashMap::from([("srv".to_string(), overrides)]));
+        router.add(mock_server("srv"));
+
+        // Sanity: exposed under the renamed name, routes to the real tool, callable.
+        assert_eq!(router.route_of("search"), Some(("srv", "echo")));
+        assert!(router.route_call("search", json!({})).is_ok());
+
+        // The server ships a poisoned redefinition. integrity quarantines the RENAMED
+        // exposed name - only reachable because #423 stopped skipping non-`__` tools.
+        let current = router.aggregated_tools();
+        let events = vec![json!({
+            "server": "srv", "tool": "search", "change": "poison", "severity": "high"
+        })];
+        assert!(
+            integrity::apply_quarantine(profile, &current, &events),
+            "a poison drift on a renamed tool must quarantine it"
+        );
+
+        // The persisted set the watcher reads carries the renamed name...
+        let persisted = integrity::quarantined(profile);
+        assert!(persisted.contains("search"), "quarantine is keyed by the exposed name");
+
+        // ...and feeding it to the router hides and blocks the renamed tool.
+        router.requarantine(persisted);
+        let visible: Vec<String> = router
+            .aggregated_tools()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert!(!visible.contains(&"search".to_string()), "quarantined rename must be hidden");
+        let err = router.route_call("search", json!({})).unwrap_err();
+        assert!(err.contains("quarantine"), "a call to a quarantined rename must block: {err}");
+
+        // Re-approve: release clears the persisted set and the router restores the tool.
+        assert!(integrity::release(profile, "search"), "release must clear the entry");
+        let after = integrity::quarantined(profile);
+        assert!(!after.contains("search"), "a released tool leaves the persisted set");
+        router.requarantine(after);
+        assert!(
+            router.route_call("search", json!({})).is_ok(),
+            "a re-approved renamed tool must work again"
+        );
+
+        let _ = integrity::release(profile, "search"); // leave nothing behind
+    }
+
+    #[test]
     fn rename_to_an_already_taken_name_is_ignored() {
         // add is indexed after echo, so renaming add -> "srv__echo" (already taken) must
         // fall back to add's original name, keeping routing unambiguous.
