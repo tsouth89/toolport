@@ -993,7 +993,7 @@ fn json_server_with_values(name: &str, def: &serde_json::Value) -> ParsedSnippet
         .and_then(|a| a.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|x| x.as_str().map(String::from))
+                .filter_map(json_value_to_string)
                 .collect()
         })
         .unwrap_or_default();
@@ -1379,7 +1379,7 @@ fn parse_toml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String>
                 .and_then(|a| a.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
+                        .filter_map(toml_value_to_string)
                         .collect()
                 })
                 .unwrap_or_default();
@@ -1458,7 +1458,7 @@ fn parse_yaml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String>
                     .and_then(|v| v.as_sequence())
                     .map(|seq| {
                         seq.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
+                            .filter_map(yaml_value_to_string)
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1508,7 +1508,7 @@ fn parse_yaml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String>
                     .and_then(|v| v.as_sequence())
                     .map(|seq| {
                         seq.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
+                            .filter_map(yaml_value_to_string)
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1563,7 +1563,7 @@ fn parse_yaml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String>
                     .and_then(|v| v.as_sequence())
                     .map(|seq| {
                         seq.iter()
-                            .filter_map(|item| item.as_str().map(String::from))
+                            .filter_map(yaml_value_to_string)
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1824,7 +1824,7 @@ fn parse_toml(content: &str) -> Result<Vec<McpServer>, String> {
                 .and_then(|a| a.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
+                        .filter_map(toml_value_to_string)
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -2367,7 +2367,7 @@ fn parse_yaml_extensions(content: &str) -> Result<Vec<McpServer>, String> {
             .and_then(|v| v.as_sequence())
             .map(|seq| {
                 seq.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
+                    .filter_map(yaml_value_to_string)
                     .collect()
             })
             .unwrap_or_default();
@@ -2543,7 +2543,7 @@ fn parse_continue_yaml_servers(content: &str) -> Result<Vec<McpServer>, String> 
             .and_then(|v| v.as_sequence())
             .map(|seq| {
                 seq.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
+                    .filter_map(yaml_value_to_string)
                     .collect()
             })
             .unwrap_or_default();
@@ -2712,7 +2712,7 @@ fn parse_hermes_yaml_servers(content: &str) -> Result<Vec<McpServer>, String> {
             .and_then(|v| v.as_sequence())
             .map(|seq| {
                 seq.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
+                    .filter_map(yaml_value_to_string)
                     .collect()
             })
             .unwrap_or_default();
@@ -5051,6 +5051,80 @@ DEBUG = true
             .collect();
         assert_eq!(vals.get("PORT"), Some(&"3000"));
         assert_eq!(vals.get("DEBUG"), Some(&"true"));
+    }
+
+    #[test]
+    fn parse_non_string_json_arg_values() {
+        let json = r#"{"mcpServers":{"srv":{"command":"npx","args":["server.js",8080,true]}}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(servers[0].args, vec!["server.js", "8080", "true"]);
+    }
+
+    #[test]
+    fn parse_non_string_toml_arg_values() {
+        let toml = r#"
+        [mcp_servers.srv]
+        command = "npx"
+        args = ["server.js",8080,true]
+        "#;
+        let servers = parse_snippet(toml).unwrap();
+        assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(servers[0].args, vec!["server.js", "8080", "true"]);
+    }
+
+    #[test]
+    fn parse_non_string_goose_yaml_arg_values() {
+        let yaml = r#"
+        extensions:
+        srv:
+            enabled: true
+            type: stdio
+            cmd: npx
+            args:
+            - "server.js"
+            - 8080
+            - true
+        "#;
+        let servers = parse_snippet(yaml).unwrap();
+        assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(servers[0].args, vec!["server.js", "8080", "true"]);
+    }
+
+    #[test]
+    fn parse_non_string_continue_yaml_arg_values() {
+        // Continue's list form is indentation-sensitive, so this fixture stays
+        // flush against the left margin rather than matching the block above.
+        let yaml = r#"
+mcpServers:
+  - name: fetch
+    command: uvx
+    args:
+      - mcp-server-fetch
+      - 8080
+      - true
+"#;
+        let servers = parse_snippet(yaml).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(servers[0].args, vec!["mcp-server-fetch", "8080", "true"]);
+    }
+
+    #[test]
+    fn parse_non_string_hermes_yaml_arg_values() {
+        let yaml = r#"
+        mcp_servers:
+         my-server:
+            command: npx
+            args:
+              - "-y"
+              - 8080
+              - true
+        "#;
+        let servers = parse_snippet(yaml).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(servers[0].args, vec!["-y", "8080", "true"]);
     }
 
     #[test]
