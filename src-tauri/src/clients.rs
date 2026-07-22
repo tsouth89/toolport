@@ -64,6 +64,8 @@ enum Format {
     JsonMcpServers,
     /// JSON with a top-level `servers` object (VS Code).
     JsonServers,
+    /// JSON with a top-level `mcp` object (Crush).
+    JsonMcp,
     /// JSONC with a top-level `context_servers` object (Zed). Same per-server shape
     /// as mcpServers; the file is read leniently (comments + trailing commas) and
     /// never wiped on a parse failure (it holds the user's whole editor config).
@@ -196,6 +198,16 @@ fn resolve_client_config_path(
     let path = match client_id {
         "claude-desktop" => config.join("Claude").join("claude_desktop_config.json"),
         "cursor" => home.join(".cursor").join("mcp.json"),
+        "crush" => match platform {
+            Platform::Windows => home
+                .join("AppData")
+                .join("Local")
+                .join("crush")
+                .join("crush.json"),
+            Platform::MacOs | Platform::Linux => {
+                home.join(".config").join("crush").join("crush.json")
+            }
+        },
         "boltai" => home.join(".boltai").join("mcp.json"),
         "pi" => home.join(".pi").join("agent").join("mcp.json"),
         "omp" => home.join(".omp").join("agent").join("mcp.json"),
@@ -292,6 +304,7 @@ fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> 
     let path = match client_id {
         "claude-desktop" => config.join("Claude").join("claude_desktop_config.json"),
         "cursor" => home.join(".cursor").join("mcp.json"),
+        "crush" => config.join("crush").join("crush.json"),
         "boltai" => home.join(".boltai").join("mcp.json"),
         "pi" => home.join(".pi").join("agent").join("mcp.json"),
         "omp" => home.join(".omp").join("agent").join("mcp.json"),
@@ -467,6 +480,26 @@ fn claude_desktop_path() -> Option<PathBuf> {
 
 fn cursor_path() -> Option<PathBuf> {
     client_config_path("cursor")
+}
+
+fn crush_override_path(config_dir: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    config_dir
+        .filter(|p| !p.is_empty())
+        .map(|dir| PathBuf::from(dir).join("crush.json"))
+}
+
+/// Crush reads its global config from the directory in CRUSH_GLOBAL_CONFIG
+/// when set. Otherwise Windows uses %LOCALAPPDATA% while macOS/Linux use
+/// ~/.config.
+fn crush_path() -> Option<PathBuf> {
+    if let Some(path) = crush_override_path(std::env::var_os("CRUSH_GLOBAL_CONFIG")) {
+        return Some(path);
+    }
+    #[cfg(windows)]
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(local_app_data).join("crush").join("crush.json"));
+    }
+    client_config_path("crush")
 }
 
 fn anythingllm_path() -> Option<PathBuf> {
@@ -715,6 +748,14 @@ fn defs() -> Vec<ClientDef> {
             uses_connectors: false,
             path: cursor_path,
             plugin_scan: Some(scan_cursor_plugins),
+        },
+        ClientDef {
+            id: "crush",
+            name: "Crush",
+            format: Format::JsonMcp,
+            uses_connectors: false,
+            path: crush_path,
+            plugin_scan: None,
         },
         ClientDef {
             id: "anythingllm",
@@ -1824,6 +1865,7 @@ fn read_client(def: &ClientDef) -> DetectedClient {
     let parsed = match def.format {
         Format::JsonMcpServers => parse_json(&content, "mcpServers"),
         Format::JsonServers => parse_json(&content, "servers"),
+        Format::JsonMcp => parse_json(&content, "mcp"),
         Format::JsonContextServers => parse_json(&content, "context_servers"),
         Format::TomlMcpServers => parse_toml(&content),
         Format::YamlExtensions => parse_yaml_extensions(&content),
@@ -2605,6 +2647,7 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
     match def.format {
         Format::JsonMcpServers => write_json(&path, "mcpServers", servers, lenient)?,
         Format::JsonServers => write_json(&path, "servers", servers, lenient)?,
+        Format::JsonMcp => write_json(&path, "mcp", servers, lenient)?,
         Format::JsonContextServers => write_json(&path, "context_servers", servers, true)?,
         Format::TomlMcpServers => write_toml(&path, servers)?,
         Format::YamlExtensions => write_yaml_extensions(&path, servers)?,
@@ -2874,7 +2917,7 @@ fn edit_toml_gateway(
 /// Studio, ...), which keep the harmless start-fresh behavior. (Zed's whole-editor
 /// settings.json is already lenient via its JsonContextServers format.)
 fn config_is_whole_app_state(client_id: &str) -> bool {
-    matches!(client_id, "claude-code" | "gemini-cli")
+    matches!(client_id, "claude-code" | "crush" | "gemini-cli")
 }
 
 fn install_or_remove(
@@ -2892,6 +2935,9 @@ fn install_or_remove(
         }
         Format::JsonServers => {
             edit_json_gateway(&path, "servers", install, profile, lenient, client_id)?
+        }
+        Format::JsonMcp => {
+            edit_json_gateway(&path, "mcp", install, profile, lenient, client_id)?
         }
         Format::JsonContextServers => {
             edit_json_gateway(&path, "context_servers", install, profile, true, client_id)?
@@ -3142,6 +3188,22 @@ mod tests {
         assert_eq!(parsed[0].name, "filesystem");
         assert_eq!(parsed[0].command.as_deref(), Some("npx"));
         assert_eq!(parsed[0].env_keys, vec!["TOKEN".to_string()]);
+    }
+
+    #[test]
+    fn crush_json_round_trips_without_wiping_app_settings() {
+        let path = temp_path("crush-json");
+        std::fs::write(&path, r#"{"theme":"dark","mcp":{"old":{"command":"x"}}}"#)
+            .unwrap();
+        write_json(&path, "mcp", &[stdio("fresh")], true).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let parsed = parse_json(&content, "mcp").unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(root.get("theme").and_then(|v| v.as_str()), Some("dark"));
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "fresh");
     }
 
     #[test]
@@ -3714,6 +3776,18 @@ command = "npx"
     }
 
     #[test]
+    fn crush_is_registered_as_mcp_json() {
+        let d = defs().into_iter().find(|d| d.id == "crush").unwrap();
+        assert!(matches!(d.format, Format::JsonMcp));
+        assert!((d.path)().is_some());
+        assert!(config_is_whole_app_state("crush"));
+        assert_eq!(
+            crush_override_path(Some(std::ffi::OsString::from("custom-config"))),
+            Some(PathBuf::from("custom-config").join("crush.json"))
+        );
+    }
+
+    #[test]
     fn new_json_clients_are_registered() {
         // Warp, Amazon Q, Kiro, LM Studio, Jan, AnythingLLM, and Witsy all use the
         // standard mcpServers JSON shape, so a ClientDef + path is all they need.
@@ -4051,6 +4125,16 @@ command = "npx"
     fn client_config_paths_are_stable_across_platforms() {
         let cases: &[(&str, fn(&Path, Platform) -> PathBuf)] = &[
             ("cursor", |home, _| home.join(".cursor").join("mcp.json")),
+            ("crush", |home, platform| match platform {
+                Platform::Windows => home
+                    .join("AppData")
+                    .join("Local")
+                    .join("crush")
+                    .join("crush.json"),
+                Platform::MacOs | Platform::Linux => {
+                    home.join(".config").join("crush").join("crush.json")
+                }
+            }),
             ("pi", |home, _| {
                 home.join(".pi").join("agent").join("mcp.json")
             }),
