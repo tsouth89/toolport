@@ -2966,15 +2966,27 @@ pub fn run() {
                         repointed.len(),
                         repointed.join(", ")
                     );
-                    // A repoint means the gateway binary path changed (a version bump), so the
-                    // clients' currently-running gateways are the OLD version. Stop them so each
-                    // client respawns the freshly-installed gateway on its next request, instead
-                    // of the user having to relaunch the client to pick it up. Covers MANUAL
-                    // updates (running the installer), which never go through the in-app updater
-                    // that already calls stop_spawned_gateways. Only fires when something was
-                    // actually repointed, so a normal launch never kills a healthy gateway.
-                    let stopped = crate::gateway_publish::stop_spawned_gateways();
-                    eprintln!("toolport: stopped {stopped} stale gateway image(s) after re-point");
+                }
+                // Stop any gateway running a version other than this one, so each client
+                // respawns the freshly-installed gateway on its next request rather than the
+                // user having to relaunch the client. Covers MANUAL updates (running the
+                // installer), which never go through the in-app updater that already calls
+                // stop_spawned_gateways.
+                //
+                // Deliberately NOT gated on `repointed` (SOU-306). That call is idempotent, so
+                // once configs point at the new binary it returns empty forever and the cleanup
+                // became one-shot: it was a proxy for "is a running gateway on an old version?"
+                // and the two come apart precisely after a manual install, or on any launch
+                // after the first. Checking versions directly makes this self-correcting, so a
+                // later launch still cleans up what an earlier one missed. Current-version
+                // gateways are left alone, so a normal launch kills nothing.
+                let stale = crate::gateway_publish::stop_stale_gateways();
+                if !stale.is_empty() {
+                    eprintln!(
+                        "toolport: stopped {} stale gateway process image(s): {}",
+                        stale.len(),
+                        stale.join(", ")
+                    );
                 }
             });
 

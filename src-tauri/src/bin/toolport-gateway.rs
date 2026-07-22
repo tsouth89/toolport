@@ -3748,6 +3748,11 @@ fn reconcile_to(
     };
     // Notify outside the router lock so a slow client write can't stall a request.
     if changed {
+        // To the gateway log, not just stderr: MCP clients swallow a gateway's stderr, so a
+        // user reporting "re-approve didn't work" would send diagnostics with no trace of
+        // whether the reconcile ever ran. The failure path already logs here; this keeps the
+        // success path visible too.
+        glog("quarantine set changed on disk; re-filtering exposed tools");
         eprintln!("toolport: quarantine set changed on disk; re-filtering exposed tools");
         notify_tools_changed(stdout);
     }

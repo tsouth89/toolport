@@ -23,6 +23,13 @@ approved, so a re-approved tool works on the very next call. (#395)
 are blocked couldn't be read, it was treated as "nothing is blocked", quietly dropping the
 protection. It now keeps enforcing what it already knows and says so. (#399)
 
+**Updating now actually replaces the gateway your AI clients are using.** Toolport runs a
+small gateway process for each connected client, and that's where most fixes live - including
+the re-approve fix above. After an update those clients could keep running the _old_ gateway
+until you restarted them, so you'd install a fix, watch the problem persist, and reasonably
+conclude the update hadn't worked. Toolport now retires out-of-date gateways when it starts,
+and each client picks up the new one on its next request. (#404)
+
 **Downstream servers run in their own process group on macOS and Linux**, so a server
 starting up can't disturb the display of a terminal-based AI client. Thanks to
 @bradhallett. (#364)
