@@ -1706,12 +1706,57 @@ impl Transport for StdioTransport {
     }
 }
 
+/// Kill the whole process group a downstream server was spawned into, so
+/// `npx`->node (and `uvx`->python) grandchildren die with the wrapper instead of
+/// leaking on every server toggle and router rebuild. The Windows counterpart is
+/// the Job Object, which terminates descendants when its handle closes.
+///
+/// Signalling a process group is unforgiving if the target is wrong, so this is
+/// deliberately conservative and falls back to killing just the direct child:
+///
+/// * **Only while the child is unreaped.** `try_wait` elsewhere in this type can
+///   reap the child, after which its pid is free for the OS to reuse and a
+///   `killpg` could hit an unrelated group. An unreaped child is a zombie at
+///   worst, and a zombie's pid cannot be recycled.
+/// * **Only when the child leads its own group.** [`apply_process_group_isolation`]
+///   makes pgid == pid at spawn, so anything else means the isolation did not
+///   take. Without this check a child that stayed in *our* group would turn this
+///   into a `killpg` of the gateway and the AI client that spawned it.
+#[cfg(unix)]
+fn kill_process_group(child: &mut Child) {
+    // Minimal FFI, matching the extern-fn style used elsewhere here rather than
+    // taking on libc as a dependency for two calls.
+    extern "C" {
+        fn getpgid(pid: i32) -> i32;
+        fn killpg(pgid: i32, sig: i32) -> i32;
+    }
+    const SIGKILL: i32 = 9;
+
+    // Already exited AND reaped: the pid may belong to someone else now.
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let pid = child.id() as i32;
+    // SAFETY: plain libc calls on an integer pid. `pid` is still unreaped, so it
+    // is either live or a zombie and cannot have been recycled.
+    let leads_own_group = unsafe { getpgid(pid) } == pid;
+    if leads_own_group {
+        // SAFETY: as above. Kills the wrapper and every descendant it spawned.
+        unsafe { killpg(pid, SIGKILL) };
+    } else {
+        // Isolation didn't take; kill only what we're certain we own.
+        let _ = child.kill();
+    }
+}
+
 impl Drop for StdioTransport {
     fn drop(&mut self) {
         #[cfg(windows)]
         drop(self.job.take());
-        #[cfg(not(windows))]
-        let _ = self.child.kill();
+        #[cfg(unix)]
+        kill_process_group(&mut self.child);
+        // Reaps the direct child. Grandchildren were signalled above but are not
+        // ours to reap; they are reparented to init, which reaps them.
         let _ = self.child.wait();
     }
 }
@@ -2408,6 +2453,84 @@ mod tests {
         assert!(
             !process_is_running(grandchild_pid),
             "closing the Job Object must terminate launcher descendants"
+        );
+        let _ = std::fs::remove_file(pid_file);
+        let _ = std::fs::remove_file(script_file);
+    }
+
+    /// The unix counterpart to `windows_job_terminates_launcher_grandchild`:
+    /// dropping the transport must kill the grandchild a launcher spawned, not
+    /// just the launcher itself. Without the process-group kill the grandchild
+    /// survives, which is the `npx`->node leak this guards against.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_transport_kills_launcher_grandchild() {
+        use super::StdioTransport;
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        // Signal 0 probes for existence without delivering anything. A zombie
+        // still answers, but the grandchild is reparented to init rather than
+        // to us, so it is reaped promptly and never lingers as one here.
+        fn process_is_running(pid: i32) -> bool {
+            extern "C" {
+                fn kill(pid: i32, sig: i32) -> i32;
+            }
+            // SAFETY: signal 0 performs the permission/existence check only.
+            unsafe { kill(pid, 0) == 0 }
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let pid_file = std::env::temp_dir().join(format!(
+            "toolport-pgroup-test-{}-{nonce}.pid",
+            std::process::id()
+        ));
+        // `sh` stands in for a launcher: it starts a long-lived descendant,
+        // records that pid, and then waits on it the way npx waits on node.
+        // The body goes in a file rather than `sh -c` because the spawn guard
+        // (correctly) refuses inline-eval flags.
+        let script_file = pid_file.with_extension("sh");
+        std::fs::write(
+            &script_file,
+            format!("sleep 60 &\necho $! > '{}'\nwait\n", pid_file.to_string_lossy()),
+        )
+        .expect("write launcher script");
+        let args = vec![script_file.to_string_lossy().into_owned()];
+        let transport =
+            StdioTransport::spawn("sh", &args, &[], None).expect("spawn launcher shell");
+
+        // Poll for parsable CONTENT, not mere existence: the shell's redirection
+        // creates the file before `echo` writes to it, so a read in between
+        // returns empty and would make this test flake.
+        let created_deadline = Instant::now() + Duration::from_secs(8);
+        let grandchild_pid: i32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            assert!(
+                Instant::now() < created_deadline,
+                "launcher should record its grandchild pid"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        assert!(
+            process_is_running(grandchild_pid),
+            "grandchild must be alive before the transport is dropped"
+        );
+
+        drop(transport);
+        let exit_deadline = Instant::now() + Duration::from_secs(5);
+        while process_is_running(grandchild_pid) && Instant::now() < exit_deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            !process_is_running(grandchild_pid),
+            "dropping the transport must kill launcher descendants, not just the launcher"
         );
         let _ = std::fs::remove_file(pid_file);
         let _ = std::fs::remove_file(script_file);
