@@ -1707,7 +1707,12 @@ fn parse_qwen_json(content: &str) -> Result<Vec<McpServer>, String> {
 
     let mut servers = parse_json(content, "mcpServers")?;
     for server in &mut servers {
-        let definition = &definitions[&server.name];
+        // `parse_json` names each server after its map key, so a lookup here always
+        // hits. Indexing would still be a panic in a Tauri command if that ever
+        // stopped holding, and this is parsing a user-supplied file, so fail soft.
+        let Some(definition) = definitions.get(&server.name) else {
+            continue;
+        };
         let http_url = definition
             .get("httpUrl")
             .and_then(|value| value.as_str())
@@ -3260,9 +3265,16 @@ fn edit_toml_gateway(
     atomic_write(path, &out)
 }
 
-/// Clients whose JSON config holds their entire application state, not just MCP
-/// servers. A parse failure must never replace one of these files with a fresh
-/// object containing only Toolport's gateway.
+/// Clients whose JSON config file holds their ENTIRE application state (project
+/// history, signed-in account, all servers), not just an MCP-servers block. For
+/// these an unparseable file must ERROR rather than be silently replaced with a
+/// fresh object, so a transient parse failure can't wipe the user's whole config
+/// down to just our gateway entry. `~/.claude.json` (Claude Code),
+/// `~/.gemini/settings.json` (Gemini CLI) and `~/.qwen/settings.json` (Qwen Code)
+/// share the plain `mcpServers` JSON shape with single-purpose files (Claude
+/// Desktop, VS Code's dedicated mcp.json, LM Studio, ...), which keep the harmless
+/// start-fresh behavior. (Zed's whole-editor settings.json is already lenient via
+/// its JsonContextServers format.)
 fn config_is_whole_app_state(client_id: &str) -> bool {
     matches!(
         client_id,
