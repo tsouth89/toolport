@@ -6,6 +6,52 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 ## [Unreleased]
 
+## [1.9.4] - 2026-07-22
+
+Re-approving a blocked tool now actually unblocks it, and you can find it without hunting.
+
+### Fixed
+
+**Re-approving a quarantined tool didn't unblock it.** After a tool was blocked for a
+high-risk change, re-approving it cleared the list in the app but the running gateway kept
+refusing the call with "re-approve to restore" - telling you to do the thing you had just
+done, with no way out from inside the app. Restarting Toolport or toggling a server off and
+on was the only escape. The gateway now reconciles what's blocked against what you've
+approved, so a re-approved tool works on the very next call. (#395)
+
+**A damaged quarantine file no longer un-blocks tools.** If the file recording which tools
+are blocked couldn't be read, it was treated as "nothing is blocked", quietly dropping the
+protection. It now keeps enforcing what it already knows and says so. (#399)
+
+**Downstream servers run in their own process group on macOS and Linux**, so a server
+starting up can't disturb the display of a terminal-based AI client. Thanks to
+@bradhallett. (#364)
+
+**Activity no longer shows a red "0%"** for a server that does have errors. Small error
+rates now read as "0.2%" or "<0.1%" instead of rounding away to zero. Thanks to
+@pollychen-lab. (#388)
+
+**The new-profile name box clears when you cancel**, so reopening it no longer offers to
+create a profile you had already abandoned. Thanks to @pollychen-lab. (#386)
+
+### Added
+
+**Blocked tools now surface anywhere in the app.** When Toolport blocks a tool after a
+high-risk change, a card appears with the reason it was blocked and a re-approve action in
+place, plus a count on Settings so it stays findable. Previously the first sign was an agent
+call failing, and the fix was buried in Settings. (#401)
+
+**Two new clients: Witsy and Oh My Pi.** Both contributed - thanks to @amitvijapur and
+@bradhallett. Toolport now detects 24 clients. (#366, #365)
+
+### Security
+
+Cleared seven advisories from the dependency tree: two high-severity in `brace-expansion`
+and `js-yaml`, then one high and four moderate reaching us through `fast-uri` and `hono`.
+The second batch arrived because `shadcn`, a code-generation CLI, was listed as a production
+dependency; moving it removed the whole subtree from the shipped app rather than patching
+versions one at a time. (#367, #396, #402)
+
 ## [1.9.3] - 2026-07-18
 
 Makes the v1.9.2 teams cost fix actually work when the app is in the tray.
