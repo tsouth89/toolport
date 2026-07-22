@@ -151,6 +151,18 @@ pub fn client_gateway_path() -> Option<PathBuf> {
     publish_bundled_gateway()
 }
 
+/// Suppress the console window Windows would otherwise flash for a CLI child.
+///
+/// These run at app launch, so without it the user sees black CMD windows pop up every
+/// time Toolport starts - which reads as something being wrong, especially to a
+/// non-technical user. `tasklist` in particular now runs on EVERY launch (SOU-306 made the
+/// stale-gateway check ungated), so an occasional flash became a guaranteed one.
+#[cfg(windows)]
+fn no_console(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+}
+
 /// Terminate client-spawned gateway processes so the installer can replace locked binaries
 /// and so clients respawn the just-installed version instead of keeping the old one until the
 /// user relaunches them. Does not touch parent apps (Cursor, Codex, etc.). Returns how many
@@ -164,11 +176,12 @@ pub fn client_gateway_path() -> Option<PathBuf> {
 pub fn stop_spawned_gateways() -> u32 {
     let mut stopped = 0u32;
     for image in ["toolport-gateway*.exe", "conduit-gateway*.exe"] {
-        let status = std::process::Command::new("taskkill")
-            .args(["/F", "/IM", image])
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/F", "/IM", image])
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+            .stderr(std::process::Stdio::null());
+        no_console(&mut cmd);
+        let status = cmd.status();
         if status.map(|s| s.success()).unwrap_or(false) {
             stopped += 1;
         }
@@ -202,13 +215,12 @@ pub fn stop_stale_gateways() -> Vec<String> {
     let images = running_gateway_images();
     let mut killed = Vec::new();
     for image in stale_gateway_images(&images, env!("CARGO_PKG_VERSION")) {
-        let ok = std::process::Command::new("taskkill")
-            .args(["/F", "/IM", &image])
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/F", "/IM", &image])
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .stderr(std::process::Stdio::null());
+        no_console(&mut cmd);
+        let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
         if ok {
             killed.push(image);
         }
@@ -245,10 +257,10 @@ fn stale_gateway_images(images: &[String], current: &str) -> Vec<String> {
 /// clients actually run is versioned; nothing else on the system uses that shape.
 #[cfg(windows)]
 fn running_gateway_images() -> Vec<String> {
-    let Ok(out) = std::process::Command::new("tasklist")
-        .args(["/FO", "CSV", "/NH"])
-        .output()
-    else {
+    let mut cmd = std::process::Command::new("tasklist");
+    cmd.args(["/FO", "CSV", "/NH"]);
+    no_console(&mut cmd);
+    let Ok(out) = cmd.output() else {
         return Vec::new();
     };
     let text = String::from_utf8_lossy(&out.stdout);
