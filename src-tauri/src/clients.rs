@@ -62,6 +62,10 @@ pub struct DetectedClient {
 enum Format {
     /// JSON with a top-level `mcpServers` object (Claude Desktop, Cursor, Windsurf).
     JsonMcpServers,
+    /// Qwen Code's top-level `mcpServers` object. Stdio entries use the standard
+    /// command/args/env shape, while remote entries distinguish SSE (`url`) from
+    /// streamable HTTP (`httpUrl`) and store credentials under `headers`.
+    JsonQwenMcpServers,
     /// JSON with a top-level `servers` object (VS Code).
     JsonServers,
     /// JSON/JSONC with a top-level `mcp` object (OpenCode). Local entries store
@@ -212,6 +216,7 @@ fn resolve_client_config_path(
         "codex" => home.join(".codex").join("config.toml"),
         "claude-code" => home.join(".claude.json"),
         "gemini-cli" => home.join(".gemini").join("settings.json"),
+        "qwen-code" => home.join(".qwen").join("settings.json"),
         "antigravity" => home.join(".gemini").join("config").join("mcp_config.json"),
         "cline" => config
             .join("Code")
@@ -311,6 +316,7 @@ fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> 
         "codex" => home.join(".codex").join("config.toml"),
         "claude-code" => home.join(".claude.json"),
         "gemini-cli" => home.join(".gemini").join("settings.json"),
+        "qwen-code" => home.join(".qwen").join("settings.json"),
         "antigravity" => home.join(".gemini").join("config").join("mcp_config.json"),
         "cline" => config
             .join("Code")
@@ -516,6 +522,12 @@ fn claude_code_path() -> Option<PathBuf> {
 
 fn gemini_cli_path() -> Option<PathBuf> {
     client_config_path("gemini-cli")
+}
+
+/// Qwen Code stores user-scoped settings at `~/.qwen/settings.json` on every
+/// supported platform.
+fn qwen_code_path() -> Option<PathBuf> {
+    client_config_path("qwen-code")
 }
 
 /// Google Antigravity reads MCP servers from `mcp_config.json` under `~/.gemini`.
@@ -793,6 +805,14 @@ fn defs() -> Vec<ClientDef> {
             format: Format::JsonMcpServers,
             uses_connectors: false,
             path: gemini_cli_path,
+            plugin_scan: None,
+        },
+        ClientDef {
+            id: "qwen-code",
+            name: "Qwen Code",
+            format: Format::JsonQwenMcpServers,
+            uses_connectors: false,
+            path: qwen_code_path,
             plugin_scan: None,
         },
         ClientDef {
@@ -1673,6 +1693,56 @@ fn parse_json(content: &str, key: &str) -> Result<Vec<McpServer>, String> {
     Ok(servers)
 }
 
+fn parse_qwen_json(content: &str) -> Result<Vec<McpServer>, String> {
+    let value = parse_json_value(content)?;
+    let definitions = match value.get("mcpServers") {
+        None => return Ok(Vec::new()),
+        Some(value) if value.is_object() => value.as_object().unwrap(),
+        Some(_) => {
+            return Err(
+                "'mcpServers' must be an object mapping server names to definitions".into(),
+            );
+        }
+    };
+
+    let mut servers = parse_json(content, "mcpServers")?;
+    for server in &mut servers {
+        // `parse_json` names each server after its map key, so a lookup here always
+        // hits. Indexing would still be a panic in a Tauri command if that ever
+        // stopped holding, and this is parsing a user-supplied file, so fail soft.
+        let Some(definition) = definitions.get(&server.name) else {
+            continue;
+        };
+        let http_url = definition
+            .get("httpUrl")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty());
+        let sse_url = definition
+            .get("url")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty());
+        let (transport, url) = if let Some(url) = http_url {
+            ("http", Some(url))
+        } else if let Some(url) = sse_url {
+            ("sse", Some(url))
+        } else {
+            continue;
+        };
+
+        server.transport = transport.into();
+        server.url = url.map(String::from);
+        server.command = None;
+        server.args.clear();
+        server.env_keys = definition
+            .get("headers")
+            .and_then(|value| value.as_object())
+            .map(|headers| headers.keys().cloned().collect())
+            .unwrap_or_default();
+        server.env_keys.sort();
+    }
+    Ok(servers)
+}
+
 /// Parse one OpenCode `mcp` entry while retaining env/header values. OpenCode
 /// stores local commands as one argv array and uses `environment` instead of
 /// `env`; remote entries use `url` plus optional `headers`.
@@ -1985,6 +2055,7 @@ fn read_client(def: &ClientDef) -> DetectedClient {
 
     let parsed = match def.format {
         Format::JsonMcpServers => parse_json(&content, "mcpServers"),
+        Format::JsonQwenMcpServers => parse_qwen_json(&content),
         Format::JsonServers => parse_json(&content, "servers"),
         Format::JsonOpenCodeMcp => parse_opencode_json(&content),
         Format::JsonContextServers => parse_json(&content, "context_servers"),
@@ -2140,6 +2211,22 @@ fn entry_to_json(entry: &ServerEntry) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+fn entry_to_qwen_json(entry: &ServerEntry) -> serde_json::Value {
+    let mut value = entry_to_json(entry);
+    if entry.command.is_none() {
+        let object = value.as_object_mut().unwrap();
+        if entry.transport != "sse" {
+            if let Some(url) = object.remove("url") {
+                object.insert("httpUrl".into(), url);
+            }
+        }
+        if let Some(env) = object.remove("env") {
+            object.insert("headers".into(), env);
+        }
+    }
+    value
+}
+
 fn entry_to_opencode_json(entry: &ServerEntry) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     map.insert("enabled".into(), serde_json::Value::Bool(true));
@@ -2248,6 +2335,31 @@ fn write_json(
 
     let json = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     atomic_write(path, &json)
+}
+
+fn write_qwen_json(path: &Path, servers: &[ServerEntry]) -> Result<(), String> {
+    let mut root = if path.exists() {
+        let content = read_config_file(path)?;
+        read_existing_json(&content, true)?
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+    if !root.is_object() {
+        return Err("Qwen Code config root must be an object; leaving it untouched.".into());
+    }
+
+    let object = root.as_object_mut().unwrap();
+    let servers_map = servers
+        .iter()
+        .map(|server| (server.name.clone(), entry_to_qwen_json(server)))
+        .collect();
+    object.insert(
+        "mcpServers".into(),
+        serde_json::Value::Object(servers_map),
+    );
+
+    let output = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
+    atomic_write(path, &output)
 }
 
 fn opencode_mcp_mut(
@@ -2865,6 +2977,7 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
     let lenient = config_is_whole_app_state(client_id);
     match def.format {
         Format::JsonMcpServers => write_json(&path, "mcpServers", servers, lenient)?,
+        Format::JsonQwenMcpServers => write_qwen_json(&path, servers)?,
         Format::JsonServers => write_json(&path, "servers", servers, lenient)?,
         Format::JsonOpenCodeMcp => write_opencode_json(&path, servers)?,
         Format::JsonContextServers => write_json(&path, "context_servers", servers, true)?,
@@ -3156,13 +3269,17 @@ fn edit_toml_gateway(
 /// history, signed-in account, all servers), not just an MCP-servers block. For
 /// these an unparseable file must ERROR rather than be silently replaced with a
 /// fresh object, so a transient parse failure can't wipe the user's whole config
-/// down to just our gateway entry. `~/.claude.json` (Claude Code) and
-/// `~/.gemini/settings.json` (Gemini CLI) share the plain `mcpServers` JSON shape
-/// with single-purpose files (Claude Desktop, VS Code's dedicated mcp.json, LM
-/// Studio, ...), which keep the harmless start-fresh behavior. (Zed's whole-editor
-/// settings.json is already lenient via its JsonContextServers format.)
+/// down to just our gateway entry. `~/.claude.json` (Claude Code),
+/// `~/.gemini/settings.json` (Gemini CLI) and `~/.qwen/settings.json` (Qwen Code)
+/// share the plain `mcpServers` JSON shape with single-purpose files (Claude
+/// Desktop, VS Code's dedicated mcp.json, LM Studio, ...), which keep the harmless
+/// start-fresh behavior. (Zed's whole-editor settings.json is already lenient via
+/// its JsonContextServers format.)
 fn config_is_whole_app_state(client_id: &str) -> bool {
-    matches!(client_id, "claude-code" | "gemini-cli" | "opencode")
+    matches!(
+        client_id,
+        "claude-code" | "gemini-cli" | "qwen-code" | "opencode"
+    )
 }
 
 fn install_or_remove(
@@ -3177,6 +3294,9 @@ fn install_or_remove(
     match def.format {
         Format::JsonMcpServers => {
             edit_json_gateway(&path, "mcpServers", install, profile, lenient, client_id)?
+        }
+        Format::JsonQwenMcpServers => {
+            edit_json_gateway(&path, "mcpServers", install, profile, true, client_id)?
         }
         Format::JsonServers => {
             edit_json_gateway(&path, "servers", install, profile, lenient, client_id)?
@@ -3401,6 +3521,26 @@ mod tests {
         }
     }
 
+    fn remote(name: &str, transport: &str) -> ServerEntry {
+        ServerEntry {
+            id: name.to_string(),
+            name: name.to_string(),
+            transport: transport.to_string(),
+            command: None,
+            args: vec![],
+            env: vec![EnvVar {
+                key: "Authorization".to_string(),
+                value: Some("Bearer fixture".to_string()),
+                secret: false,
+            }],
+            url: Some(format!("https://{name}.example.com/mcp")),
+            source: None,
+            disabled_tools: vec![],
+            cwd: None,
+            unknown_fields: serde_json::Map::new(),
+        }
+    }
+
     fn temp_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("conduit-w-{}-{}.cfg", std::process::id(), label))
     }
@@ -3433,6 +3573,78 @@ mod tests {
         assert_eq!(parsed[0].name, "filesystem");
         assert_eq!(parsed[0].command.as_deref(), Some("npx"));
         assert_eq!(parsed[0].env_keys, vec!["TOKEN".to_string()]);
+    }
+
+    #[test]
+    fn qwen_json_parses_cli_generated_transports() {
+        // Generated with Qwen Code 0.20.1 using `qwen mcp add --scope user`.
+        let content = r#"{
+            "mcpServers": {
+                "local-fixture": {
+                    "command": "/usr/bin/printf",
+                    "args": ["ready\n"],
+                    "env": {"TEST_TOKEN": "fixture"}
+                },
+                "remote-http": {
+                    "httpUrl": "https://http.example.com/mcp",
+                    "headers": {"X-Test": "fixture"}
+                },
+                "remote-sse": {
+                    "url": "https://sse.example.com/events",
+                    "headers": {"Authorization": "Bearer fixture"}
+                }
+            },
+            "$version": 4
+        }"#;
+
+        let parsed = parse_qwen_json(content).unwrap();
+        assert_eq!(parsed.len(), 3);
+
+        assert_eq!(parsed[0].name, "local-fixture");
+        assert_eq!(parsed[0].transport, "stdio");
+        assert_eq!(parsed[0].command.as_deref(), Some("/usr/bin/printf"));
+        assert_eq!(parsed[0].args, vec!["ready\n"]);
+        assert_eq!(parsed[0].env_keys, vec!["TEST_TOKEN".to_string()]);
+
+        assert_eq!(parsed[1].name, "remote-http");
+        assert_eq!(parsed[1].transport, "http");
+        assert_eq!(
+            parsed[1].url.as_deref(),
+            Some("https://http.example.com/mcp")
+        );
+        assert_eq!(parsed[1].env_keys, vec!["X-Test".to_string()]);
+
+        assert_eq!(parsed[2].name, "remote-sse");
+        assert_eq!(parsed[2].transport, "sse");
+        assert_eq!(
+            parsed[2].url.as_deref(),
+            Some("https://sse.example.com/events")
+        );
+        assert_eq!(parsed[2].env_keys, vec!["Authorization".to_string()]);
+    }
+
+    #[test]
+    fn qwen_transport_precedence_matches_current_cli() {
+        let content = r#"{
+            "mcpServers": {
+                "mixed": {
+                    "httpUrl": "https://http.example.com/mcp",
+                    "url": "https://sse.example.com/events",
+                    "command": "node",
+                    "args": ["server.js"]
+                }
+            }
+        }"#;
+
+        let parsed = parse_qwen_json(content).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].transport, "http");
+        assert_eq!(
+            parsed[0].url.as_deref(),
+            Some("https://http.example.com/mcp")
+        );
+        assert!(parsed[0].command.is_none());
+        assert!(parsed[0].args.is_empty());
     }
 
     #[test]
@@ -3973,10 +4185,11 @@ command = "npx"
 
     #[test]
     fn whole_app_state_clients_are_lenient() {
-        // claude-code (~/.claude.json) and gemini-cli (~/.gemini/settings.json) hold
-        // the client's entire state, so an unparseable file must never be wiped.
+        // These files hold the client's entire state, so an unparseable file must
+        // never be wiped.
         assert!(config_is_whole_app_state("claude-code"));
         assert!(config_is_whole_app_state("gemini-cli"));
+        assert!(config_is_whole_app_state("qwen-code"));
         assert!(config_is_whole_app_state("opencode"));
         // Single-purpose mcpServers files keep the start-fresh behavior.
         assert!(!config_is_whole_app_state("claude-desktop"));
@@ -3991,6 +4204,81 @@ command = "npx"
         assert!(edit_json_gateway(&path, "mcpServers", true, None, true, "claude-code").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn qwen_round_trip_preserves_settings_and_remote_transports() {
+        let path = temp_path("qwen.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "$version": 4,
+                "model": {"name": "qwen3-coder-plus"},
+                "ui": {"theme": "GitHub"},
+                "mcpServers": {
+                    "old": {"command": "old-command"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let servers = vec![
+            stdio("filesystem"),
+            remote("remote-http", "http"),
+            remote("remote-sse", "sse"),
+        ];
+        write_qwen_json(&path, &servers).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(root["$version"], 4);
+        assert_eq!(root["model"]["name"], "qwen3-coder-plus");
+        assert_eq!(root["ui"]["theme"], "GitHub");
+        assert!(root["mcpServers"].get("old").is_none());
+
+        let http = &root["mcpServers"]["remote-http"];
+        assert_eq!(http["httpUrl"], "https://remote-http.example.com/mcp");
+        assert!(http.get("url").is_none());
+        assert_eq!(http["headers"]["Authorization"], "Bearer fixture");
+        assert!(http.get("env").is_none());
+
+        let sse = &root["mcpServers"]["remote-sse"];
+        assert_eq!(sse["url"], "https://remote-sse.example.com/mcp");
+        assert!(sse.get("httpUrl").is_none());
+        assert_eq!(sse["headers"]["Authorization"], "Bearer fixture");
+
+        let parsed = parse_qwen_json(&content).unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].transport, "stdio");
+        assert_eq!(parsed[1].transport, "http");
+        assert_eq!(parsed[2].transport, "sse");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn qwen_write_never_wipes_unparseable_settings() {
+        let path = temp_path("qwen-bad.json");
+        let garbage = r#"{"model":{"name":"qwen3"},"mcpServers":{broken"#;
+        std::fs::write(&path, garbage).unwrap();
+
+        assert!(write_qwen_json(&path, &[stdio("filesystem")]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn qwen_code_is_registered_with_its_native_transport_format() {
+        let definition = defs()
+            .into_iter()
+            .find(|definition| definition.id == "qwen-code")
+            .unwrap();
+        assert!(matches!(
+            definition.format,
+            Format::JsonQwenMcpServers
+        ));
+        assert!((definition.path)().is_some());
     }
 
     #[test]
@@ -4589,6 +4877,9 @@ command = "npx"
             ("cursor", |home, _| home.join(".cursor").join("mcp.json")),
             ("opencode", |home, _| {
                 home.join(".config").join("opencode").join("opencode.json")
+            }),
+            ("qwen-code", |home, _| {
+                home.join(".qwen").join("settings.json")
             }),
             ("continue", |home, _| {
                 home.join(".continue").join("config.yaml")

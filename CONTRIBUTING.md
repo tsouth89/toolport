@@ -232,6 +232,7 @@ Check the client's config file and match it to a `Format` variant:
 | Format               | Config shape                                       | Existing clients                 |
 | -------------------- | -------------------------------------------------- | -------------------------------- |
 | `JsonMcpServers`     | `{"mcpServers": {...}}`                            | Claude Desktop, Cursor, Windsurf |
+| `JsonQwenMcpServers` | `{"mcpServers": {"name": {"httpUrl": "..."}}}`     | Qwen Code                        |
 | `JsonServers`        | `{"servers": {...}}`                               | VS Code                          |
 | `JsonOpenCodeMcp`    | `{"mcp": {"name": {"command": [...]}}}`            | OpenCode                         |
 | `JsonContextServers` | `{"context_servers": {...}}` (JSONC)               | Zed                              |
