@@ -34,6 +34,11 @@ and each client picks up the new one on its next request. (#404)
 starting up can't disturb the display of a terminal-based AI client. Thanks to
 @bradhallett. (#364)
 
+**Pasting a Continue `config.yaml` block now works.** "Paste from client config" rejected
+Continue's format with "Could not detect format", even though Toolport already reads and
+writes that exact file for the Continue client. Environment variable values in the pasted
+block are preserved. Thanks to @manishchalla. (#403)
+
 **Activity no longer shows a red "0%"** for a server that does have errors. Small error
 rates now read as "0.2%" or "<0.1%" instead of rounding away to zero. Thanks to
 @pollychen-lab. (#388)
