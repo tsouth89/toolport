@@ -1510,6 +1510,36 @@ pub fn read_recent(limit: usize) -> Vec<Value> {
 mod tests {
     use super::*;
 
+    static TEST_DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    struct TestDataDir {
+        _guard: crate::registry::DataDirOverride,
+        path: PathBuf,
+    }
+
+    impl TestDataDir {
+        fn new(label: &str) -> Self {
+            let seq = TEST_DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "toolport-integrity-{label}-{}-{seq}",
+                std::process::id(),
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create temporary data directory");
+            let guard = crate::registry::DataDirOverride::set(&path);
+            Self {
+                _guard: guard,
+                path,
+            }
+        }
+    }
+
+    impl Drop for TestDataDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
     fn tool(name: &str, desc: &str) -> Value {
         json!({ "name": name, "description": desc, "inputSchema": { "type": "object" } })
     }
@@ -1521,6 +1551,8 @@ mod tests {
 
     #[test]
     fn quarantine_blocks_poison_and_destructive_drift_then_releases() {
+        let _data_dir_lock = crate::registry::data_dir_test_lock();
+        let _data_dir = TestDataDir::new("quarantine");
         let profile = Some("quarantine-unit");
         if let Some(p) = quarantine_path(profile) {
             let _ = std::fs::remove_file(p);
@@ -1558,6 +1590,8 @@ mod tests {
 
     #[test]
     fn added_destructive_tool_is_not_quarantined_and_legacy_added_clears() {
+        let _data_dir_lock = crate::registry::data_dir_test_lock();
+        let _data_dir = TestDataDir::new("added");
         let profile = Some("quarantine-added-unit");
         if let Some(p) = quarantine_path(profile) {
             let _ = std::fs::remove_file(p);
@@ -1641,6 +1675,8 @@ mod tests {
 
     #[test]
     fn baseline_tracks_first_seen_and_last_changed() {
+        let _data_dir_lock = crate::registry::data_dir_test_lock();
+        let _data_dir = TestDataDir::new("timestamps");
         let profile = Some("identity-ts-unit");
         if let Some(p) = pins_path(profile) {
             let _ = std::fs::remove_file(p);
@@ -1676,6 +1712,8 @@ mod tests {
 
     #[test]
     fn empty_pins_file_is_corrupt_not_a_silent_wipe() {
+        let _data_dir_lock = crate::registry::data_dir_test_lock();
+        let _data_dir = TestDataDir::new("empty-pins");
         // atomic_write never leaves an empty pins file, so an empty one means the baseline
         // was truncated (a crash mid foreign write, or an attacker wiping it to reset drift
         // detection). It must trip the LOUD path, never a silent re-baseline: returning Fresh
@@ -2242,6 +2280,8 @@ mod tests {
 
     #[test]
     fn annotation_downgrade_quarantines_non_destructive_tool() {
+        let _data_dir_lock = crate::registry::data_dir_test_lock();
+        let _data_dir = TestDataDir::new("downgrade");
         let profile = Some("integrity-downgrade-unit");
         if let Some(p) = quarantine_path(profile) {
             let _ = std::fs::remove_file(p);
