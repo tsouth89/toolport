@@ -1264,11 +1264,18 @@ mod tests {
         // unit tests that hand-set the quarantine set: a tool renamed to an exposed name
         // with no `__` drifts, integrity quarantines that renamed name to disk, the router
         // reads it back and blocks the call, then a re-approve restores it. This is the
-        // whole chain the app relies on. Uses a throwaway profile under the real data dir,
-        // matching the existing integrity tests (see #400/#409 for the isolation cleanup).
+        // whole chain the app relies on.
         use crate::integrity;
-        let profile = Some("sou423-rename-e2e");
-        let _ = integrity::release(profile, "search"); // start clean if a prior run lingered
+        // Isolate persistence: hold the shared lock EVERY conduit_dir-resolving test takes
+        // (#409's invariant, since this touches integrity's on-disk store indirectly), and
+        // redirect the data dir to a scratch path so nothing hits the real one (#400).
+        let _lock = crate::registry::data_dir_test_lock();
+        let scratch =
+            std::env::temp_dir().join(format!("toolport-rename-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let _data_dir = crate::registry::DataDirOverride::set(&scratch);
+        let profile = Some("rename-e2e");
 
         // Rename srv/echo -> "search" (an exposed name with NO `server__` prefix).
         let mut overrides = HashMap::new();
@@ -1320,7 +1327,10 @@ mod tests {
             "a re-approved renamed tool must work again"
         );
 
-        let _ = integrity::release(profile, "search"); // leave nothing behind
+        // Clear the override before removing the scratch dir it points at; the lock is
+        // released at end of scope.
+        drop(_data_dir);
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]
