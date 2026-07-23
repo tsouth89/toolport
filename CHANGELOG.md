@@ -10,6 +10,8 @@ Entries before the rename below shipped under the project's former name, Conduit
 
 Toolport blocks a tool when its definition changes in a risky way. This release fixes the
 part where un-blocking it didn't work, and makes the whole thing visible instead of buried.
+It also lands a security pass that closes several ways a malicious server could reach past
+the gateway, adds four new clients, and clears a batch of reliability and correctness bugs.
 
 ### Quarantine: blocked tools you can actually see and unblock
 
@@ -74,14 +76,6 @@ running. Toolport now tears down the whole process group, so nothing is left beh
 spawn failure, including which configured path (and which unset variable) was the problem.
 (#410)
 
-### Polish
-
-**Activity no longer shows a red "0%"** for a server that does have errors. Small error rates
-read as "0.2%" or "<0.1%" instead of rounding away to nothing. (#388)
-
-**The new-profile name box clears when you cancel**, so reopening it no longer offers to
-create a profile you had already abandoned. (#386)
-
 ### Security
 
 **Tool error messages are now scanned like tool results.** Content defense labels untrusted
@@ -109,6 +103,14 @@ Cleared seven advisories from the dependency tree: two high-severity in `brace-e
 second batch arrived because `shadcn`, a code-generation CLI, was listed as a production
 dependency - moving it removed that whole subtree from the shipped app rather than patching
 versions one at a time. (#367, #396, #402)
+
+### Polish
+
+**Activity no longer shows a red "0%"** for a server that does have errors. Small error rates
+read as "0.2%" or "<0.1%" instead of rounding away to nothing. (#388)
+
+**The new-profile name box clears when you cancel**, so reopening it no longer offers to
+create a profile you had already abandoned. (#386)
 
 ### Thanks
 
