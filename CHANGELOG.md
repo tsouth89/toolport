@@ -42,7 +42,13 @@ briefly opening console windows on Windows at startup. Harmless, but alarming. (
 
 ### Clients
 
-**Two new clients: Witsy and Oh My Pi.** Toolport now detects 24 clients. (#366, #365)
+**Four new clients: Witsy, Oh My Pi, OpenCode, and Qwen Code.** Toolport now detects 26
+clients. OpenCode and Qwen Code each use their own config shape - OpenCode stores a command
+as an argv array, and Qwen Code distinguishes streamable-HTTP from SSE servers - and Toolport
+reads and writes both correctly. (#366, #365, #411, #415)
+
+**Number and boolean values in a server's `args` are kept** when importing or pasting a
+config, instead of being silently dropped (which would shift every argument after them). (#416)
 
 **Pasting a Continue `config.yaml` block works.** "Paste from client config" rejected
 Continue's format with "Could not detect format", even though Toolport already reads and
@@ -51,6 +57,22 @@ block are preserved. (#403)
 
 **Downstream servers run in their own process group on macOS and Linux**, so a server
 starting up can't disturb the display of a terminal-based AI client. (#364)
+
+### Reliability
+
+**Tool name collisions get stable suffixes.** When two tools on a server would share the same
+exposed name, the loser gets a `_2` suffix - but that was assigned by list order, so a server
+reordering its own tool list could swap the suffix between two real tools, and a cached tool
+name would quietly start calling the wrong one. Suffixes are now assigned by tool name, so
+they don't move. (#408)
+
+**Downstream server processes are fully cleaned up on macOS and Linux.** Killing a server (a
+toggle, or a catalog rebuild) killed only the wrapper, leaving `npx`/`uvx` child processes
+running. Toolport now tears down the whole process group, so nothing is left behind. (#406)
+
+**A clear error when a server's working directory doesn't exist**, instead of a confusing
+spawn failure, including which configured path (and which unset variable) was the problem.
+(#410)
 
 ### Polish
 
@@ -62,6 +84,26 @@ create a profile you had already abandoned. (#386)
 
 ### Security
 
+**Tool error messages are now scanned like tool results.** Content defense labels untrusted
+tool output as data so a server can't slip instructions into your agent - but it only covered
+successful results. A server could bypass it by returning an _error_ whose message carried the
+payload. Errors now go through the same scan and size cap. (#429)
+
+**A server that can't be resolved is no longer treated as local.** During sign-in (OAuth), an
+unresolvable server address was classified as "local" and had its network-safety checks
+switched off - a path a malicious server could use to aim the sign-in flow at your own
+network. A server now has to positively resolve to a private address to earn that trust.
+(#430)
+
+**Renaming a tool no longer disables its safety checks.** A tool you renamed couldn't be
+blocked and wasn't watched for risky changes, so a rename silently opted it out of the
+protection the rest of your tools get. Renamed tools are now blocked and watched like any
+other. (#431)
+
+**Vendor detection matches the server's host, not anywhere in its address**, so a path-based
+gateway (for example `.../github`) is no longer mistaken for the vendor named in the path -
+which could otherwise misjudge whether that server needs a token. (#413)
+
 Cleared seven advisories from the dependency tree: two high-severity in `brace-expansion` and
 `js-yaml`, then one high and four moderate reaching us through `fast-uri` and `hono`. The
 second batch arrived because `shadcn`, a code-generation CLI, was listed as a production
@@ -72,13 +114,15 @@ versions one at a time. (#367, #396, #402)
 
 This release includes work from:
 
+- [@floze-the-genius](https://github.com/floze-the-genius) - OpenCode client support (#411), Qwen Code client support (#415), Continue YAML write-safety tests (#414)
 - [@bradhallett](https://github.com/bradhallett) - Oh My Pi client support (#365), process-group isolation on Unix (#364)
 - [@amitvijapur](https://github.com/amitvijapur) - Witsy client support (#366)
+- [@BharadwajKanneveti](https://github.com/BharadwajKanneveti) - discovery-ranker blend test (#394), non-string `args` handling (#416), Activity timestamp formatting (#412)
 - [@pollychen-lab](https://github.com/pollychen-lab) - Activity error-rate formatting (#388), new-profile field reset (#386)
+- [@Vermitrude](https://github.com/Vermitrude) - vendor detection host matching (#413)
+- [@AnayGarodia](https://github.com/AnayGarodia) - working-directory error reporting (#410), data-directory test isolation (#409)
 - [@manishchalla](https://github.com/manishchalla) - Continue snippet parsing (#403)
-- [@gxrey59-dev](https://github.com/gxrey59-dev) - contributor guide corrections (#385)
 - [@dubeyharshit0605](https://github.com/dubeyharshit0605) - ConfirmDialog test coverage (#393)
-- [@BharadwajKanneveti](https://github.com/BharadwajKanneveti) - discovery-ranker blend test (#394)
 
 ## [1.9.3] - 2026-07-18
 
