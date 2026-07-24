@@ -106,13 +106,26 @@ struct ClientDef {
 }
 
 /// The name Toolport uses for its own entry when installed into a client config.
-pub const GATEWAY_ENTRY_NAME: &str = "conduit";
+/// This is the user-visible label the entry shows up as inside every client (e.g.
+/// Claude Desktop lists it as this). It is cosmetic/identity only — the frozen
+/// wire identifiers the gateway depends on (`CONDUIT_*` env vars, keychain
+/// access-group, data dir, bundle id) are deliberately NOT tied to this and must
+/// stay `conduit` forever. See [`LEGACY_GATEWAY_ENTRY_NAME`] for the migration path.
+pub const GATEWAY_ENTRY_NAME: &str = "toolport";
 
-/// Match the frozen canonical name, the short-lived `toolport` name used by
-/// manual installs, and both current and pre-rename gateway binary names.
+/// The name Toolport wrote before the SOU-318 rename. Existing installs still have
+/// their entry named this; [`gateway_identity_matches`] keeps recognizing it so we
+/// detect, de-duplicate, and (via [`repoint_stale_gateways`]) migrate those entries
+/// to [`GATEWAY_ENTRY_NAME`] on launch. Do not remove — dropping it would make old
+/// entries invisible and leak a second, orphaned gateway into client configs.
+const LEGACY_GATEWAY_ENTRY_NAME: &str = "conduit";
+
+/// Match the current entry name, the pre-rename `conduit` name still present in
+/// existing installs, and both current and pre-rename gateway binary names.
 fn gateway_identity_matches(id: &str, name: &str, command: Option<&str>) -> bool {
     let has_gateway_name = |value: &str| {
-        value.eq_ignore_ascii_case(GATEWAY_ENTRY_NAME) || value.eq_ignore_ascii_case("toolport")
+        value.eq_ignore_ascii_case(GATEWAY_ENTRY_NAME)
+            || value.eq_ignore_ascii_case(LEGACY_GATEWAY_ENTRY_NAME)
     };
 
     has_gateway_name(id)
@@ -129,6 +142,14 @@ fn gateway_identity_matches(id: &str, name: &str, command: Option<&str>) -> bool
 /// never proxy itself (that recurses), and import must never pull it in.
 pub fn is_gateway_server(server: &ServerEntry) -> bool {
     gateway_identity_matches(&server.id, &server.name, server.command.as_deref())
+}
+
+/// Whether a server read out of a client's own config (a detected [`McpServer`]) is
+/// Toolport's own gateway entry. Recognizes the pre-rename `conduit` name too, so a
+/// "migrate" run doesn't import a legacy gateway entry back into the registry as if
+/// it were a real server.
+pub fn detected_is_gateway(server: &McpServer) -> bool {
+    gateway_identity_matches(&server.name, &server.name, server.command.as_deref())
 }
 
 fn home() -> Option<PathBuf> {
@@ -3382,6 +3403,15 @@ fn gateway_command_is_stale(stored: &str, current: &str) -> bool {
     false
 }
 
+/// Whether [`repoint_stale_gateways`] should rewrite a client's existing gateway
+/// entry: either its command is stale (see [`gateway_command_is_stale`]) or it still
+/// carries the pre-rename `conduit` name and needs migrating to [`GATEWAY_ENTRY_NAME`]
+/// even though its command is already current.
+fn gateway_entry_needs_rewrite(entry_name: &str, stored_command: &str, current: &str) -> bool {
+    gateway_command_is_stale(stored_command, current)
+        || entry_name.eq_ignore_ascii_case(LEGACY_GATEWAY_ENTRY_NAME)
+}
+
 /// Best-effort read of the gateway entry's `CONDUIT_PROFILE` from raw client-config
 /// text, format-tolerantly (JSON `"CONDUIT_PROFILE": "x"`, TOML `= "x"`, YAML `: x`).
 /// The parsed `McpServer` drops env VALUES (they can be secret), so a re-point reads
@@ -3413,16 +3443,24 @@ fn read_gateway_profile(client_id: &str) -> Option<String> {
     profile_from_config_text(&content)
 }
 
-/// Re-point client configs whose gateway entry still names the pre-rename binary
-/// (or a path that no longer exists) to the current gateway. This closes the
-/// backward-compat gap the `conduit-gateway` -> `toolport-gateway` rename opened on
-/// platforms without the macOS compat symlink (Windows/Linux), where an existing
-/// client would otherwise spawn a binary that no longer exists.
+/// Re-point / migrate client gateway entries to the current install on launch.
+/// Rewrites an entry when either:
+///   - its command still names the pre-rename binary (or a path that no longer
+///     exists), closing the `conduit-gateway` -> `toolport-gateway` gap on
+///     platforms without the macOS compat symlink (Windows/Linux); or
+///   - it still carries the pre-rename `conduit` entry name (SOU-318), migrating
+///     it to [`GATEWAY_ENTRY_NAME`] so a brand-new install no longer shows up as
+///     "conduit" inside clients. `install_gateway` retains-out every
+///     identity-matching entry (legacy name included) before writing the current
+///     one, so this renames in place rather than leaving a duplicate.
 ///
-/// Idempotent (an entry already on the current path is skipped, so it's a no-op
-/// after the first launch), surgical (`install_gateway` rewrites only the gateway
-/// entry and backs the config up first), and profile-preserving. Guarded so it never
-/// writes a path that doesn't exist. Returns the ids of clients it re-pointed.
+/// The stored entry is located by identity, not by the current name, so a legacy
+/// `conduit` entry is found rather than skipped. Idempotent (an entry already on
+/// the current name and path is left untouched, so it's a no-op after the first
+/// launch), surgical (only the gateway entry is rewritten, and the config is backed
+/// up first), and profile-preserving (the profile is read from raw config text,
+/// independent of the entry name). Guarded so it never writes a path that doesn't
+/// exist. Returns the ids of clients it rewrote.
 pub fn repoint_stale_gateways() -> Vec<String> {
     let Some(current) = resolve_gateway_path().map(|p| p.to_string_lossy().into_owned()) else {
         return Vec::new();
@@ -3437,13 +3475,15 @@ pub fn repoint_stale_gateways() -> Vec<String> {
         if !client.gateway_installed || !client.config_exists || client.error.is_some() {
             continue;
         }
-        let stored = client
+        // Find our entry by identity (recognizes the legacy `conduit` name too), so
+        // a pre-rename entry is migrated rather than missed.
+        let entry = client
             .servers
             .iter()
-            .find(|s| s.name.eq_ignore_ascii_case(GATEWAY_ENTRY_NAME))
-            .and_then(|s| s.command.as_deref())
-            .unwrap_or("");
-        if !gateway_command_is_stale(stored, &current) {
+            .find(|s| gateway_identity_matches(&s.name, &s.name, s.command.as_deref()));
+        let stored = entry.and_then(|s| s.command.as_deref()).unwrap_or("");
+        let entry_name = entry.map(|s| s.name.as_str()).unwrap_or("");
+        if !gateway_entry_needs_rewrite(entry_name, stored, &current) {
             continue;
         }
         let profile = read_gateway_profile(&client.id);
@@ -3878,12 +3918,14 @@ bad = "not-a-table"
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let servers = root["mcpServers"].as_object().unwrap();
-        assert!(servers.contains_key("conduit"));
+        assert!(servers.contains_key(GATEWAY_ENTRY_NAME));
         assert!(servers.contains_key("existing"));
         // Discovery mode comes from the registry, not the client config; only the
         // profile scope is written as an env var.
-        assert_eq!(servers["conduit"]["env"]["CONDUIT_PROFILE"], "Billing");
-        assert!(servers["conduit"]["env"].get("CONDUIT_DISCOVERY").is_none());
+        assert_eq!(servers[GATEWAY_ENTRY_NAME]["env"]["CONDUIT_PROFILE"], "Billing");
+        assert!(servers[GATEWAY_ENTRY_NAME]["env"]
+            .get("CONDUIT_DISCOVERY")
+            .is_none());
         // Unrelated key and the existing server's secret value are untouched.
         assert_eq!(root["theme"], "dark");
         assert_eq!(servers["existing"]["env"]["SECRET"], "keepme");
@@ -3892,8 +3934,55 @@ bad = "not-a-table"
         let root2: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let servers2 = root2["mcpServers"].as_object().unwrap();
-        assert!(!servers2.contains_key("conduit"));
+        assert!(!servers2.contains_key(GATEWAY_ENTRY_NAME));
         assert!(servers2.contains_key("existing"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn legacy_conduit_entry_is_recognized_and_migrated() {
+        // The pre-SOU-318 name must stay recognized as our own gateway, so detection,
+        // dedup, and the launch migration all still see a pre-rename entry.
+        assert!(gateway_identity_matches(
+            LEGACY_GATEWAY_ENTRY_NAME,
+            LEGACY_GATEWAY_ENTRY_NAME,
+            None
+        ));
+        assert!(is_gateway_server(&stdio(LEGACY_GATEWAY_ENTRY_NAME)));
+
+        // repoint rewrites a legacy-named entry even when its command is already
+        // current (that's the rename), but leaves a current-named, current-path entry
+        // untouched (idempotent no-op after the first launch).
+        let current = "/opt/toolport/toolport-gateway";
+        assert!(gateway_entry_needs_rewrite(
+            LEGACY_GATEWAY_ENTRY_NAME,
+            current,
+            current
+        ));
+        assert!(!gateway_entry_needs_rewrite(GATEWAY_ENTRY_NAME, current, current));
+
+        // Installing over a config whose only gateway entry is the legacy name renames
+        // it in place: the entry is retained-out by identity and re-inserted under the
+        // current name, so there's exactly one gateway entry and both the unrelated
+        // server and the profile scope survive.
+        let path = temp_path("migrate-legacy-json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"conduit":{"command":"toolport-gateway","env":{"CONDUIT_CLIENT_ID":"claude-code","CONDUIT_PROFILE":"Billing"}},"existing":{"command":"node"}}}"#,
+        )
+        .unwrap();
+        edit_json_gateway(&path, "mcpServers", true, Some("Billing"), false, "claude-code").unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let servers = root["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert!(servers.contains_key(GATEWAY_ENTRY_NAME));
+        assert!(!servers.contains_key(LEGACY_GATEWAY_ENTRY_NAME));
+        assert!(servers.contains_key("existing"));
+        assert_eq!(
+            servers[GATEWAY_ENTRY_NAME]["env"]["CONDUIT_PROFILE"],
+            "Billing"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -4189,7 +4278,7 @@ command = "npx"
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(root["ui_font_size"], 16);
         let cs = root["context_servers"].as_object().unwrap();
-        assert!(cs.contains_key("conduit"));
+        assert!(cs.contains_key(GATEWAY_ENTRY_NAME));
         assert!(cs.contains_key("existing"));
         std::fs::remove_file(&path).ok();
     }
@@ -4349,27 +4438,27 @@ command = "npx"
             serde_json::Value::String("keep-me".into())
         );
         assert_eq!(mcp["existing"]["enabled"], false);
-        assert_eq!(mcp["conduit"]["type"], "local");
-        assert_eq!(mcp["conduit"]["enabled"], true);
-        let command = mcp["conduit"]["command"].as_array().unwrap();
+        assert_eq!(mcp[GATEWAY_ENTRY_NAME]["type"], "local");
+        assert_eq!(mcp[GATEWAY_ENTRY_NAME]["enabled"], true);
+        let command = mcp[GATEWAY_ENTRY_NAME]["command"].as_array().unwrap();
         assert_eq!(command.len(), 1);
         assert!(command[0]
             .as_str()
             .unwrap()
             .contains("toolport-gateway"));
         assert_eq!(
-            mcp["conduit"]["environment"]["CONDUIT_CLIENT_ID"],
+            mcp[GATEWAY_ENTRY_NAME]["environment"]["CONDUIT_CLIENT_ID"],
             "opencode"
         );
         assert_eq!(
-            mcp["conduit"]["environment"]["CONDUIT_PROFILE"],
+            mcp[GATEWAY_ENTRY_NAME]["environment"]["CONDUIT_PROFILE"],
             "Work"
         );
 
         edit_opencode_gateway(&path, false, None, "opencode").unwrap();
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(after["mcp"].get("conduit").is_none());
+        assert!(after["mcp"].get(GATEWAY_ENTRY_NAME).is_none());
         assert!(after["mcp"].get("existing").is_some());
         assert_eq!(after["model"], "anthropic/claude-sonnet-4-5");
         std::fs::remove_file(&path).ok();
@@ -4558,12 +4647,15 @@ command = "npx"
         );
         let exts = v.get("extensions").and_then(|x| x.as_mapping()).unwrap();
         assert!(exts.get("fetch").is_some());
-        let conduit = exts.get("conduit").and_then(|x| x.as_mapping()).unwrap();
-        assert_eq!(conduit.get("type").and_then(|x| x.as_str()), Some("stdio"));
-        assert_eq!(conduit.get("enabled").and_then(|x| x.as_bool()), Some(true));
-        assert!(conduit.get("cmd").and_then(|x| x.as_str()).is_some());
+        let gateway = exts
+            .get(GATEWAY_ENTRY_NAME)
+            .and_then(|x| x.as_mapping())
+            .unwrap();
+        assert_eq!(gateway.get("type").and_then(|x| x.as_str()), Some("stdio"));
+        assert_eq!(gateway.get("enabled").and_then(|x| x.as_bool()), Some(true));
+        assert!(gateway.get("cmd").and_then(|x| x.as_str()).is_some());
 
-        // Uninstall removes only conduit.
+        // Uninstall removes only the gateway entry.
         edit_yaml_gateway(&path, false, None, "goose").unwrap();
         let after: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -4571,7 +4663,7 @@ command = "npx"
             .get("extensions")
             .and_then(|x| x.as_mapping())
             .unwrap();
-        assert!(exts2.get("conduit").is_none());
+        assert!(exts2.get(GATEWAY_ENTRY_NAME).is_none());
         assert!(exts2.get("fetch").is_some());
         std::fs::remove_file(&path).ok();
     }
@@ -4725,10 +4817,13 @@ command = "npx"
         );
         let servers = v.get("mcp_servers").and_then(|x| x.as_mapping()).unwrap();
         assert!(servers.get("zread").is_some());
-        let conduit = servers.get("conduit").and_then(|x| x.as_mapping()).unwrap();
-        assert!(conduit.get("command").and_then(|x| x.as_str()).is_some());
+        let gateway = servers
+            .get(GATEWAY_ENTRY_NAME)
+            .and_then(|x| x.as_mapping())
+            .unwrap();
+        assert!(gateway.get("command").and_then(|x| x.as_str()).is_some());
 
-        // Uninstall removes only conduit.
+        // Uninstall removes only the gateway entry.
         edit_hermes_yaml_gateway(&path, false, None, "hermes").unwrap();
         let after: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -4736,7 +4831,7 @@ command = "npx"
             .get("mcp_servers")
             .and_then(|x| x.as_mapping())
             .unwrap();
-        assert!(servers2.get("conduit").is_none());
+        assert!(servers2.get(GATEWAY_ENTRY_NAME).is_none());
         assert!(servers2.get("zread").is_some());
         std::fs::remove_file(&path).ok();
     }

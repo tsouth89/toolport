@@ -525,6 +525,13 @@ export function isGatewayServer(server: ServerEntry): boolean {
   return isGatewayIdentity(server.id, server.name, server.command);
 }
 
+/** Whether a server read from a client's own config (a detected `McpServer`, which
+ * has no registry id) is Toolport's own gateway entry. Recognizes the pre-rename
+ * `conduit` name too. Mirrors `detected_is_gateway` in the Rust backend. */
+export function isGatewayDetected(server: McpServer): boolean {
+  return isGatewayIdentity(server.name, server.name, server.command);
+}
+
 /** Servers a client has (config + plugins) that Toolport doesn't manage yet.
  * These are the only client-side entries worth surfacing - they're import
  * candidates. Toolport's own gateway entry is never importable. */

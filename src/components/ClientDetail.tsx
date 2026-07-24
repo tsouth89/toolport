@@ -23,6 +23,7 @@ import {
 import {
   importableServers,
   isGatewayServer,
+  isGatewayDetected,
   type DetectedClient,
   type ImportItem,
   type McpServer,
@@ -152,7 +153,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
       : (profiles.find((p) => p.id === registry?.activeProfileId) ?? profiles[0]);
     if (!target) return [];
     const enabled = new Set(target.enabledServerIds);
-    // Never surface the gateway's own "conduit" entry as a reachable server.
+    // Never surface the gateway's own entry as a reachable server.
     return (registry?.servers ?? [])
       .filter((s) => enabled.has(s.id) && !isGatewayServer(s))
       .map((s) => ({ id: s.id, name: s.name }));
@@ -181,7 +182,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
   }
   // Servers configured directly in the client (not the gateway) that migrate
   // would move into Toolport and strip from the client's config.
-  const movable = client.servers.filter((s) => s.name.toLowerCase() !== "conduit");
+  const movable = client.servers.filter((s) => !isGatewayDetected(s));
 
   async function migrate() {
     setBusy(true);
@@ -212,7 +213,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
   // own gateway entry. These exist here only as import candidates.
   const byName = new Map<string, McpServer>();
   for (const s of [...client.servers, ...client.pluginServers]) {
-    if (s.name.toLowerCase() === "conduit") continue;
+    if (isGatewayDetected(s)) continue;
     if (!byName.has(s.name.toLowerCase())) byName.set(s.name.toLowerCase(), s);
   }
   const allServers = [...byName.values()];
