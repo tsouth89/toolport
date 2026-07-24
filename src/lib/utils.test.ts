@@ -1,5 +1,35 @@
 import { describe, it, expect } from "vitest";
-import { fmtPercent, fmtTokens, fmtTs } from "./utils";
+import { fmtPercent, fmtTokens, fmtTs, stableListKeys } from "./utils";
+
+describe("stableListKeys", () => {
+  it("uses the bare identity when there are no collisions", () => {
+    expect(stableListKeys(["a", "b", "c"], (s) => s)).toEqual(["a", "b", "c"]);
+  });
+
+  it("disambiguates colliding identities deterministically", () => {
+    const keys = stableListKeys(["a", "a", "b", "a"], (s) => s);
+    expect(keys).toEqual(["a#2", "a#1", "b", "a"]);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("keeps existing keys stable when new entries are prepended", () => {
+    const before = stableListKeys(["x", "y", "x"], (s) => s);
+    const after = stableListKeys(["new", "x", "y", "x"], (s) => s);
+    expect(after.slice(1)).toEqual(before);
+  });
+
+  it("never collides a generated suffix with a real identity containing #", () => {
+    const keys = stableListKeys(["a#1", "a", "a"], (s) => s);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("keeps keys stable and unique when #-containing identities are prepended", () => {
+    const before = stableListKeys(["a", "a"], (s) => s);
+    const after = stableListKeys(["a#1", "a", "a"], (s) => s);
+    expect(after.slice(1)).toEqual(before);
+    expect(new Set(after).size).toBe(after.length);
+  });
+});
 
 describe("fmtTokens", () => {
   it("renders small numbers as-is", () => {
