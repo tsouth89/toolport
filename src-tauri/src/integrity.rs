@@ -606,33 +606,38 @@ pub fn all_quarantined_names() -> BTreeSet<String> {
 /// blocked (server, tool, reason, ts), shown in the UI and persisted across restarts.
 type Quarantine = BTreeMap<String, Value>;
 
-fn load_quarantine(profile: Option<&str>) -> Quarantine {
+/// Load the quarantine map for `profile`.
+///
+/// - Missing file → empty set (nothing quarantined yet).
+/// - Unreadable or corrupt → `Err` (fail closed). Never renames the file aside: moving a
+///   corrupt store to `.corrupt` made the next read look like a legitimate empty set and
+///   silently unblocked every tool (SOU-320). Leave the broken file for inspection.
+fn load_quarantine(profile: Option<&str>) -> Result<Quarantine, String> {
     let Some(path) = quarantine_path(profile) else {
-        return Quarantine::new();
+        return Ok(Quarantine::new());
     };
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        // Missing/unreadable is the normal first-run state: nothing quarantined yet.
-        Err(_) => return Quarantine::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Quarantine::new()),
+        Err(e) => {
+            return Err(format!("quarantine store at {path:?} is unreadable: {e}"))
+        }
     };
-    match serde_json::from_str::<Quarantine>(&raw) {
+    parse_quarantine_raw(&raw, &path)
+}
+
+/// Parse quarantine JSON. Shared by disk load and the mtime-cached read path.
+fn parse_quarantine_raw(raw: &str, path: &Path) -> Result<Quarantine, String> {
+    if raw.trim().is_empty() {
+        return Ok(Quarantine::new());
+    }
+    match serde_json::from_str::<Quarantine>(raw) {
         // A destructive tool APPEARING (first sight) is no longer quarantine-worthy: that
         // is inventory, not a rug-pull, and the block/confirm/approval gates already cover
         // it at call time. Drop any such legacy `added` entries so they auto-unblock rather
         // than stranding the user with dozens of re-approvals for tools that never changed.
-        Ok(q) => q.into_iter().filter(|(_, v)| !is_legacy_added(v)).collect(),
-        // Present but unparseable: do NOT silently return empty (that would re-expose
-        // every quarantined tool with no signal — a fail-OPEN of the supply-chain
-        // defense). We can't reconstruct the list, so preserve the corrupt file for
-        // inspection and log loudly, rather than swallowing the failure.
-        Err(e) => {
-            eprintln!(
-                "conduit: quarantine file at {path:?} is corrupt ({e}); preserving it as \
-                 .corrupt and treating quarantine as empty. Re-approve tools to restore."
-            );
-            let _ = std::fs::rename(&path, path.with_extension("corrupt"));
-            Quarantine::new()
-        }
+        Ok(q) => Ok(q.into_iter().filter(|(_, v)| !is_legacy_added(v)).collect()),
+        Err(e) => Err(format!("quarantine store at {path:?} is corrupt: {e}")),
     }
 }
 
@@ -640,29 +645,21 @@ fn save_quarantine(profile: Option<&str>, q: &Quarantine) {
     if let Some(path) = quarantine_path(profile) {
         if let Ok(s) = serde_json::to_string(q) {
             let _ = crate::registry::atomic_write(&path, &s);
+            // Invalidate the mtime cache so the next reconcile re-reads (SOU-303).
+            clear_quarantine_read_cache_for(&path);
         }
     }
 }
 
 /// Namespaced names of the tools currently quarantined for `profile`, for the router
-/// to hide from every client.
-pub fn quarantined(profile: Option<&str>) -> BTreeSet<String> {
-    load_quarantine(profile).into_keys().collect()
+/// to hide from every client. On store failure returns `Err` — callers must not treat
+/// that as "nothing is quarantined" (fail open). Prefer keeping a live set on `Err`.
+pub fn quarantined(profile: Option<&str>) -> Result<BTreeSet<String>, String> {
+    Ok(load_quarantine(profile)?.into_keys().collect())
 }
 
-/// Like [`quarantined`], but reports an unreadable or unparseable store as an ERROR
-/// instead of as "nothing is quarantined", and never renames anything.
-///
-/// [`load_quarantine`] treats a corrupt file as empty (and moves it aside). That is
-/// tolerable at startup, where there is no prior state to preserve and empty is the only
-/// answer available. It is NOT safe for a caller that reconciles a LIVE quarantine set:
-/// reading a failed load as an empty set is indistinguishable from "the user re-approved
-/// everything", so it would silently un-block every quarantined tool. Callers that can
-/// keep enforcing their current set should use this and fail closed on `Err`.
-///
-/// Deliberately non-destructive. `load_quarantine` renames a corrupt file to `.corrupt`,
-/// which would turn the very next read into a legitimate-looking empty set and re-open
-/// the same hole one tick later.
+/// Alias of [`quarantined`] kept for call sites that already used the checked name.
+/// Both paths fail closed and never rename a corrupt file (SOU-320).
 pub fn quarantined_checked(profile: Option<&str>) -> Result<BTreeSet<String>, String> {
     let Some(path) = quarantine_path(profile) else {
         // No resolvable data dir means nothing can have been persisted in the first
@@ -718,19 +715,8 @@ fn quarantined_checked_at(path: &Path) -> Result<BTreeSet<String>, String> {
         }
         Err(e) => return Err(format!("quarantine store at {path:?} is unreadable: {e}")),
     };
-    let set = if raw.trim().is_empty() {
-        BTreeSet::new()
-    } else {
-        match serde_json::from_str::<Quarantine>(&raw) {
-            Ok(q) => q
-                .into_iter()
-                .filter(|(_, v)| !is_legacy_added(v))
-                .map(|(k, _)| k)
-                .collect(),
-            // Fail closed: do not cache a corrupt parse, do not return empty.
-            Err(e) => return Err(format!("quarantine store at {path:?} is corrupt: {e}")),
-        }
-    };
+    // Fail closed: do not cache a corrupt parse, do not return empty, do not rename.
+    let set: BTreeSet<String> = parse_quarantine_raw(&raw, path)?.into_keys().collect();
 
     *QUARANTINE_READ_CACHE
         .lock()
@@ -753,8 +739,16 @@ fn clear_quarantine_read_cache_for(path: &Path) {
 }
 
 /// Full quarantine records for `profile` (server, tool, reason, ts) for the UI.
+/// On a corrupt/unreadable store, returns empty rather than inventing records; the
+/// file is left in place so enforcement paths keep fail-closed (SOU-320).
 pub fn quarantine_list(profile: Option<&str>) -> Vec<Value> {
-    load_quarantine(profile).into_values().collect()
+    match load_quarantine(profile) {
+        Ok(q) => q.into_values().collect(),
+        Err(e) => {
+            eprintln!("toolport: {e}; quarantine list unavailable until the store is fixed");
+            Vec::new()
+        }
+    }
 }
 
 /// Every quarantined tool across all profiles, each record tagged with its profile
@@ -802,7 +796,15 @@ pub fn release(profile: Option<&str>, tool: &str) -> bool {
     // Under the cross-process lock so a concurrent gateway's quarantine write can't clobber this
     // release (or vice versa) via a stale read-modify-write (SOU-165).
     with_store_lock(&path, || {
-        let mut q = load_quarantine(profile);
+        // Fail closed: do not treat a corrupt store as empty and save `{}` (that would
+        // permanently clear every quarantine entry).
+        let mut q = match load_quarantine(profile) {
+            Ok(q) => q,
+            Err(e) => {
+                eprintln!("toolport: {e}; refusing to release until the store is fixed");
+                return false;
+            }
+        };
         if q.remove(tool).is_some() {
             save_quarantine(profile, &q);
             return true;
@@ -825,7 +827,15 @@ pub fn apply_quarantine(profile: Option<&str>, current: &[Value], events: &[Valu
 }
 
 fn apply_quarantine_inner(profile: Option<&str>, current: &[Value], events: &[Value]) -> bool {
-    let mut q = load_quarantine(profile);
+    // Fail closed: do not load a corrupt store as empty and rewrite it with only the
+    // new entries (that would drop every previously quarantined tool).
+    let mut q = match load_quarantine(profile) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("toolport: {e}; refusing to apply quarantine until the store is fixed");
+            return false;
+        }
+    };
     let mut added = false;
     for e in events {
         let (Some(tool), Some(change)) = (
@@ -1716,7 +1726,7 @@ mod tests {
             poison_event("srv", "srv__read", &["instruction-override".to_string()], 0.9, None),
         ];
         assert!(apply_quarantine(profile, &current, &events));
-        let q = quarantined(profile);
+        let q = quarantined(profile).expect("store readable");
         assert!(q.contains("srv__wipe"), "destructive change is quarantined");
         assert!(q.contains("srv__read"), "poison flag is quarantined");
         assert_eq!(q.len(), 2, "benign change to a safe tool is not quarantined");
@@ -1726,7 +1736,7 @@ mod tests {
 
         // Re-approval restores the tool, and is idempotent.
         assert!(release(profile, "srv__wipe"));
-        assert!(!quarantined(profile).contains("srv__wipe"));
+        assert!(!quarantined(profile).expect("store readable").contains("srv__wipe"));
         assert!(!release(profile, "srv__wipe"), "releasing twice is a no-op");
 
         if let Some(p) = quarantine_path(profile) {
@@ -1786,6 +1796,51 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_quarantine_store_fails_closed_and_is_not_renamed_aside() {
+        // SOU-320: renaming a corrupt store to `.corrupt` made the next read look like a
+        // legitimate empty set and permanently un-blocked every tool. Load must Err, leave
+        // the file in place, and refuse apply/release that would rewrite empty.
+        let _data_dir_lock = crate::registry::data_dir_test_lock();
+        let _data_dir = TestDataDir::new("q-corrupt-sou320");
+        let profile = Some("sou320-corrupt");
+        let path = quarantine_path(profile).expect("data dir resolves");
+
+        let current = vec![destructive_tool("srv__wipe", "Wipe everything.")];
+        let events = vec![event("srv", "srv__wipe", "changed", SEV_HIGH)];
+        assert!(apply_quarantine(profile, &current, &events));
+        assert!(quarantined(profile)
+            .expect("readable")
+            .contains("srv__wipe"));
+
+        std::fs::write(&path, "{ not json").unwrap();
+
+        assert!(
+            quarantined(profile).is_err(),
+            "corrupt store must not report as empty"
+        );
+        assert!(
+            path.exists(),
+            "corrupt file must stay in place (not renamed to .corrupt)"
+        );
+        assert!(
+            !path.with_extension("corrupt").exists(),
+            "must not create a .corrupt sidecar that makes the next read look empty"
+        );
+        assert!(
+            !apply_quarantine(profile, &current, &events),
+            "apply must refuse to rewrite a corrupt store"
+        );
+        assert!(
+            !release(profile, "srv__wipe"),
+            "release must refuse to clear via a corrupt store"
+        );
+        // File still unreadable for enforcement.
+        assert!(quarantined(profile).is_err());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn added_destructive_tool_is_not_quarantined_and_legacy_added_clears() {
         let _data_dir_lock = crate::registry::data_dir_test_lock();
         let _data_dir = TestDataDir::new("added");
@@ -1801,7 +1856,10 @@ mod tests {
             !apply_quarantine(profile, &current, &events),
             "an added tool is never quarantined"
         );
-        assert!(quarantined(profile).is_empty(), "nothing blocked on first sight");
+        assert!(
+            quarantined(profile).expect("store readable").is_empty(),
+            "nothing blocked on first sight"
+        );
 
         // A legacy quarantine file that still holds an `added` entry auto-clears on load,
         // so upgrading doesn't strand the user re-approving tools that never changed. Use a
@@ -1815,7 +1873,9 @@ mod tests {
         );
         save_quarantine(profile, &legacy);
         assert!(
-            quarantined(profile).is_empty(),
+            quarantined(profile)
+                .expect("store readable")
+                .is_empty(),
             "legacy added entry is dropped on the per-profile load"
         );
         // The app's cross-profile views read the files raw, so they must apply the same
@@ -2498,7 +2558,9 @@ mod tests {
         let new = pin_of(&current[0]);
         let events = vec![changed_event("db", "db__query", SEV_HIGH, &old, &new)];
         assert!(apply_quarantine(profile, &current, &events));
-        assert!(quarantined(profile).contains("db__query"));
+        assert!(quarantined(profile)
+            .expect("store readable")
+            .contains("db__query"));
         // SOU-305: quarantine record carries a concrete prior→new annotation detail.
         let rec = quarantine_list(profile)
             .into_iter()

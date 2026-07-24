@@ -1303,7 +1303,7 @@ mod tests {
         );
 
         // The persisted set the watcher reads carries the renamed name...
-        let persisted = integrity::quarantined(profile);
+        let persisted = integrity::quarantined(profile).expect("quarantine store readable");
         assert!(persisted.contains("search"), "quarantine is keyed by the exposed name");
 
         // ...and feeding it to the router hides and blocks the renamed tool.
@@ -1319,7 +1319,7 @@ mod tests {
 
         // Re-approve: release clears the persisted set and the router restores the tool.
         assert!(integrity::release(profile, "search"), "release must clear the entry");
-        let after = integrity::quarantined(profile);
+        let after = integrity::quarantined(profile).expect("quarantine store readable");
         assert!(!after.contains("search"), "a released tool leaves the persisted set");
         router.requarantine(after);
         assert!(
