@@ -793,7 +793,7 @@ async fn migrate_client(
         let mut imported = 0;
         let mut moved = Vec::new();
         for server in &client.servers {
-            if server.name.eq_ignore_ascii_case(clients::GATEWAY_ENTRY_NAME) {
+            if clients::detected_is_gateway(server) {
                 continue;
             }
             moved.push(server.name.clone());

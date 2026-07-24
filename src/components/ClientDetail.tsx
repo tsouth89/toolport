@@ -23,6 +23,7 @@ import {
 import {
   importableServers,
   isGatewayServer,
+  isGatewayDetected,
   type DetectedClient,
   type ImportItem,
   type McpServer,
@@ -48,6 +49,7 @@ import {
 import { TransportPill } from "@/components/TransportPill";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ImportReviewDialog } from "@/components/ImportReviewDialog";
+import { clientRestartHint, connectSuccessDescription } from "@/lib/clientConnect";
 
 interface Props {
   client: DetectedClient;
@@ -151,7 +153,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
       : (profiles.find((p) => p.id === registry?.activeProfileId) ?? profiles[0]);
     if (!target) return [];
     const enabled = new Set(target.enabledServerIds);
-    // Never surface the gateway's own "conduit" entry as a reachable server.
+    // Never surface the gateway's own entry as a reachable server.
     return (registry?.servers ?? [])
       .filter((s) => enabled.has(s.id) && !isGatewayServer(s))
       .map((s) => ({ id: s.id, name: s.name }));
@@ -163,10 +165,13 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
     setBusy(true);
     try {
       await installGateway(client.id, profile || undefined);
+      // Rescope rewrites the client's MCP config the same way Connect does; without a
+      // restart hint the change is invisible until the next cold start (SOU-317).
       toast.success(
         profile
           ? `${client.name} scoped to "${profile}".`
           : `${client.name} now follows the active profile.`,
+        { description: clientRestartHint(client.name) },
       );
       onChanged();
     } catch (e) {
@@ -177,7 +182,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
   }
   // Servers configured directly in the client (not the gateway) that migrate
   // would move into Toolport and strip from the client's config.
-  const movable = client.servers.filter((s) => s.name.toLowerCase() !== "conduit");
+  const movable = client.servers.filter((s) => !isGatewayDetected(s));
 
   async function migrate() {
     setBusy(true);
@@ -208,7 +213,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
   // own gateway entry. These exist here only as import candidates.
   const byName = new Map<string, McpServer>();
   for (const s of [...client.servers, ...client.pluginServers]) {
-    if (s.name.toLowerCase() === "conduit") continue;
+    if (isGatewayDetected(s)) continue;
     if (!byName.has(s.name.toLowerCase())) byName.set(s.name.toLowerCase(), s);
   }
   const allServers = [...byName.values()];
@@ -301,12 +306,13 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
         toast.success(`Disconnected Toolport from ${client.name}`);
       } else {
         const outcome = await installGateway(client.id, profile || undefined);
+        // Restart is the load-bearing line (SOU-317): MCP clients typically do not
+        // pick up a new gateway entry until relaunch. Scope/backup are secondary.
         toast.success(`Connected Toolport to ${client.name}`, {
-          description: profile
-            ? `Scoped to the "${profile}" profile.`
-            : outcome.backup
-              ? "Previous config backed up."
-              : undefined,
+          description: connectSuccessDescription(client.name, [
+            profile ? `Scoped to the "${profile}" profile.` : null,
+            !profile && outcome.backup ? "Previous config backed up." : null,
+          ]),
         });
       }
       onChanged();
