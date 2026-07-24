@@ -936,7 +936,7 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
                   <span className="min-w-0 truncate font-mono">{q.tool}</span>
                   <span
                     className="min-w-0 truncate text-muted-foreground"
-                    title={q.reason}
+                    title={q.detail || q.reason}
                   >
                     {q.detail ? q.detail : q.reason}
                   </span>
