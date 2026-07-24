@@ -157,6 +157,22 @@ function renderKey(e: SecurityEvent): string {
   return `${securityKey(e)}:${e.ts}`;
 }
 
+/** Compute stable keys for a list of items ordered newest-first.
+ * Counting occurrences of the base key from end-to-start (oldest to newest)
+ * ensures that prepending new entries doesn't shift the keys of existing entries,
+ * even if multiple entries share the exact same timestamp and identity. */
+function getStableKeys<T>(list: T[], getBaseKey: (item: T) => string): string[] {
+  const counts = new Map<string, number>();
+  const keys = new Array<string>(list.length);
+  for (let i = list.length - 1; i >= 0; i--) {
+    const base = getBaseKey(list[i]);
+    const count = counts.get(base) ?? 0;
+    counts.set(base, count + 1);
+    keys[i] = count === 0 ? base : `${base}-${count}`;
+  }
+  return keys;
+}
+
 /** Each connected client runs its own gateway process, so a single server tool change
  * is flagged once PER client against the shared baseline, producing identical notices.
  * Collapse those: keep only the newest of any (type, server, tool, change, severity) seen
@@ -996,6 +1012,11 @@ function DiscoveryTraces({ refreshKey }: { refreshKey: number }) {
       </div>
     );
 
+  const keys = getStableKeys(
+    entries,
+    (t) => `${t.ts}-${t.query}${t.client ? `-${t.client}` : ""}`,
+  );
+
   return (
     <div className="mb-6 rounded-lg border border-owned/30 bg-owned/[0.04] p-4">
       <button
@@ -1024,7 +1045,7 @@ function DiscoveryTraces({ refreshKey }: { refreshKey: number }) {
           </p>
           <div className="flex flex-col gap-1">
             {entries.map((t, i) => (
-              <DiscoveryRow key={`${t.ts}-${i}`} t={t} />
+              <DiscoveryRow key={keys[i]} t={t} />
             ))}
           </div>
         </>
@@ -1300,6 +1321,11 @@ function LiveInspector({ refreshKey }: { refreshKey: number }) {
     };
   }, [refreshKey]);
 
+  const keys = getStableKeys(
+    entries,
+    (e) => `${e.ts}-${e.server}-${e.tool}${e.client ? `-${e.client}` : ""}`,
+  );
+
   return (
     <div className="mb-6 rounded-lg border border-info/30 bg-info/[0.04] p-4">
       <button
@@ -1333,7 +1359,7 @@ function LiveInspector({ refreshKey }: { refreshKey: number }) {
           ) : (
             <div className="flex flex-col gap-1">
               {entries.map((e, i) => (
-                <InspectRow key={`${e.ts}-${e.server}-${e.tool}-${i}`} e={e} />
+                <InspectRow key={keys[i]} e={e} />
               ))}
             </div>
           )}
@@ -1480,6 +1506,11 @@ export function ActivityView({
     (e) => (!serverFilter || e.server === serverFilter) && (!errorsOnly || !e.ok),
   );
 
+  const visibleKeys = getStableKeys(
+    visible,
+    (e) => `${e.ts}-${e.server}-${e.tool}${e.client ? `-${e.client}` : ""}`,
+  );
+
   if (entries === null) {
     return (
       <div>
@@ -1613,9 +1644,7 @@ export function ActivityView({
                 )}
               </div>
             ) : (
-              visible.map((e, i) => (
-                <CallRow key={`${e.ts}-${e.server}-${e.tool}-${i}`} e={e} />
-              ))
+              visible.map((e, i) => <CallRow key={visibleKeys[i]} e={e} />)
             )}
           </div>
         </>
