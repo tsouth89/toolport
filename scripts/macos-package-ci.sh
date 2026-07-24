@@ -115,27 +115,91 @@ APP="$APP" IDENTITY="$APPLE_SIGNING_IDENTITY" APP_PROFILE="$APP_PROFILE" GW_PROF
 #    Gatekeeper requires the .app be notarized and stapled. notarytool wants a
 #    zip; ditto --keepParent preserves the .app structure.
 #
-#    Notarization uses a BOUNDED wait (SOU-199). Apple's Developer ID Notary
-#    Service has recurring "In Progress" queue stalls, and a plain `submit
-#    --wait` blocks until Apple answers, which hung v1.9.1's mac job ~2h until
-#    the 6h job cap. notarize() submits, then waits with a hard timeout, and on
-#    a timeout or rejection dumps the notarization log and fails fast so the
-#    release can simply be re-run once Apple's queue recovers. release.yml also
-#    caps this whole step with timeout-minutes as a backstop.
+#    Notarization is fully bounded (SOU-199 wait + SOU-309 submit). Apple's
+#    Developer ID Notary Service has recurring stalls: a plain `submit --wait`
+#    blocked v1.9.1 for ~2h, and an unbounded `submit` alone burned the full 60m
+#    step cap on v1.9.4 Intel (dmg upload never returned an id). notarize() bounds
+#    both the upload/submit and the wait, dumps diagnostics on wait failure, and
+#    fails fast so the release can re-run once Apple's queue recovers. release.yml
+#    also caps this whole step with timeout-minutes as a backstop only.
 # ---------------------------------------------------------------------------
-# 20m per artifact (not 30m): the two sequential waits plus signing, stapling, dmg creation,
-# the updater re-sign, and the failure-log dump must all finish under release.yml's 60m step
-# cap, so the helper's own fast-fail + `notarytool log` diagnostics always beat the blunt step
-# timeout (2x20m waits + overhead leaves ~15m of headroom).
+# 20m wait + 5m submit (with one retry) per artifact: two sequential artifacts must
+# still finish under release.yml's 60m step cap so our own fast-fail always beats
+# the blunt step timeout.
 NOTARIZE_TIMEOUT="${NOTARIZE_TIMEOUT:-20m}"
+NOTARIZE_SUBMIT_TIMEOUT="${NOTARIZE_SUBMIT_TIMEOUT:-5m}"
+
+# Convert notarytool-style durations (20m / 300s / 1h / bare seconds) to integer seconds
+# for the perl alarm wrapper. notarytool wait accepts the string form; submit has no
+# --timeout, so we need seconds for the watchdog.
+duration_to_seconds() {
+  local d="$1"
+  if [[ "$d" =~ ^([0-9]+)m$ ]]; then
+    echo $((BASH_REMATCH[1] * 60))
+  elif [[ "$d" =~ ^([0-9]+)s$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  elif [[ "$d" =~ ^([0-9]+)h$ ]]; then
+    echo $((BASH_REMATCH[1] * 3600))
+  elif [[ "$d" =~ ^[0-9]+$ ]]; then
+    echo "$d"
+  else
+    die "invalid duration (use Ns, Nm, Nh, or bare seconds): $d"
+  fi
+}
+
+# Run a command with a hard wall-clock limit. macOS has no GNU timeout; perl's alarm
+# + exec is the smallest portable shim (SOU-309 option 2). On expiry the child is
+# signalled and this returns non-zero.
+run_with_timeout() {
+  local secs="$1"
+  shift
+  perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+}
+
+# Submit one artifact; bound the upload and retry once on failure. Prints the
+# submission id on stdout. A hang here used to burn the whole 60m step with no
+# "Waiting on notarization" line and no notarytool log (SOU-309).
+notarytool_submit() {
+  local artifact="$1" kind="$2"
+  local submit_secs attempt out rc id
+  submit_secs="$(duration_to_seconds "$NOTARIZE_SUBMIT_TIMEOUT")"
+
+  for attempt in 1 2; do
+    log "Submitting the $kind for notarization (timeout $NOTARIZE_SUBMIT_TIMEOUT, attempt $attempt/2)"
+    set +e
+    out="$(run_with_timeout "$submit_secs" xcrun notarytool submit "$artifact" \
+      --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+      --output-format json)"
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
+      id="$(printf '%s\n' "$out" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
+      if [[ -n "$id" ]]; then
+        printf '%s\n' "$id"
+        return 0
+      fi
+      printf '::error::notarytool submit for the %s returned no submission id. Artifact: %s. Output follows:\n' \
+        "$kind" "$artifact" >&2
+      printf '%s\n' "$out" >&2
+      die "notarytool submit returned no submission id for the $kind"
+    fi
+    if [[ $attempt -eq 1 ]]; then
+      log "notarytool submit for the $kind failed or timed out (exit $rc); retrying once"
+      sleep 5
+      continue
+    fi
+    printf '::error::notarytool submit for the %s timed out or failed after 2 attempts (timeout %s). Artifact: %s. Apple Notary stall or network hang; re-run once the queue recovers.\n' \
+      "$kind" "$NOTARIZE_SUBMIT_TIMEOUT" "$artifact" >&2
+    if [[ -n "${out:-}" ]]; then
+      printf '%s\n' "$out" >&2
+    fi
+    die "notarytool submit did not complete for the $kind within $NOTARIZE_SUBMIT_TIMEOUT; re-run the release once Apple's Notary queue recovers"
+  done
+}
+
 notarize() {
   local artifact="$1" kind="$2" id status
-  log "Submitting the $kind for notarization"
-  id="$(xcrun notarytool submit "$artifact" \
-    --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
-    --output-format json |
-    python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))')" ||
-    die "notarytool submit failed for the $kind"
+  id="$(notarytool_submit "$artifact" "$kind")"
   [[ -n "$id" ]] || die "notarytool submit returned no submission id for the $kind"
   log "Waiting on notarization $id (timeout $NOTARIZE_TIMEOUT)"
   # Bounded wait; on timeout notarytool exits non-zero and prints no final JSON, so `status`
