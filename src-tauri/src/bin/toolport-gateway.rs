@@ -4424,7 +4424,10 @@ impl StdioUpstream {
 
     /// If `msg` answers a pending upstream call, deliver it and return true.
     fn try_deliver(&self, msg: &Value) -> bool {
-        let Some(id) = msg.get("id").filter(|id| !id.is_null()).and_then(rpc_id_key) else {
+        if !is_jsonrpc_response(msg) {
+            return false;
+        }
+        let Some(id) = msg.get("id").and_then(rpc_id_key) else {
             return false;
         };
         let tx = self
@@ -4535,7 +4538,10 @@ impl McpSession {
     }
 
     fn try_deliver_upstream(&self, msg: &Value) -> bool {
-        let Some(id) = msg.get("id").filter(|id| !id.is_null()).and_then(rpc_id_key) else {
+        if !is_jsonrpc_response(msg) {
+            return false;
+        }
+        let Some(id) = msg.get("id").and_then(rpc_id_key) else {
             return false;
         };
         let tx = self
@@ -4737,10 +4743,17 @@ fn valid_mcp_session_id(id: &str) -> bool {
     !id.is_empty() && id.bytes().all(|b| (0x21..=0x7E).contains(&b)) && id.len() <= 128
 }
 
+fn is_jsonrpc_response(msg: &Value) -> bool {
+    msg.get("method").is_none()
+        && msg.get("id").is_some_and(|id| !id.is_null())
+        && (msg.get("result").is_some() || msg.get("error").is_some())
+}
+
+// JSON-encoding string ids keeps `1` distinct from `"1"` without changing numeric keys.
 fn rpc_id_key(v: &Value) -> Option<String> {
     match v {
         Value::Number(n) => Some(n.to_string()),
-        Value::String(s) => Some(s.clone()),
+        Value::String(s) => serde_json::to_string(s).ok(),
         _ => None,
     }
 }
@@ -5778,10 +5791,7 @@ fn handle_mcp_http(
                 }
             }
 
-            if req.get("method").is_none()
-                && req.get("id").is_some_and(|id| !id.is_null())
-                && (req.get("result").is_some() || req.get("error").is_some())
-            {
+            if is_jsonrpc_response(&req) {
                 if let Ok(sessions) = state.mcp_sessions.lock() {
                     if let Some(sess) = sessions.get(&session_id) {
                         if sess.try_deliver_upstream(&req) {
@@ -9310,6 +9320,93 @@ mod tests {
         assert_eq!(err, "upstream MCP client outbound queue is full");
         assert!(session.upstream_pending.lock().unwrap().is_empty());
         assert_eq!(session.outbound.lock().unwrap().len(), MCP_SESSION_OUTBOUND_MAX);
+    }
+
+    #[test]
+    fn stdio_upstream_delivery_requires_response_shape() {
+        let upstream = StdioUpstream::new(Arc::new(Mutex::new(std::io::stdout())));
+        let (tx, rx) = std::sync::mpsc::channel();
+        upstream.pending.lock().unwrap().insert("1".to_string(), tx);
+
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {}
+        });
+        assert!(!upstream.try_deliver(&request));
+        assert!(upstream.pending.lock().unwrap().contains_key("1"));
+
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": { "code": -32601, "message": "not found" }
+        });
+        assert!(upstream.try_deliver(&response));
+        assert_eq!(rx.try_recv().unwrap(), response);
+        assert!(upstream.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn http_upstream_delivery_requires_response_shape() {
+        let session = McpSession::new(None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        session.upstream_pending.lock().unwrap().insert("1".to_string(), tx);
+
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {}
+        });
+        assert!(!session.try_deliver_upstream(&request));
+        assert!(session.upstream_pending.lock().unwrap().contains_key("1"));
+
+        let response = json!({ "jsonrpc": "2.0", "id": 1, "result": {} });
+        assert!(session.try_deliver_upstream(&response));
+        assert_eq!(rx.try_recv().unwrap(), response);
+        assert!(session.upstream_pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn upstream_delivery_distinguishes_numeric_and_string_ids() {
+        let upstream = StdioUpstream::new(Arc::new(Mutex::new(std::io::stdout())));
+        let numeric_key = rpc_id_key(&json!(1)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        upstream.pending.lock().unwrap().insert(numeric_key.clone(), tx);
+
+        let string_response = json!({ "jsonrpc": "2.0", "id": "1", "result": {} });
+        assert!(!upstream.try_deliver(&string_response));
+        assert!(upstream.pending.lock().unwrap().contains_key(&numeric_key));
+
+        let numeric_response = json!({ "jsonrpc": "2.0", "id": 1, "result": {} });
+        assert!(upstream.try_deliver(&numeric_response));
+        assert_eq!(rx.try_recv().unwrap(), numeric_response);
+    }
+
+    #[test]
+    fn jsonrpc_response_shape_requires_no_method_and_result_or_error() {
+        assert!(is_jsonrpc_response(
+            &json!({ "jsonrpc": "2.0", "id": 1, "result": null })
+        ));
+        assert!(is_jsonrpc_response(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": { "code": -32603, "message": "failed" }
+        })));
+
+        assert!(!is_jsonrpc_response(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "result": {}
+        })));
+        assert!(!is_jsonrpc_response(
+            &json!({ "jsonrpc": "2.0", "id": 1 })
+        ));
+        assert!(!is_jsonrpc_response(
+            &json!({ "jsonrpc": "2.0", "id": null, "result": {} })
+        ));
     }
 
     #[test]
