@@ -290,6 +290,12 @@ export interface QuarantinedTool {
   reason: string;
   ts: number;
   profile: string;
+  /** Concrete annotation delta when known, e.g. `readOnlyHint: true → false` (SOU-305). */
+  detail?: string | null;
+  prev_ro?: boolean | null;
+  new_ro?: boolean | null;
+  prev_dh?: boolean | null;
+  new_dh?: boolean | null;
 }
 
 /** Tools currently quarantined (blocked after a high-risk drift), across profiles. */

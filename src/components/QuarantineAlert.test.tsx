@@ -52,6 +52,21 @@ describe("QuarantineAlert", () => {
     ).toBeInTheDocument();
   });
 
+  it("prefers the concrete annotation detail when present (SOU-305)", async () => {
+    listQuarantined.mockResolvedValue([
+      tool({
+        reason: "a tool dropped a readOnly/destructive safety annotation",
+        detail: "readOnlyHint: true → false",
+      }),
+    ]);
+    render(<QuarantineAlert />);
+    expect(await screen.findByText("readOnlyHint: true → false")).toBeInTheDocument();
+    // Generic reason stays as secondary context under the concrete delta.
+    expect(
+      screen.getByText("a tool dropped a readOnly/destructive safety annotation"),
+    ).toBeInTheDocument();
+  });
+
   it("re-approves through the profile-scoped API and re-reads the list", async () => {
     // Empty profile is the no-profile store; the backend maps it to None. Passing the
     // wrong profile would silently release nothing.

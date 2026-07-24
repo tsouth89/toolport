@@ -1635,9 +1635,81 @@ fn set_quarantine_on_drift(state: State<RegistryState>, on: bool) -> Result<Regi
 }
 
 /// Tools currently quarantined (blocked after a high-risk drift), across all profiles.
+///
+/// Also fires an OS notification when a **new** entry appears after the first baseline
+/// poll (SOU-305 option 1). Quarantine is decided in the gateway process; the app only
+/// learns by polling, so this is the cheapest "notify when it happens while the app is
+/// running" path. First call only seeds the seen-set so restarting the app with an
+/// already-quarantined tool does not re-notify.
 #[tauri::command]
-fn list_quarantined() -> Vec<serde_json::Value> {
-    integrity::all_quarantined()
+fn list_quarantined(app: AppHandle) -> Vec<serde_json::Value> {
+    let list = integrity::all_quarantined();
+    notify_new_quarantines(&app, &list);
+    list
+}
+
+/// Keys of quarantine entries we have already observed this process. `None` = not
+/// baselined yet (first poll seeds without notifying).
+static QUARANTINE_SEEN: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+
+fn quarantine_entry_key(rec: &serde_json::Value) -> String {
+    let profile = rec.get("profile").and_then(|v| v.as_str()).unwrap_or("");
+    let tool = rec.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
+    let ts = rec.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
+    format!("{profile}\0{tool}@{ts}")
+}
+
+fn notify_new_quarantines(app: &AppHandle, list: &[serde_json::Value]) {
+    let keys: std::collections::HashSet<String> =
+        list.iter().map(quarantine_entry_key).collect();
+    let mut guard = QUARANTINE_SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match guard.as_mut() {
+        None => {
+            // First poll: baseline only.
+            *guard = Some(keys);
+        }
+        Some(seen) => {
+            let mut newcomers: Vec<&serde_json::Value> = list
+                .iter()
+                .filter(|rec| !seen.contains(&quarantine_entry_key(rec)))
+                .collect();
+            if !newcomers.is_empty() {
+                // Newest first for the body when several land in one poll.
+                newcomers.sort_by_key(|r| std::cmp::Reverse(r.get("ts").and_then(|v| v.as_u64()).unwrap_or(0)));
+                let title = if newcomers.len() == 1 {
+                    "Toolport: tool quarantined".to_string()
+                } else {
+                    format!("Toolport: {} tools quarantined", newcomers.len())
+                };
+                let body = newcomers
+                    .iter()
+                    .take(3)
+                    .map(|r| {
+                        let tool = r.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
+                        let detail = r
+                            .get("detail")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| r.get("reason").and_then(|v| v.as_str()))
+                            .unwrap_or("high-risk change");
+                        format!("{tool}: {detail}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title(title)
+                    .body(body)
+                    .show();
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.request_user_attention(Some(tauri::UserAttentionType::Informational));
+                }
+            }
+            *seen = keys;
+        }
+    }
 }
 
 /// Re-approve a quarantined tool so the gateway re-exposes it. Re-saving the registry
