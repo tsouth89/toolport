@@ -3482,8 +3482,21 @@ fn build_router(
         deny_destructive: reg.deny_destructive_effective(),
         // Hide already-quarantined tools from the first build (the set persists across
         // restarts); newly detected drift is added during the integrity check below.
+        // On store failure, start with empty blocked and log loudly (SOU-320): there is
+        // no prior live set yet. We deliberately do NOT rename/clear a corrupt file —
+        // that would make the next reconcile install a permanent empty set.
         quarantined: if reg.quarantine_on_drift_effective() {
-            integrity::quarantined(profile)
+            match integrity::quarantined(profile) {
+                Ok(set) => set,
+                Err(e) => {
+                    glog(&format!(
+                        "SECURITY: {e}; starting with no quarantine set (cold start has \
+                         no prior set to keep). Fix or replace the quarantine store."
+                    ));
+                    eprintln!("toolport: {e}; starting with no quarantine set");
+                    Default::default()
+                }
+            }
         } else {
             Default::default()
         },
@@ -3678,7 +3691,17 @@ fn requarantine_if_needed(
         // an in-flight request still holds the old Arc, then re-filters in place and
         // publishes the result; the old snapshot keeps serving until that request ends.
         let r = Arc::make_mut(&mut guard);
-        r.requarantine(integrity::quarantined(profile));
+        // Fail closed: if the store is corrupt/unreadable, keep the live blocked set
+        // rather than installing empty (SOU-320).
+        match integrity::quarantined(profile) {
+            Ok(set) => r.requarantine(set),
+            Err(e) => {
+                glog(&format!(
+                    "SECURITY: {e}; keeping the live quarantine set rather than un-blocking"
+                ));
+                eprintln!("toolport: {e}; keeping the live quarantine set");
+            }
+        }
         r.aggregated_tools()
     } else {
         tools
@@ -9895,12 +9918,9 @@ mod tests {
 
     #[test]
     fn a_corrupt_quarantine_store_keeps_the_current_set_instead_of_un_blocking() {
-        // `load_quarantine` reports a corrupt store as an EMPTY set (and moves the file
-        // aside). At startup that is the only answer available, but reconciling a LIVE set
-        // against it is a fail-OPEN: empty is indistinguishable from "the user re-approved
-        // everything", so a corrupt file would silently un-block every quarantined tool,
-        // and the rename would make the next tick read a legitimately-empty store and keep
-        // it that way. Reconciling must fail CLOSED.
+        // A corrupt store is Err (SOU-320: never rename aside to look like empty).
+        // Reconciling a LIVE set against Err is fail-CLOSED: empty would be
+        // indistinguishable from "the user re-approved everything".
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir =
             std::env::temp_dir().join(format!("toolport-corrupt-q-{}", std::process::id()));
