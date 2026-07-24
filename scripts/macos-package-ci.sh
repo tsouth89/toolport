@@ -35,7 +35,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-log()  { printf '\033[1m%s\033[0m\n' "== $* =="; }
+# Progress goes to stderr so callers can capture stdout (e.g. notarytool submission ids
+# from notarytool_submit) without also swallowing "== Submitting ... ==" lines (SOU-309).
+log()  { printf '\033[1m%s\033[0m\n' "== $* ==" >&2; }
 die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 [[ "$(uname -s)" == "Darwin" ]] || die "macos-package-ci.sh must run on macOS"
