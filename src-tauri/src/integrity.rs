@@ -411,7 +411,11 @@ fn check_inner(profile: Option<&str>, current: &[Value]) -> Vec<Value> {
                 // tool's, so re-baseline quietly (no event, no re-scan).
                 Some(old) if old.fp != pin.fp && fp_version(&old.fp) == fp_version(&pin.fp) => {
                     let sev = drift_severity(t, annotation_downgrade(old, t));
-                    events.push(event(server, name, "changed", sev));
+                    // Capture prior annotation flags on the event *before* re-baseline
+                    // overwrites the pin (SOU-305). apply_quarantine stores them on the
+                    // quarantine record so the UI can say "readOnlyHint: true → false"
+                    // rather than only "a safety annotation dropped".
+                    events.push(changed_event(server, name, sev, old, &pin));
                     scan = true;
                 }
                 None => {
@@ -851,16 +855,24 @@ fn apply_quarantine_inner(profile: Option<&str>, current: &[Value], events: &[Va
         };
         if !q.contains_key(tool) {
             let server = e.get("server").and_then(Value::as_str).unwrap_or("?");
-            q.insert(
-                tool.to_string(),
-                json!({
-                    "ts": epoch_millis(),
-                    "server": server,
-                    "tool": tool,
-                    "reason": reason,
-                    "change": change,
-                }),
-            );
+            let mut rec = json!({
+                "ts": epoch_millis(),
+                "server": server,
+                "tool": tool,
+                "reason": reason,
+                "change": change,
+            });
+            // Concrete annotation prior→new (SOU-305). Optional: older events / poison
+            // rows omit these; the UI falls back to `reason` alone.
+            for key in ["prev_ro", "new_ro", "prev_dh", "new_dh"] {
+                if let Some(v) = e.get(key) {
+                    rec[key] = v.clone();
+                }
+            }
+            if let Some(detail) = annotation_change_detail(e) {
+                rec["detail"] = json!(detail);
+            }
+            q.insert(tool.to_string(), rec);
             added = true;
         }
     }
@@ -1476,6 +1488,55 @@ fn event(server: &str, tool: &str, change: &str, severity: &str) -> Value {
         "change": change,
         "severity": severity,
     })
+}
+
+/// `changed` drift with prior/new safety annotations for the quarantine card (SOU-305).
+fn changed_event(server: &str, tool: &str, severity: &str, old: &Pin, new: &Pin) -> Value {
+    let mut e = event(server, tool, "changed", severity);
+    e["prev_ro"] = json!(old.ro);
+    e["new_ro"] = json!(new.ro);
+    e["prev_dh"] = json!(old.dh);
+    e["new_dh"] = json!(new.dh);
+    e
+}
+
+/// Human-readable annotation delta for the quarantine card, e.g.
+/// `readOnlyHint: true → false`. Empty when no annotation fields moved.
+fn annotation_change_detail(e: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    for (label, prev_k, new_k) in [
+        ("readOnlyHint", "prev_ro", "new_ro"),
+        ("destructiveHint", "prev_dh", "new_dh"),
+    ] {
+        let prev = e.get(prev_k);
+        let next = e.get(new_k);
+        if prev == next {
+            continue;
+        }
+        // Only emit when at least one side is present on the event.
+        if prev.is_none() && next.is_none() {
+            continue;
+        }
+        parts.push(format!(
+            "{label}: {} → {}",
+            fmt_opt_hint(prev),
+            fmt_opt_hint(next)
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
+fn fmt_opt_hint(v: Option<&Value>) -> String {
+    match v {
+        None => "absent".into(),
+        Some(Value::Null) => "absent".into(),
+        Some(Value::Bool(b)) => b.to_string(),
+        Some(other) => other.to_string(),
+    }
 }
 
 pub fn security_path() -> Option<PathBuf> {
@@ -2427,9 +2488,29 @@ mod tests {
         // is not marked destructive.
         let current = vec![json!({ "name": "db__query", "description": "Query.",
             "inputSchema": {"type":"object"}, "annotations": { "readOnlyHint": false } })];
-        let events = vec![event("db", "db__query", "changed", SEV_HIGH)];
+        let old = Pin {
+            fp: "v1:old".into(),
+            ro: Some(true),
+            dh: None,
+            first_seen: 1,
+            last_changed: 1,
+        };
+        let new = pin_of(&current[0]);
+        let events = vec![changed_event("db", "db__query", SEV_HIGH, &old, &new)];
         assert!(apply_quarantine(profile, &current, &events));
         assert!(quarantined(profile).contains("db__query"));
+        // SOU-305: quarantine record carries a concrete prior→new annotation detail.
+        let rec = quarantine_list(profile)
+            .into_iter()
+            .find(|r| r.get("tool").and_then(Value::as_str) == Some("db__query"))
+            .expect("quarantine record for db__query");
+        assert_eq!(rec["prev_ro"], true);
+        assert_eq!(rec["new_ro"], false);
+        assert_eq!(
+            rec["detail"].as_str(),
+            Some("readOnlyHint: true → false"),
+            "card detail must name the annotation flip"
+        );
 
         // A benign (info) change to the same tool would NOT quarantine.
         assert!(release(profile, "db__query"));
@@ -2439,6 +2520,20 @@ mod tests {
         if let Some(p) = quarantine_path(profile) {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    #[test]
+    fn annotation_change_detail_formats_absent_and_skips_unchanged() {
+        let e = json!({
+            "prev_ro": true, "new_ro": null,
+            "prev_dh": false, "new_dh": false,
+        });
+        assert_eq!(
+            annotation_change_detail(&e).as_deref(),
+            Some("readOnlyHint: true → absent")
+        );
+        let unchanged = json!({ "prev_ro": true, "new_ro": true });
+        assert_eq!(annotation_change_detail(&unchanged), None);
     }
 
     #[test]
@@ -2510,7 +2605,7 @@ mod tests {
             match pins.get(name) {
                 Some(old) if old.fp != new.fp && fp_version(&old.fp) == fp_version(&new.fp) => {
                     let sev = drift_severity(t, annotation_downgrade(old, t));
-                    drifts.push(event(server_of(name), name, "changed", sev))
+                    drifts.push(changed_event(server_of(name), name, sev, old, new))
                 }
                 None => drifts.push(event(server_of(name), name, "added", drift_severity(t, false))),
                 _ => {}
