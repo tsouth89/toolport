@@ -2605,7 +2605,15 @@ fn defend_and_shape(
         .result_budgets
         .get(srv)
         .map(|&b| b as usize)
-        .unwrap_or_else(shaping::budget);
+        .unwrap_or_else(|| {
+        let (budget, warning) = shaping::budget();
+
+        if let Some(msg) = warning {
+            eprintln!("{msg}");
+        }
+
+        budget
+    });
     shaping::shape_result(&mut result, budget, client);
     // Toolport-authored trailer, appended last so it survives both passes intact.
     let trailer = trailer.trim();
