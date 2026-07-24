@@ -16,10 +16,31 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+
+/// Last successful parse of a quarantine store, keyed by path + `(mtime, len)`.
+/// The gateway reconciles quarantine on a 1s watcher tick (SOU-303); without this
+/// pre-filter every tick re-reads and re-parses even when the file is unchanged.
+/// The stamp is only a skip gate — callers still diff the **set** to decide whether
+/// the live router needs to change (mtime alone would fire on this process's own
+/// `apply_quarantine` writes).
+struct QuarantineReadCache {
+    path: PathBuf,
+    mtime: SystemTime,
+    len: u64,
+    set: BTreeSet<String>,
+}
+
+static QUARANTINE_READ_CACHE: Mutex<Option<QuarantineReadCache>> = Mutex::new(None);
+
+#[cfg(test)]
+static QUARANTINE_READ_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Pins map: namespaced tool name (`server__tool`) -> pinned baseline.
 type Pins = BTreeMap<String, Pin>;
@@ -644,22 +665,86 @@ pub fn quarantined_checked(profile: Option<&str>) -> Result<BTreeSet<String>, St
         // place, so an empty set is the truth here rather than a failure.
         return Ok(BTreeSet::new());
     };
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
+    quarantined_checked_at(&path)
+}
+
+/// Path-level read used by [`quarantined_checked`]. Separated so the mtime/len
+/// pre-filter (SOU-303) and fail-closed parse sit in one place.
+fn quarantined_checked_at(path: &Path) -> Result<BTreeSet<String>, String> {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
         // Missing is the normal first-run state: nothing quarantined yet.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Drop a stale hit for this path so a later recreate is re-parsed.
+            clear_quarantine_read_cache_for(path);
+            return Ok(BTreeSet::new());
+        }
         Err(e) => return Err(format!("quarantine store at {path:?} is unreadable: {e}")),
     };
-    if raw.trim().is_empty() {
-        return Ok(BTreeSet::new());
+    let mtime = match meta.modified() {
+        Ok(t) => t,
+        Err(e) => {
+            return Err(format!(
+                "quarantine store at {path:?} has unreadable mtime: {e}"
+            ))
+        }
+    };
+    let len = meta.len();
+
+    {
+        let cache = QUARANTINE_READ_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(c) = cache.as_ref() {
+            if c.path == path && c.mtime == mtime && c.len == len {
+                return Ok(c.set.clone());
+            }
+        }
     }
-    match serde_json::from_str::<Quarantine>(&raw) {
-        Ok(q) => Ok(q
-            .into_iter()
-            .filter(|(_, v)| !is_legacy_added(v))
-            .map(|(k, _)| k)
-            .collect()),
-        Err(e) => Err(format!("quarantine store at {path:?} is corrupt: {e}")),
+
+    #[cfg(test)]
+    QUARANTINE_READ_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        // Race: file vanished between metadata and open — treat as empty.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            clear_quarantine_read_cache_for(path);
+            return Ok(BTreeSet::new());
+        }
+        Err(e) => return Err(format!("quarantine store at {path:?} is unreadable: {e}")),
+    };
+    let set = if raw.trim().is_empty() {
+        BTreeSet::new()
+    } else {
+        match serde_json::from_str::<Quarantine>(&raw) {
+            Ok(q) => q
+                .into_iter()
+                .filter(|(_, v)| !is_legacy_added(v))
+                .map(|(k, _)| k)
+                .collect(),
+            // Fail closed: do not cache a corrupt parse, do not return empty.
+            Err(e) => return Err(format!("quarantine store at {path:?} is corrupt: {e}")),
+        }
+    };
+
+    *QUARANTINE_READ_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(QuarantineReadCache {
+        path: path.to_path_buf(),
+        mtime,
+        len,
+        set: set.clone(),
+    });
+    Ok(set)
+}
+
+fn clear_quarantine_read_cache_for(path: &Path) {
+    let mut cache = QUARANTINE_READ_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cache.as_ref().is_some_and(|c| c.path == path) {
+        *cache = None;
     }
 }
 
@@ -1586,6 +1671,57 @@ mod tests {
         if let Some(p) = quarantine_path(profile) {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    #[test]
+    fn quarantined_checked_skips_reread_when_mtime_and_len_unchanged() {
+        // SOU-303: watcher ticks call this every second; an unchanged store must not
+        // re-open and re-parse the file. A real change (new mtime/len) must re-read.
+        let _data_dir_lock = crate::registry::data_dir_test_lock();
+        let _data_dir = TestDataDir::new("q-cache");
+        let profile = Some("sou303-cache");
+        let path = quarantine_path(profile).expect("data dir resolves under TestDataDir");
+
+        let current = vec![destructive_tool("srv__wipe", "Wipe everything.")];
+        let events = vec![event("srv", "srv__wipe", "changed", SEV_HIGH)];
+        assert!(apply_quarantine(profile, &current, &events));
+
+        QUARANTINE_READ_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+        let first = quarantined_checked(profile).expect("readable store");
+        assert!(first.contains("srv__wipe"));
+        assert_eq!(
+            QUARANTINE_READ_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "first load parses the file"
+        );
+
+        let second = quarantined_checked(profile).expect("cache hit");
+        assert_eq!(second, first);
+        assert_eq!(
+            QUARANTINE_READ_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "unchanged mtime+len must skip the re-read"
+        );
+
+        assert!(release(profile, "srv__wipe"));
+        let third = quarantined_checked(profile).expect("release rewrites the store");
+        assert!(third.is_empty());
+        assert_eq!(
+            QUARANTINE_READ_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a rewrite (new mtime/len) must re-parse"
+        );
+
+        // Corrupt parse must fail closed and must not poison the cache with empty.
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(
+            quarantined_checked(profile).is_err(),
+            "corrupt store is an error, not empty"
+        );
+        // Stamp changed so we re-attempted the read.
+        assert!(QUARANTINE_READ_COUNT.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
