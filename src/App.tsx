@@ -94,6 +94,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { useTheme } from "@/lib/theme";
+import { fmtTs } from "@/lib/utils";
 
 /** Above this many servers, "Disable all" asks for confirmation first. */
 const BULK_DISABLE_CONFIRM_MIN = 3;
@@ -197,7 +198,7 @@ function App() {
         setRegistry(reg);
         setClients(dc);
         if (recovery) {
-          const when = new Date(recovery.recoveredAtMs).toLocaleString();
+          const when = fmtTs(recovery.recoveredAtMs);
           const detail =
             recovery.reason === "corrupt"
               ? `The registry file was damaged. Restored from backup (${when}).`
