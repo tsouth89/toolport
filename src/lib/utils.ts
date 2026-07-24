@@ -26,7 +26,10 @@ export function fmtTokens(n: number): string {
  * the key of an existing row (an index-based suffix shifts on every prepend
  * and remounts each row, resetting its expand/collapse state). Identities can
  * collide (e.g. two calls to the same tool in the same millisecond), so the
- * counter keeps keys unique deterministically.
+ * counter keeps keys unique deterministically. "#" inside identities is
+ * escaped to "##" so a generated "#n" suffix can never equal another
+ * identity that happens to end in "#n" (the escaped form only contains "#"
+ * in even-length runs, while the suffix adds a lone "#").
  */
 export function stableListKeys<T>(items: T[], identity: (item: T) => string): string[] {
   const seen = new Map<string, number>();
@@ -35,7 +38,8 @@ export function stableListKeys<T>(items: T[], identity: (item: T) => string): st
     const id = identity(items[i]);
     const n = seen.get(id) ?? 0;
     seen.set(id, n + 1);
-    keys[i] = n === 0 ? id : `${id}#${n}`;
+    const escaped = id.replace(/#/g, "##");
+    keys[i] = n === 0 ? escaped : `${escaped}#${n}`;
   }
   return keys;
 }
