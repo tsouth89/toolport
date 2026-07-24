@@ -408,12 +408,17 @@ fn parse_mode(s: &str) -> Option<DiscoveryMode> {
 fn discovery_mode_for(reg: &Registry, client_id: Option<&str>) -> DiscoveryMode {
     let env = std::env::var("CONDUIT_DISCOVERY").ok();
     let client_mode = client_id.and_then(|id| reg.client_discovery_mode(id));
-    resolve_mode_from(
+    let (mode, warning) = resolve_mode_from(
         env.as_deref(),
         client_mode,
         reg.discovery_mode.as_deref(),
         reg.lazy_discovery,
-    )
+    );
+    if let Some(msg) = warning {
+        eprintln!("{msg}");
+    }
+    mode
+
 }
 
 /// Resolve from disk for the gateway bootstrap (before the watcher takes over the live
@@ -424,12 +429,18 @@ fn resolve_discovery_mode() -> DiscoveryMode {
         .filter(|s| !s.trim().is_empty());
     match registry::load_resolved().ok() {
         Some(reg) => discovery_mode_for(&reg, client_id.as_deref()),
-        None => resolve_mode_from(
-            std::env::var("CONDUIT_DISCOVERY").ok().as_deref(),
-            None,
-            None,
-            true,
-        ),
+        None => {
+                let (mode, warning) = resolve_mode_from(
+                    std::env::var("CONDUIT_DISCOVERY").ok().as_deref(),
+                    None,
+                    None,
+                    true,
+                );
+                if let Some(msg) = warning {
+                    eprintln!("{msg}");
+                }
+                mode
+            }
     }
 }
 
@@ -443,24 +454,29 @@ fn resolve_mode_from(
     client_mode: Option<&str>,
     registry_mode: Option<&str>,
     lazy_discovery: bool,
-) -> DiscoveryMode {
+) -> (DiscoveryMode, Option<String>) {
     if let Some(v) = env {
         return match v.trim().to_ascii_lowercase().as_str() {
-            "lazy" => DiscoveryMode::Lazy,
-            "grouped" => DiscoveryMode::Grouped,
-            _ => DiscoveryMode::Full,
+            "lazy" => (DiscoveryMode::Lazy,None),
+            "grouped" => (DiscoveryMode::Grouped, None),
+            _ => (
+                    DiscoveryMode::Full,
+                    Some(format!(
+                        "toolport: unrecognized CONDUIT_DISCOVERY value '{v}', falling back to full discovery",
+                    )),
+                ),
         };
     }
     if let Some(m) = client_mode.and_then(parse_mode) {
-        return m;
+        return (m, None);
     }
     if let Some(m) = registry_mode.and_then(parse_mode) {
-        return m;
+        return (m, None);
     }
     if lazy_discovery {
-        DiscoveryMode::Lazy
+        (DiscoveryMode::Lazy, None)
     } else {
-        DiscoveryMode::Full
+        (DiscoveryMode::Full, None)
     }
 }
 
@@ -2542,7 +2558,13 @@ fn execute_call(
                 .result_budgets
                 .get(srv)
                 .map(|&b| b as usize)
-                .unwrap_or_else(shaping::budget);
+                .unwrap_or_else(|| {
+                let (budget, warning) = shaping::budget();
+                if let Some(msg) = warning {
+                    eprintln!("{msg}");
+                }
+                budget
+            });
             shaping::shape_result(&mut result, budget, client);
 
             // Recover from a downstream failure: point the model at
@@ -5150,38 +5172,69 @@ fn handle_stdio_request(
     }
 }
 
+fn resolve_http_port(
+    cli_port: Option<u16>,
+    http: Option<&str>,
+    http_port: Option<&str>,
+) -> (Option<u16>, Option<String>) {
+    // CLI flag has highest priority.
+    if let Some(port) = cli_port {
+        return (Some(port), None);
+    }
+    let Some(v) = http else {
+        return (None, None);
+    };
+    let v = v.trim();
+    if v.is_empty() {
+        return (None, None);
+    }
+    if let Ok(port) = v.parse::<u16>() {
+        if port > 0 {
+            return (Some(port), None);
+        }
+    }
+    if matches!(
+        v.to_ascii_lowercase().as_str(),
+        "1" | "true" | "on" | "yes"
+    ) {
+        let port = http_port
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .filter(|p| *p > 0)
+            .unwrap_or(8765);
+
+        return (Some(port), None);
+    }
+    (
+        None,
+        Some(format!(
+            "toolport: unrecognized CONDUIT_HTTP value '{v}', HTTP bridge disabled"
+        )),
+    )
+}
 /// Resolve the HTTP port. `--http [port]` on the command line wins; otherwise
 /// `CONDUIT_HTTP=<port>` is the direct env form, and a truthy `CONDUIT_HTTP`
 /// falls back to `CONDUIT_HTTP_PORT` or 8765. Absent everywhere -> stdio mode.
-fn http_port() -> Option<u16> {
+fn http_port() -> (Option<u16>, Option<String>) {
     // CLI flag: `toolport-gateway --http` (default 8765) or `--http 9000`.
     let args: Vec<String> = std::env::args().collect();
-    if let Some(i) = args.iter().position(|a| a == "--http") {
-        let port = args
-            .get(i + 1)
-            .and_then(|p| p.parse::<u16>().ok())
-            .filter(|p| *p > 0)
-            .unwrap_or(8765);
-        return Some(port);
-    }
-    let v = std::env::var("CONDUIT_HTTP").ok()?;
-    let v = v.trim();
-    if v.is_empty() {
-        return None;
-    }
-    if let Ok(p) = v.parse::<u16>() {
-        if p > 0 {
-            return Some(p);
-        }
-    }
-    if matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes") {
-        return std::env::var("CONDUIT_HTTP_PORT")
-            .ok()
-            .and_then(|p| p.trim().parse::<u16>().ok())
-            .filter(|p| *p > 0)
-            .or(Some(8765));
-    }
-    None
+    let cli_port = args
+        .iter()
+        .position(|a| a == "--http")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse::<u16>().ok())
+        .filter(|p| *p > 0)
+        .or_else(|| {
+            args.iter()
+                .any(|a| a == "--http")
+                .then_some(8765)
+        });
+    let http = std::env::var("CONDUIT_HTTP").ok();
+    let http_port = std::env::var("CONDUIT_HTTP_PORT").ok();
+    resolve_http_port(
+        cli_port,
+        http.as_deref(),
+        http_port.as_deref(),
+    )
 }
 
 /// The tools the HTTP surface exposes, mirroring `tools/list`: the meta-tools
@@ -6892,7 +6945,11 @@ fn main() {
         .filter(|s| !s.trim().is_empty());
     // HTTP/OpenAPI bridge mode: one process serves every registered client, so the
     // router connects the union of their profiles. Resolve the port once up front.
-    let http_port_opt = http_port();
+    let (http_port_opt, warning) = http_port();
+
+    if let Some(msg) = warning {
+        eprintln!("{msg}");
+    }
     let http_mode = http_port_opt.is_some();
     glog("=== gateway start ===");
     glog(&format!(
@@ -10561,38 +10618,80 @@ mod tests {
         assert_eq!(grouped_help_target("github__create"), None);
     }
 
+    fn assert_mode(actual: (DiscoveryMode, Option<String>), expected: DiscoveryMode,) {
+        assert_eq!(actual.0, expected);
+    }
+
     #[test]
     fn discovery_mode_precedence_and_no_regression() {
         use DiscoveryMode::*;
         // Args: (env, client_mode, registry_mode, lazy_discovery).
         // A hand-set env override wins over everything, including the per-client override.
-        assert_eq!(resolve_mode_from(Some("grouped"), Some("lazy"), Some("lazy"), true), Grouped);
-        assert_eq!(resolve_mode_from(Some("lazy"), None, None, false), Lazy);
-        assert_eq!(resolve_mode_from(Some("full"), Some("lazy"), Some("grouped"), true), Full);
-        assert_eq!(resolve_mode_from(Some(" GROUPED "), None, None, true), Grouped);
+        assert_mode(resolve_mode_from(Some("grouped"), Some("lazy"), Some("lazy"), true), Grouped);
+        assert_mode(resolve_mode_from(Some("lazy"), None, None, false), Lazy);
+        assert_mode(resolve_mode_from(Some("full"), Some("lazy"), Some("grouped"), true), Full);
+        assert_mode(resolve_mode_from(Some(" GROUPED "), None, None, true), Grouped);
         // Old behavior preserved: a SET-but-unrecognized/empty env is Full (was the
         // `env == "lazy" ? lazy : not-lazy` branch), NOT a fall-through.
-        assert_eq!(resolve_mode_from(Some("typo"), None, Some("grouped"), true), Full);
-        assert_eq!(resolve_mode_from(Some(""), None, Some("grouped"), true), Full);
+        let (mode, warning) = resolve_mode_from(Some("typo"), None, Some("grouped"), true);
+        assert_eq!(mode, Full);
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "toolport: unrecognized CONDUIT_DISCOVERY value 'typo', falling back to full discovery"
+            )
+        );
+        // Empty env is also treated as an unrecognized value.
+        let (mode, warning) = resolve_mode_from(Some(""), None, Some("grouped"), true);
+        assert_eq!(mode, Full);
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "toolport: unrecognized CONDUIT_DISCOVERY value '', falling back to full discovery"
+            )
+        );
 
         // No env: the PER-CLIENT override wins over the global mode and the bool.
-        assert_eq!(resolve_mode_from(None, Some("grouped"), Some("full"), true), Grouped);
-        assert_eq!(resolve_mode_from(None, Some("full"), None, true), Full);
-        assert_eq!(resolve_mode_from(None, Some("lazy"), Some("grouped"), false), Lazy);
+        assert_mode(resolve_mode_from(None, Some("grouped"), Some("full"), true), Grouped);
+        assert_mode(resolve_mode_from(None, Some("full"), None, true), Full);
+        assert_mode(resolve_mode_from(None, Some("lazy"), Some("grouped"), false), Lazy);
         // An `inherit`/empty/unrecognized per-client value falls through to the global mode.
-        assert_eq!(resolve_mode_from(None, Some("inherit"), Some("grouped"), true), Grouped);
-        assert_eq!(resolve_mode_from(None, Some("weird"), None, true), Lazy);
+        assert_mode(resolve_mode_from(None, Some("inherit"), Some("grouped"), true), Grouped);
+        assert_mode(resolve_mode_from(None, Some("weird"), None, true), Lazy);
 
         // No env, no per-client: the global registry override wins over the bool.
-        assert_eq!(resolve_mode_from(None, None, Some("grouped"), true), Grouped);
-        assert_eq!(resolve_mode_from(None, None, Some("full"), true), Full);
-        assert_eq!(resolve_mode_from(None, None, Some("lazy"), false), Lazy);
+        assert_mode(resolve_mode_from(None, None, Some("grouped"), true), Grouped);
+        assert_mode(resolve_mode_from(None, None, Some("full"), true), Full);
+        assert_mode(resolve_mode_from(None, None, Some("lazy"), false), Lazy);
         // An unrecognized global override is ignored, falling through to the bool.
-        assert_eq!(resolve_mode_from(None, None, Some("weird"), true), Lazy);
+        assert_mode(resolve_mode_from(None, None, Some("weird"), true), Lazy);
 
         // BACK-COMPAT: no env, no override anywhere resolves to exactly the old bool.
-        assert_eq!(resolve_mode_from(None, None, None, true), Lazy);
-        assert_eq!(resolve_mode_from(None, None, None, false), Full);
+        assert_mode(resolve_mode_from(None, None, None, true), Lazy);
+        assert_mode(resolve_mode_from(None, None, None, false),Full);
+    }
+
+    #[test]
+    fn resolve_http_port_cases() {
+        // CLI port wins over everything.
+        assert_eq!(resolve_http_port(Some(9000), Some("8000"), Some("7000")), (Some(9000), None));
+        // Direct port form: CONDUIT_HTTP=9000.
+        assert_eq!(resolve_http_port(None, Some("9000"), None), (Some(9000), None));
+        // Truthy CONDUIT_HTTP uses CONDUIT_HTTP_PORT.
+        assert_eq!(resolve_http_port(None, Some("true"), Some("9001")), (Some(9001), None));
+        // Truthy CONDUIT_HTTP without a port falls back to default.
+        assert_eq!(resolve_http_port(None, Some("yes"), None), (Some(8765), None));
+        // No HTTP configuration means stdio mode.
+        assert_eq!(resolve_http_port(None, None, None), (None, None));
+        // Invalid value returns no port and warning.
+        let (port, warning) = resolve_http_port(None, Some("invalid"), None);
+        assert_eq!(port, None);
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "toolport: unrecognized CONDUIT_HTTP value 'invalid', HTTP bridge disabled"
+            )
+        );
     }
 
     #[test]

@@ -34,13 +34,27 @@ const MAX_CACHE_ENTRIES: usize = 64;
 /// the caller just produced).
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
+pub fn resolve_budget(value: Option<&str>) -> (usize, Option<String>) {
+    match value {
+        Some(v) => match v.trim().parse::<usize>() {
+            Ok(value) => (value, None),
+            Err(_) => (
+                DEFAULT_BUDGET_BYTES,
+                Some(format!(
+                    "toolport: invalid CONDUIT_RESULT_BUDGET value '{v}', falling back to default budget"
+                )),
+            ),
+        },
+        None => (DEFAULT_BUDGET_BYTES, None),
+    }
+}
+
 /// Resolve the byte budget from the env override, falling back to the default.
 /// 0 disables shaping (every result is treated as under budget).
-pub fn budget() -> usize {
-    std::env::var("CONDUIT_RESULT_BUDGET")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(DEFAULT_BUDGET_BYTES)
+pub fn budget() -> (usize, Option<String>) {
+    let value = std::env::var("CONDUIT_RESULT_BUDGET").ok();
+
+    resolve_budget(value.as_deref())
 }
 
 struct Cached {
@@ -292,7 +306,15 @@ pub fn fetch_result(cursor: &str, offset: usize, len: usize, requester: Option<&
             false,
         );
     }
-    let len = if len == 0 { budget() } else { len };
+    let len = if len == 0 {
+    let (budget, warning) = budget();
+    if let Some(msg) = warning {
+        eprintln!("{msg}");
+    }
+    budget
+    } else {
+        len
+    };
     // saturating_add: a client-supplied `len` near usize::MAX must not overflow
     // `offset + len`. On debug that panics; on release it wraps to `end < offset`,
     // and the byte-mapping below then slices `body[start_byte..end_byte]` with
@@ -374,6 +396,21 @@ mod tests {
         let more = fetch_result(&cursor, 1500, 500, None, None);
         let mt = more["content"][0]["text"].as_str().unwrap();
         assert!(mt.contains("of 10000"));
+    }
+
+    #[test]
+    fn resolve_budget_cases() {
+        assert_eq!(resolve_budget(Some("10000")), (10000, None));
+        assert_eq!(resolve_budget(Some(" 20000 ")), (20000, None));
+        assert_eq!(resolve_budget(None), (DEFAULT_BUDGET_BYTES, None));
+        let (budget, warning) = resolve_budget(Some("invalid"));
+        assert_eq!(budget, DEFAULT_BUDGET_BYTES);
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "toolport: invalid CONDUIT_RESULT_BUDGET value 'invalid', falling back to default budget"
+            )
+        );
     }
 
     #[test]
