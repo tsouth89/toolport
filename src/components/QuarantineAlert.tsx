@@ -3,6 +3,7 @@ import { ShieldAlert } from "lucide-react";
 import { listQuarantined, releaseQuarantine, type QuarantinedTool } from "@/lib/api";
 import { toastError } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
+import { fmtTs } from "@/lib/utils";
 
 /** Matches the PendingApprovals cadence so the two attention surfaces feel equally live. */
 const POLL_MS = 2000;
@@ -34,7 +35,7 @@ function whenLabel(ts: number): string {
   if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
-  return new Date(ts).toLocaleDateString();
+  return fmtTs(ts, "date");
 }
 
 /**
