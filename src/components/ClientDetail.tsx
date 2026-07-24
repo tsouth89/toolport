@@ -87,7 +87,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
   // Snapshotted at dialog-open time so a registry-changed event mid-review can't
   // reshuffle `toImport` out from under the indices the user already confirmed.
   const [bulkImportServers, setBulkImportServers] = useState<McpServer[] | null>(null);
-  // "" = expose all enabled servers (follow active profile); else scope to one.
+  // "" = follow the active profile; else scope to one.
   const [profile, setProfile] = useState("");
   const [migrateOpen, setMigrateOpen] = useState(false);
   const installed = client.gatewayInstalled;
@@ -170,7 +170,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
       toast.success(
         profile
           ? `${client.name} scoped to "${profile}".`
-          : `${client.name} now uses all enabled servers.`,
+          : `${client.name} now follows the active profile.`,
         { description: clientRestartHint(client.name) },
       );
       onChanged();
@@ -349,7 +349,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
             <p className="mt-1 text-xs text-muted-foreground">
               Sees{" "}
               <span className="font-medium text-foreground">
-                {currentScope ? `the "${currentScope}" profile` : "all enabled servers"}
+                {currentScope ? `the "${currentScope}" profile` : "the active profile"}
               </span>{" "}
               · {scopeServerCount(currentScope)} server
               {scopeServerCount(currentScope) === 1 ? "" : "s"}
@@ -372,7 +372,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="__all__">All enabled servers</SelectItem>
+                <SelectItem value="__all__">Follow active profile</SelectItem>
                 {profiles.map((p) => (
                   <SelectItem key={p.id} value={p.name}>
                     Only: {p.name}
@@ -661,7 +661,7 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="__all__">All enabled servers</SelectItem>
+                    <SelectItem value="__all__">Follow active profile</SelectItem>
                     {profiles.map((p) => (
                       <SelectItem key={p.id} value={p.name}>
                         Only: {p.name}
