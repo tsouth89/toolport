@@ -391,35 +391,41 @@ impl Router {
             let Some(orig) = tool.get("name").and_then(|n| n.as_str()) else {
                 continue;
             };
-            let exposed = tool_names[idx]
+            let base = tool_names[idx]
                 .clone()
                 .expect("a tool with a name always gets an allocated exposed name");
-            if let Some(reason) = self.policy.blocked_reason(&exposed, server_id, orig, tool) {
-                self.blocked.insert(exposed, reason.to_string());
-                continue;
-            }
-            let mut t = tool.clone();
-            // Apply the user's exposure override (keyed by the ORIGINAL exposed name).
+            // Apply the user's exposure override (keyed by the ORIGINAL name) BEFORE
+            // evaluating policy, so the quarantine check (keyed by the client-facing
+            // name) sees the SAME name the client will call. Evaluating it on the
+            // pre-rename base name meant a renamed tool could never be quarantined, and
+            // the app would show it quarantined while the gateway kept routing it (#423).
             // Cloned to owned so we don't hold a borrow of `self.overrides` across the
-            // `self.seen` mutation below.
+            // `self.seen` mutation below. A rename that is empty or would collide with an
+            // existing exposed name is ignored (keep the base) so routing stays
+            // unambiguous. Both the base name (reserved by allocate_exposed_names) and the
+            // rename's own slot stay reserved in `seen`, even when the tool ends up
+            // blocked, so neither can be reused by a sibling's `_2` suffix.
             let ov = self.overrides.get(server_id).and_then(|m| m.get(orig));
             let ov_name = ov.and_then(|o| o.name.clone());
             let ov_desc = ov.and_then(|o| o.description.clone());
-            // Rename changes ONLY the client-facing name; the route below still points at
-            // the real downstream tool, so a call never goes anywhere new. A rename that is
-            // empty or would collide with an existing exposed name is ignored (keep the
-            // original) so routing stays unambiguous.
             let exposed = match ov_name {
                 Some(new) => {
                     let cand = sanitize_segment(&new);
                     if !cand.is_empty() && self.seen.insert(cand.clone()) {
                         cand
                     } else {
-                        exposed
+                        base
                     }
                 }
-                None => exposed,
+                None => base,
             };
+            // Policy: disabled / scope / destructive gate on the ORIGINAL downstream
+            // name (server_id + orig); quarantine gates on the final exposed name.
+            if let Some(reason) = self.policy.blocked_reason(&exposed, server_id, orig, tool) {
+                self.blocked.insert(exposed, reason.to_string());
+                continue;
+            }
+            let mut t = tool.clone();
             if let Some(desc) = ov_desc {
                 t["description"] = json!(desc);
             }
@@ -1196,6 +1202,135 @@ mod tests {
         assert_eq!(out["content"][0]["text"], "srv:echo");
         let out = router.route_call("srv__add", json!({})).unwrap();
         assert_eq!(out["content"][0]["text"], "srv:add");
+    }
+
+    #[test]
+    fn quarantine_follows_a_renamed_tool_by_its_exposed_name() {
+        // #423: quarantine is keyed by the client-facing (exposed) name. A tool renamed
+        // via an override must be quarantined under its RENAMED name, and blocking must
+        // key on that same name. The old code evaluated the policy on the pre-rename base
+        // name, so a renamed tool could never be quarantined: the app showed it blocked
+        // while the gateway kept exposing and routing it.
+        let mut srv = HashMap::new();
+        srv.insert(
+            "echo".to_string(),
+            ToolOverride { name: Some("say".into()), description: None },
+        );
+        let policy = ToolPolicy {
+            quarantined: BTreeSet::from(["say".to_string()]),
+            ..Default::default()
+        };
+        let mut router = Router::with_policy(policy);
+        router.set_overrides(HashMap::from([("srv".to_string(), srv)]));
+        router.add(mock_server("srv"));
+
+        // The renamed tool is hidden from the catalog...
+        let names: Vec<String> = router
+            .aggregated_tools()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert!(!names.contains(&"say".to_string()), "quarantined rename must be hidden");
+        // ...and blocked on a direct call, with the quarantine reason.
+        let err = router.route_call("say", json!({})).unwrap_err();
+        assert!(err.contains("quarantine"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn a_stale_pre_rename_quarantine_entry_does_not_block_the_renamed_tool() {
+        // The mirror of the above: quarantining the OLD exposed name (srv__echo) must NOT
+        // block the tool now exposed as "say", so the fix doesn't just swap which name is
+        // wrong. A stale entry from before a rename is inert, not a silent block.
+        let mut srv = HashMap::new();
+        srv.insert(
+            "echo".to_string(),
+            ToolOverride { name: Some("say".into()), description: None },
+        );
+        let policy = ToolPolicy {
+            quarantined: BTreeSet::from(["srv__echo".to_string()]),
+            ..Default::default()
+        };
+        let mut router = Router::with_policy(policy);
+        router.set_overrides(HashMap::from([("srv".to_string(), srv)]));
+        router.add(mock_server("srv"));
+
+        assert_eq!(router.route_of("say"), Some(("srv", "echo")));
+        assert!(router.route_call("say", json!({})).is_ok(), "stale entry must not block");
+    }
+
+    #[test]
+    fn renamed_tool_quarantines_and_releases_end_to_end() {
+        // #423 end-to-end through REAL integrity persistence and a REAL router, beyond the
+        // unit tests that hand-set the quarantine set: a tool renamed to an exposed name
+        // with no `__` drifts, integrity quarantines that renamed name to disk, the router
+        // reads it back and blocks the call, then a re-approve restores it. This is the
+        // whole chain the app relies on.
+        use crate::integrity;
+        // Isolate persistence: hold the shared lock EVERY conduit_dir-resolving test takes
+        // (#409's invariant, since this touches integrity's on-disk store indirectly), and
+        // redirect the data dir to a scratch path so nothing hits the real one (#400).
+        let _lock = crate::registry::data_dir_test_lock();
+        let scratch =
+            std::env::temp_dir().join(format!("toolport-rename-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let _data_dir = crate::registry::DataDirOverride::set(&scratch);
+        let profile = Some("rename-e2e");
+
+        // Rename srv/echo -> "search" (an exposed name with NO `server__` prefix).
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "echo".to_string(),
+            ToolOverride { name: Some("search".into()), description: None },
+        );
+        let mut router = Router::new();
+        router.set_overrides(HashMap::from([("srv".to_string(), overrides)]));
+        router.add(mock_server("srv"));
+
+        // Sanity: exposed under the renamed name, routes to the real tool, callable.
+        assert_eq!(router.route_of("search"), Some(("srv", "echo")));
+        assert!(router.route_call("search", json!({})).is_ok());
+
+        // The server ships a poisoned redefinition. integrity quarantines the RENAMED
+        // exposed name - only reachable because #423 stopped skipping non-`__` tools.
+        let current = router.aggregated_tools();
+        let events = vec![json!({
+            "server": "srv", "tool": "search", "change": "poison", "severity": "high"
+        })];
+        assert!(
+            integrity::apply_quarantine(profile, &current, &events),
+            "a poison drift on a renamed tool must quarantine it"
+        );
+
+        // The persisted set the watcher reads carries the renamed name...
+        let persisted = integrity::quarantined(profile).expect("quarantine store readable");
+        assert!(persisted.contains("search"), "quarantine is keyed by the exposed name");
+
+        // ...and feeding it to the router hides and blocks the renamed tool.
+        router.requarantine(persisted);
+        let visible: Vec<String> = router
+            .aggregated_tools()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert!(!visible.contains(&"search".to_string()), "quarantined rename must be hidden");
+        let err = router.route_call("search", json!({})).unwrap_err();
+        assert!(err.contains("quarantine"), "a call to a quarantined rename must block: {err}");
+
+        // Re-approve: release clears the persisted set and the router restores the tool.
+        assert!(integrity::release(profile, "search"), "release must clear the entry");
+        let after = integrity::quarantined(profile).expect("quarantine store readable");
+        assert!(!after.contains("search"), "a released tool leaves the persisted set");
+        router.requarantine(after);
+        assert!(
+            router.route_call("search", json!({})).is_ok(),
+            "a re-approved renamed tool must work again"
+        );
+
+        // Clear the override before removing the scratch dir it points at; the lock is
+        // released at end of scope.
+        drop(_data_dir);
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]

@@ -182,14 +182,10 @@ pub fn clear() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // One file per machine, so these can't run concurrently. Serialize + reset.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn record_then_read_returns_newest_first() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _data_dir = crate::registry::data_dir_test_lock();
         clear();
         record(
             Some("cursor"),
@@ -235,7 +231,7 @@ mod tests {
 
     #[test]
     fn ranking_and_mode_are_recorded_and_capped() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _data_dir = crate::registry::data_dir_test_lock();
         clear();
         // Ranking with more than MAX_NAMES entries; only MAX_NAMES are stored.
         let ranking: Vec<Value> = (0..40)
@@ -291,7 +287,7 @@ mod tests {
 
     #[test]
     fn query_is_capped_and_names_are_limited() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _data_dir = crate::registry::data_dir_test_lock();
         clear();
         let long_q = "x".repeat(500);
         let many: Vec<String> = (0..40).map(|i| format!("srv__t{i}")).collect();
@@ -320,7 +316,7 @@ mod tests {
 
     #[test]
     fn no_match_search_is_still_recorded() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _data_dir = crate::registry::data_dir_test_lock();
         clear();
         record(
             None,

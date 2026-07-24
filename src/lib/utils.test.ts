@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fmtPercent, fmtTokens } from "./utils";
+import { fmtPercent, fmtTokens, fmtTs } from "./utils";
 
 describe("fmtTokens", () => {
   it("renders small numbers as-is", () => {
@@ -55,5 +55,37 @@ describe("fmtPercent", () => {
 
   it("can use the nonzero floor when the count is nonzero but the rate rounded away", () => {
     expect(fmtPercent(0, { floorNonZero: true })).toBe("<0.1%");
+  });
+});
+
+describe("fmtTs", () => {
+  const timestamp = new Date("2026-07-22T19:30:00").getTime();
+
+  it("formats timestamps with the default date and time format", () => {
+    expect(fmtTs(timestamp)).toBe(
+      new Date(timestamp).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    );
+  });
+
+  it("formats time-only timestamps", () => {
+    expect(fmtTs(timestamp, "time")).toBe(new Date(timestamp).toLocaleTimeString());
+  });
+
+  it("formats date-only timestamps", () => {
+    expect(fmtTs(timestamp, "date")).toBe(new Date(timestamp).toLocaleDateString());
+  });
+
+  it("formats month-and-day timestamps without a year", () => {
+    expect(fmtTs(timestamp, "monthDay")).toBe(
+      new Date(timestamp).toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+      }),
+    );
   });
 });

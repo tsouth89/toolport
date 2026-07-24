@@ -154,7 +154,7 @@ and refreshes too.
 
 ## Supported clients
 
-Toolport auto-detects these **25 AI clients**, installs the gateway into each with one
+Toolport auto-detects these **27 AI clients**, installs the gateway into each with one
 click, and can import a client's existing servers. It writes the config file shown
 below for you, so you never have to edit these by hand.
 
@@ -167,9 +167,11 @@ below for you, so you never have to edit these by hand.
 | Windsurf       | `~/.codeium/windsurf/mcp_config.json`                                                      | JSON (`mcpServers`)      |
 | OpenCode       | `~/.config/opencode/opencode.json`                                                         | JSON (`mcp`)             |
 | Codex          | `~/.codex/config.toml`                                                                     | TOML (`mcp_servers`)     |
+| Grok Build     | `~/.grok/config.toml`                                                                      | TOML (`mcp_servers`)     |
 | Continue       | `~/.continue/config.yaml`                                                                  | YAML (`mcpServers`)      |
 | Antigravity    | `~/.gemini/config/mcp_config.json`                                                         | JSON (`mcpServers`)      |
 | Gemini CLI     | `~/.gemini/settings.json`                                                                  | JSON (`mcpServers`)      |
+| Qwen Code      | `~/.qwen/settings.json`                                                                    | JSON (`mcpServers`)      |
 | Cline          | `<config>/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` | JSON (`mcpServers`)      |
 | Roo Code       | `<config>/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json`   | JSON (`mcpServers`)      |
 | Warp           | `~/.warp/.mcp.json`                                                                        | JSON (`mcpServers`)      |

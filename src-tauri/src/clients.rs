@@ -62,6 +62,10 @@ pub struct DetectedClient {
 enum Format {
     /// JSON with a top-level `mcpServers` object (Claude Desktop, Cursor, Windsurf).
     JsonMcpServers,
+    /// Qwen Code's top-level `mcpServers` object. Stdio entries use the standard
+    /// command/args/env shape, while remote entries distinguish SSE (`url`) from
+    /// streamable HTTP (`httpUrl`) and store credentials under `headers`.
+    JsonQwenMcpServers,
     /// JSON with a top-level `servers` object (VS Code).
     JsonServers,
     /// JSON/JSONC with a top-level `mcp` object (OpenCode). Local entries store
@@ -102,13 +106,26 @@ struct ClientDef {
 }
 
 /// The name Toolport uses for its own entry when installed into a client config.
-pub const GATEWAY_ENTRY_NAME: &str = "conduit";
+/// This is the user-visible label the entry shows up as inside every client (e.g.
+/// Claude Desktop lists it as this). It is cosmetic/identity only — the frozen
+/// wire identifiers the gateway depends on (`CONDUIT_*` env vars, keychain
+/// access-group, data dir, bundle id) are deliberately NOT tied to this and must
+/// stay `conduit` forever. See [`LEGACY_GATEWAY_ENTRY_NAME`] for the migration path.
+pub const GATEWAY_ENTRY_NAME: &str = "toolport";
 
-/// Match the frozen canonical name, the short-lived `toolport` name used by
-/// manual installs, and both current and pre-rename gateway binary names.
+/// The name Toolport wrote before the SOU-318 rename. Existing installs still have
+/// their entry named this; [`gateway_identity_matches`] keeps recognizing it so we
+/// detect, de-duplicate, and (via [`repoint_stale_gateways`]) migrate those entries
+/// to [`GATEWAY_ENTRY_NAME`] on launch. Do not remove — dropping it would make old
+/// entries invisible and leak a second, orphaned gateway into client configs.
+const LEGACY_GATEWAY_ENTRY_NAME: &str = "conduit";
+
+/// Match the current entry name, the pre-rename `conduit` name still present in
+/// existing installs, and both current and pre-rename gateway binary names.
 fn gateway_identity_matches(id: &str, name: &str, command: Option<&str>) -> bool {
     let has_gateway_name = |value: &str| {
-        value.eq_ignore_ascii_case(GATEWAY_ENTRY_NAME) || value.eq_ignore_ascii_case("toolport")
+        value.eq_ignore_ascii_case(GATEWAY_ENTRY_NAME)
+            || value.eq_ignore_ascii_case(LEGACY_GATEWAY_ENTRY_NAME)
     };
 
     has_gateway_name(id)
@@ -125,6 +142,14 @@ fn gateway_identity_matches(id: &str, name: &str, command: Option<&str>) -> bool
 /// never proxy itself (that recurses), and import must never pull it in.
 pub fn is_gateway_server(server: &ServerEntry) -> bool {
     gateway_identity_matches(&server.id, &server.name, server.command.as_deref())
+}
+
+/// Whether a server read out of a client's own config (a detected [`McpServer`]) is
+/// Toolport's own gateway entry. Recognizes the pre-rename `conduit` name too, so a
+/// "migrate" run doesn't import a legacy gateway entry back into the registry as if
+/// it were a real server.
+pub fn detected_is_gateway(server: &McpServer) -> bool {
+    gateway_identity_matches(&server.name, &server.name, server.command.as_deref())
 }
 
 fn home() -> Option<PathBuf> {
@@ -209,9 +234,11 @@ fn resolve_client_config_path(
             .join("windsurf")
             .join("mcp_config.json"),
         "opencode" => home.join(".config").join("opencode").join("opencode.json"),
+        "grok" => home.join(".grok").join("config.toml"),
         "codex" => home.join(".codex").join("config.toml"),
         "claude-code" => home.join(".claude.json"),
         "gemini-cli" => home.join(".gemini").join("settings.json"),
+        "qwen-code" => home.join(".qwen").join("settings.json"),
         "antigravity" => home.join(".gemini").join("config").join("mcp_config.json"),
         "cline" => config
             .join("Code")
@@ -308,9 +335,11 @@ fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> 
         // OpenCode documents this literal home-relative path on every platform;
         // unlike most Linux clients it does not follow XDG_CONFIG_HOME here.
         "opencode" => home.join(".config").join("opencode").join("opencode.json"),
+        "grok" => home.join(".grok").join("config.toml"),
         "codex" => home.join(".codex").join("config.toml"),
         "claude-code" => home.join(".claude.json"),
         "gemini-cli" => home.join(".gemini").join("settings.json"),
+        "qwen-code" => home.join(".qwen").join("settings.json"),
         "antigravity" => home.join(".gemini").join("config").join("mcp_config.json"),
         "cline" => config
             .join("Code")
@@ -510,12 +539,28 @@ fn codex_path() -> Option<PathBuf> {
     client_config_path("codex")
 }
 
+/// Grok Build (xAI's terminal coding agent) stores MCP servers in
+/// `~/.grok/config.toml` under `[mcp_servers.<name>]` - the same TOML shape as
+/// Codex, so it shares the `TomlMcpServers` format. It also reads Claude Code's
+/// config as a fallback, but writing our own explicit entry is what makes the
+/// gateway reliably visible (`grok mcp list` doesn't surface the Claude-config
+/// pickup).
+fn grok_path() -> Option<PathBuf> {
+    client_config_path("grok")
+}
+
 fn claude_code_path() -> Option<PathBuf> {
     client_config_path("claude-code")
 }
 
 fn gemini_cli_path() -> Option<PathBuf> {
     client_config_path("gemini-cli")
+}
+
+/// Qwen Code stores user-scoped settings at `~/.qwen/settings.json` on every
+/// supported platform.
+fn qwen_code_path() -> Option<PathBuf> {
+    client_config_path("qwen-code")
 }
 
 /// Google Antigravity reads MCP servers from `mcp_config.json` under `~/.gemini`.
@@ -605,7 +650,7 @@ fn hermes_path() -> Option<PathBuf> {
 }
 
 fn continue_path() -> Option<PathBuf> {
-    Some(home()?.join(".continue").join("config.yaml"))
+    client_config_path("continue")
 }
 
 /// Witsy keeps MCP servers in a top-level `mcpServers` object inside its main
@@ -763,6 +808,16 @@ fn defs() -> Vec<ClientDef> {
             plugin_scan: None,
         },
         ClientDef {
+            // Grok Build (xAI's terminal coding agent): ~/.grok/config.toml,
+            // [mcp_servers.<name>] - same TOML shape as Codex.
+            id: "grok",
+            name: "Grok Build",
+            format: Format::TomlMcpServers,
+            uses_connectors: false,
+            path: grok_path,
+            plugin_scan: None,
+        },
+        ClientDef {
             // The Codex CLI and the Codex desktop app share ~/.codex/config.toml.
             id: "codex",
             name: "Codex",
@@ -793,6 +848,14 @@ fn defs() -> Vec<ClientDef> {
             format: Format::JsonMcpServers,
             uses_connectors: false,
             path: gemini_cli_path,
+            plugin_scan: None,
+        },
+        ClientDef {
+            id: "qwen-code",
+            name: "Qwen Code",
+            format: Format::JsonQwenMcpServers,
+            uses_connectors: false,
+            path: qwen_code_path,
             plugin_scan: None,
         },
         ClientDef {
@@ -993,7 +1056,7 @@ fn json_server_with_values(name: &str, def: &serde_json::Value) -> ParsedSnippet
         .and_then(|a| a.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|x| x.as_str().map(String::from))
+                .filter_map(json_value_to_string)
                 .collect()
         })
         .unwrap_or_default();
@@ -1379,7 +1442,7 @@ fn parse_toml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String>
                 .and_then(|a| a.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
+                        .filter_map(toml_value_to_string)
                         .collect()
                 })
                 .unwrap_or_default();
@@ -1458,7 +1521,7 @@ fn parse_yaml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String>
                     .and_then(|v| v.as_sequence())
                     .map(|seq| {
                         seq.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
+                            .filter_map(yaml_value_to_string)
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1508,7 +1571,7 @@ fn parse_yaml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String>
                     .and_then(|v| v.as_sequence())
                     .map(|seq| {
                         seq.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
+                            .filter_map(yaml_value_to_string)
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1563,7 +1626,7 @@ fn parse_yaml_snippet(content: &str) -> Result<Vec<ParsedSnippetServer>, String>
                     .and_then(|v| v.as_sequence())
                     .map(|seq| {
                         seq.iter()
-                            .filter_map(|item| item.as_str().map(String::from))
+                            .filter_map(yaml_value_to_string)
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1670,6 +1733,56 @@ fn parse_json(content: &str, key: &str) -> Result<Vec<McpServer>, String> {
         ));
     }
     servers.sort_by_key(|s| s.name.to_lowercase());
+    Ok(servers)
+}
+
+fn parse_qwen_json(content: &str) -> Result<Vec<McpServer>, String> {
+    let value = parse_json_value(content)?;
+    let definitions = match value.get("mcpServers") {
+        None => return Ok(Vec::new()),
+        Some(value) if value.is_object() => value.as_object().unwrap(),
+        Some(_) => {
+            return Err(
+                "'mcpServers' must be an object mapping server names to definitions".into(),
+            );
+        }
+    };
+
+    let mut servers = parse_json(content, "mcpServers")?;
+    for server in &mut servers {
+        // `parse_json` names each server after its map key, so a lookup here always
+        // hits. Indexing would still be a panic in a Tauri command if that ever
+        // stopped holding, and this is parsing a user-supplied file, so fail soft.
+        let Some(definition) = definitions.get(&server.name) else {
+            continue;
+        };
+        let http_url = definition
+            .get("httpUrl")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty());
+        let sse_url = definition
+            .get("url")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty());
+        let (transport, url) = if let Some(url) = http_url {
+            ("http", Some(url))
+        } else if let Some(url) = sse_url {
+            ("sse", Some(url))
+        } else {
+            continue;
+        };
+
+        server.transport = transport.into();
+        server.url = url.map(String::from);
+        server.command = None;
+        server.args.clear();
+        server.env_keys = definition
+            .get("headers")
+            .and_then(|value| value.as_object())
+            .map(|headers| headers.keys().cloned().collect())
+            .unwrap_or_default();
+        server.env_keys.sort();
+    }
     Ok(servers)
 }
 
@@ -1824,7 +1937,7 @@ fn parse_toml(content: &str) -> Result<Vec<McpServer>, String> {
                 .and_then(|a| a.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
+                        .filter_map(toml_value_to_string)
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -1985,6 +2098,7 @@ fn read_client(def: &ClientDef) -> DetectedClient {
 
     let parsed = match def.format {
         Format::JsonMcpServers => parse_json(&content, "mcpServers"),
+        Format::JsonQwenMcpServers => parse_qwen_json(&content),
         Format::JsonServers => parse_json(&content, "servers"),
         Format::JsonOpenCodeMcp => parse_opencode_json(&content),
         Format::JsonContextServers => parse_json(&content, "context_servers"),
@@ -2140,6 +2254,22 @@ fn entry_to_json(entry: &ServerEntry) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+fn entry_to_qwen_json(entry: &ServerEntry) -> serde_json::Value {
+    let mut value = entry_to_json(entry);
+    if entry.command.is_none() {
+        let object = value.as_object_mut().unwrap();
+        if entry.transport != "sse" {
+            if let Some(url) = object.remove("url") {
+                object.insert("httpUrl".into(), url);
+            }
+        }
+        if let Some(env) = object.remove("env") {
+            object.insert("headers".into(), env);
+        }
+    }
+    value
+}
+
 fn entry_to_opencode_json(entry: &ServerEntry) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     map.insert("enabled".into(), serde_json::Value::Bool(true));
@@ -2248,6 +2378,31 @@ fn write_json(
 
     let json = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     atomic_write(path, &json)
+}
+
+fn write_qwen_json(path: &Path, servers: &[ServerEntry]) -> Result<(), String> {
+    let mut root = if path.exists() {
+        let content = read_config_file(path)?;
+        read_existing_json(&content, true)?
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+    if !root.is_object() {
+        return Err("Qwen Code config root must be an object; leaving it untouched.".into());
+    }
+
+    let object = root.as_object_mut().unwrap();
+    let servers_map = servers
+        .iter()
+        .map(|server| (server.name.clone(), entry_to_qwen_json(server)))
+        .collect();
+    object.insert(
+        "mcpServers".into(),
+        serde_json::Value::Object(servers_map),
+    );
+
+    let output = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
+    atomic_write(path, &output)
 }
 
 fn opencode_mcp_mut(
@@ -2367,7 +2522,7 @@ fn parse_yaml_extensions(content: &str) -> Result<Vec<McpServer>, String> {
             .and_then(|v| v.as_sequence())
             .map(|seq| {
                 seq.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
+                    .filter_map(yaml_value_to_string)
                     .collect()
             })
             .unwrap_or_default();
@@ -2543,7 +2698,7 @@ fn parse_continue_yaml_servers(content: &str) -> Result<Vec<McpServer>, String> 
             .and_then(|v| v.as_sequence())
             .map(|seq| {
                 seq.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
+                    .filter_map(yaml_value_to_string)
                     .collect()
             })
             .unwrap_or_default();
@@ -2712,7 +2867,7 @@ fn parse_hermes_yaml_servers(content: &str) -> Result<Vec<McpServer>, String> {
             .and_then(|v| v.as_sequence())
             .map(|seq| {
                 seq.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
+                    .filter_map(yaml_value_to_string)
                     .collect()
             })
             .unwrap_or_default();
@@ -2865,6 +3020,7 @@ pub fn write_servers(client_id: &str, servers: &[ServerEntry]) -> Result<WriteOu
     let lenient = config_is_whole_app_state(client_id);
     match def.format {
         Format::JsonMcpServers => write_json(&path, "mcpServers", servers, lenient)?,
+        Format::JsonQwenMcpServers => write_qwen_json(&path, servers)?,
         Format::JsonServers => write_json(&path, "servers", servers, lenient)?,
         Format::JsonOpenCodeMcp => write_opencode_json(&path, servers)?,
         Format::JsonContextServers => write_json(&path, "context_servers", servers, true)?,
@@ -3156,13 +3312,17 @@ fn edit_toml_gateway(
 /// history, signed-in account, all servers), not just an MCP-servers block. For
 /// these an unparseable file must ERROR rather than be silently replaced with a
 /// fresh object, so a transient parse failure can't wipe the user's whole config
-/// down to just our gateway entry. `~/.claude.json` (Claude Code) and
-/// `~/.gemini/settings.json` (Gemini CLI) share the plain `mcpServers` JSON shape
-/// with single-purpose files (Claude Desktop, VS Code's dedicated mcp.json, LM
-/// Studio, ...), which keep the harmless start-fresh behavior. (Zed's whole-editor
-/// settings.json is already lenient via its JsonContextServers format.)
+/// down to just our gateway entry. `~/.claude.json` (Claude Code),
+/// `~/.gemini/settings.json` (Gemini CLI) and `~/.qwen/settings.json` (Qwen Code)
+/// share the plain `mcpServers` JSON shape with single-purpose files (Claude
+/// Desktop, VS Code's dedicated mcp.json, LM Studio, ...), which keep the harmless
+/// start-fresh behavior. (Zed's whole-editor settings.json is already lenient via
+/// its JsonContextServers format.)
 fn config_is_whole_app_state(client_id: &str) -> bool {
-    matches!(client_id, "claude-code" | "gemini-cli" | "opencode")
+    matches!(
+        client_id,
+        "claude-code" | "gemini-cli" | "qwen-code" | "opencode"
+    )
 }
 
 fn install_or_remove(
@@ -3177,6 +3337,9 @@ fn install_or_remove(
     match def.format {
         Format::JsonMcpServers => {
             edit_json_gateway(&path, "mcpServers", install, profile, lenient, client_id)?
+        }
+        Format::JsonQwenMcpServers => {
+            edit_json_gateway(&path, "mcpServers", install, profile, true, client_id)?
         }
         Format::JsonServers => {
             edit_json_gateway(&path, "servers", install, profile, lenient, client_id)?
@@ -3240,6 +3403,15 @@ fn gateway_command_is_stale(stored: &str, current: &str) -> bool {
     false
 }
 
+/// Whether [`repoint_stale_gateways`] should rewrite a client's existing gateway
+/// entry: either its command is stale (see [`gateway_command_is_stale`]) or it still
+/// carries the pre-rename `conduit` name and needs migrating to [`GATEWAY_ENTRY_NAME`]
+/// even though its command is already current.
+fn gateway_entry_needs_rewrite(entry_name: &str, stored_command: &str, current: &str) -> bool {
+    gateway_command_is_stale(stored_command, current)
+        || entry_name.eq_ignore_ascii_case(LEGACY_GATEWAY_ENTRY_NAME)
+}
+
 /// Best-effort read of the gateway entry's `CONDUIT_PROFILE` from raw client-config
 /// text, format-tolerantly (JSON `"CONDUIT_PROFILE": "x"`, TOML `= "x"`, YAML `: x`).
 /// The parsed `McpServer` drops env VALUES (they can be secret), so a re-point reads
@@ -3271,16 +3443,24 @@ fn read_gateway_profile(client_id: &str) -> Option<String> {
     profile_from_config_text(&content)
 }
 
-/// Re-point client configs whose gateway entry still names the pre-rename binary
-/// (or a path that no longer exists) to the current gateway. This closes the
-/// backward-compat gap the `conduit-gateway` -> `toolport-gateway` rename opened on
-/// platforms without the macOS compat symlink (Windows/Linux), where an existing
-/// client would otherwise spawn a binary that no longer exists.
+/// Re-point / migrate client gateway entries to the current install on launch.
+/// Rewrites an entry when either:
+///   - its command still names the pre-rename binary (or a path that no longer
+///     exists), closing the `conduit-gateway` -> `toolport-gateway` gap on
+///     platforms without the macOS compat symlink (Windows/Linux); or
+///   - it still carries the pre-rename `conduit` entry name (SOU-318), migrating
+///     it to [`GATEWAY_ENTRY_NAME`] so a brand-new install no longer shows up as
+///     "conduit" inside clients. `install_gateway` retains-out every
+///     identity-matching entry (legacy name included) before writing the current
+///     one, so this renames in place rather than leaving a duplicate.
 ///
-/// Idempotent (an entry already on the current path is skipped, so it's a no-op
-/// after the first launch), surgical (`install_gateway` rewrites only the gateway
-/// entry and backs the config up first), and profile-preserving. Guarded so it never
-/// writes a path that doesn't exist. Returns the ids of clients it re-pointed.
+/// The stored entry is located by identity, not by the current name, so a legacy
+/// `conduit` entry is found rather than skipped. Idempotent (an entry already on
+/// the current name and path is left untouched, so it's a no-op after the first
+/// launch), surgical (only the gateway entry is rewritten, and the config is backed
+/// up first), and profile-preserving (the profile is read from raw config text,
+/// independent of the entry name). Guarded so it never writes a path that doesn't
+/// exist. Returns the ids of clients it rewrote.
 pub fn repoint_stale_gateways() -> Vec<String> {
     let Some(current) = resolve_gateway_path().map(|p| p.to_string_lossy().into_owned()) else {
         return Vec::new();
@@ -3295,13 +3475,15 @@ pub fn repoint_stale_gateways() -> Vec<String> {
         if !client.gateway_installed || !client.config_exists || client.error.is_some() {
             continue;
         }
-        let stored = client
+        // Find our entry by identity (recognizes the legacy `conduit` name too), so
+        // a pre-rename entry is migrated rather than missed.
+        let entry = client
             .servers
             .iter()
-            .find(|s| s.name.eq_ignore_ascii_case(GATEWAY_ENTRY_NAME))
-            .and_then(|s| s.command.as_deref())
-            .unwrap_or("");
-        if !gateway_command_is_stale(stored, &current) {
+            .find(|s| gateway_identity_matches(&s.name, &s.name, s.command.as_deref()));
+        let stored = entry.and_then(|s| s.command.as_deref()).unwrap_or("");
+        let entry_name = entry.map(|s| s.name.as_str()).unwrap_or("");
+        if !gateway_entry_needs_rewrite(entry_name, stored, &current) {
             continue;
         }
         let profile = read_gateway_profile(&client.id);
@@ -3401,6 +3583,26 @@ mod tests {
         }
     }
 
+    fn remote(name: &str, transport: &str) -> ServerEntry {
+        ServerEntry {
+            id: name.to_string(),
+            name: name.to_string(),
+            transport: transport.to_string(),
+            command: None,
+            args: vec![],
+            env: vec![EnvVar {
+                key: "Authorization".to_string(),
+                value: Some("Bearer fixture".to_string()),
+                secret: false,
+            }],
+            url: Some(format!("https://{name}.example.com/mcp")),
+            source: None,
+            disabled_tools: vec![],
+            cwd: None,
+            unknown_fields: serde_json::Map::new(),
+        }
+    }
+
     fn temp_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("conduit-w-{}-{}.cfg", std::process::id(), label))
     }
@@ -3433,6 +3635,78 @@ mod tests {
         assert_eq!(parsed[0].name, "filesystem");
         assert_eq!(parsed[0].command.as_deref(), Some("npx"));
         assert_eq!(parsed[0].env_keys, vec!["TOKEN".to_string()]);
+    }
+
+    #[test]
+    fn qwen_json_parses_cli_generated_transports() {
+        // Generated with Qwen Code 0.20.1 using `qwen mcp add --scope user`.
+        let content = r#"{
+            "mcpServers": {
+                "local-fixture": {
+                    "command": "/usr/bin/printf",
+                    "args": ["ready\n"],
+                    "env": {"TEST_TOKEN": "fixture"}
+                },
+                "remote-http": {
+                    "httpUrl": "https://http.example.com/mcp",
+                    "headers": {"X-Test": "fixture"}
+                },
+                "remote-sse": {
+                    "url": "https://sse.example.com/events",
+                    "headers": {"Authorization": "Bearer fixture"}
+                }
+            },
+            "$version": 4
+        }"#;
+
+        let parsed = parse_qwen_json(content).unwrap();
+        assert_eq!(parsed.len(), 3);
+
+        assert_eq!(parsed[0].name, "local-fixture");
+        assert_eq!(parsed[0].transport, "stdio");
+        assert_eq!(parsed[0].command.as_deref(), Some("/usr/bin/printf"));
+        assert_eq!(parsed[0].args, vec!["ready\n"]);
+        assert_eq!(parsed[0].env_keys, vec!["TEST_TOKEN".to_string()]);
+
+        assert_eq!(parsed[1].name, "remote-http");
+        assert_eq!(parsed[1].transport, "http");
+        assert_eq!(
+            parsed[1].url.as_deref(),
+            Some("https://http.example.com/mcp")
+        );
+        assert_eq!(parsed[1].env_keys, vec!["X-Test".to_string()]);
+
+        assert_eq!(parsed[2].name, "remote-sse");
+        assert_eq!(parsed[2].transport, "sse");
+        assert_eq!(
+            parsed[2].url.as_deref(),
+            Some("https://sse.example.com/events")
+        );
+        assert_eq!(parsed[2].env_keys, vec!["Authorization".to_string()]);
+    }
+
+    #[test]
+    fn qwen_transport_precedence_matches_current_cli() {
+        let content = r#"{
+            "mcpServers": {
+                "mixed": {
+                    "httpUrl": "https://http.example.com/mcp",
+                    "url": "https://sse.example.com/events",
+                    "command": "node",
+                    "args": ["server.js"]
+                }
+            }
+        }"#;
+
+        let parsed = parse_qwen_json(content).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].transport, "http");
+        assert_eq!(
+            parsed[0].url.as_deref(),
+            Some("https://http.example.com/mcp")
+        );
+        assert!(parsed[0].command.is_none());
+        assert!(parsed[0].args.is_empty());
     }
 
     #[test]
@@ -3644,12 +3918,14 @@ bad = "not-a-table"
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let servers = root["mcpServers"].as_object().unwrap();
-        assert!(servers.contains_key("conduit"));
+        assert!(servers.contains_key(GATEWAY_ENTRY_NAME));
         assert!(servers.contains_key("existing"));
         // Discovery mode comes from the registry, not the client config; only the
         // profile scope is written as an env var.
-        assert_eq!(servers["conduit"]["env"]["CONDUIT_PROFILE"], "Billing");
-        assert!(servers["conduit"]["env"].get("CONDUIT_DISCOVERY").is_none());
+        assert_eq!(servers[GATEWAY_ENTRY_NAME]["env"]["CONDUIT_PROFILE"], "Billing");
+        assert!(servers[GATEWAY_ENTRY_NAME]["env"]
+            .get("CONDUIT_DISCOVERY")
+            .is_none());
         // Unrelated key and the existing server's secret value are untouched.
         assert_eq!(root["theme"], "dark");
         assert_eq!(servers["existing"]["env"]["SECRET"], "keepme");
@@ -3658,8 +3934,55 @@ bad = "not-a-table"
         let root2: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let servers2 = root2["mcpServers"].as_object().unwrap();
-        assert!(!servers2.contains_key("conduit"));
+        assert!(!servers2.contains_key(GATEWAY_ENTRY_NAME));
         assert!(servers2.contains_key("existing"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn legacy_conduit_entry_is_recognized_and_migrated() {
+        // The pre-SOU-318 name must stay recognized as our own gateway, so detection,
+        // dedup, and the launch migration all still see a pre-rename entry.
+        assert!(gateway_identity_matches(
+            LEGACY_GATEWAY_ENTRY_NAME,
+            LEGACY_GATEWAY_ENTRY_NAME,
+            None
+        ));
+        assert!(is_gateway_server(&stdio(LEGACY_GATEWAY_ENTRY_NAME)));
+
+        // repoint rewrites a legacy-named entry even when its command is already
+        // current (that's the rename), but leaves a current-named, current-path entry
+        // untouched (idempotent no-op after the first launch).
+        let current = "/opt/toolport/toolport-gateway";
+        assert!(gateway_entry_needs_rewrite(
+            LEGACY_GATEWAY_ENTRY_NAME,
+            current,
+            current
+        ));
+        assert!(!gateway_entry_needs_rewrite(GATEWAY_ENTRY_NAME, current, current));
+
+        // Installing over a config whose only gateway entry is the legacy name renames
+        // it in place: the entry is retained-out by identity and re-inserted under the
+        // current name, so there's exactly one gateway entry and both the unrelated
+        // server and the profile scope survive.
+        let path = temp_path("migrate-legacy-json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"conduit":{"command":"toolport-gateway","env":{"CONDUIT_CLIENT_ID":"claude-code","CONDUIT_PROFILE":"Billing"}},"existing":{"command":"node"}}}"#,
+        )
+        .unwrap();
+        edit_json_gateway(&path, "mcpServers", true, Some("Billing"), false, "claude-code").unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let servers = root["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert!(servers.contains_key(GATEWAY_ENTRY_NAME));
+        assert!(!servers.contains_key(LEGACY_GATEWAY_ENTRY_NAME));
+        assert!(servers.contains_key("existing"));
+        assert_eq!(
+            servers[GATEWAY_ENTRY_NAME]["env"]["CONDUIT_PROFILE"],
+            "Billing"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -3955,7 +4278,7 @@ command = "npx"
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(root["ui_font_size"], 16);
         let cs = root["context_servers"].as_object().unwrap();
-        assert!(cs.contains_key("conduit"));
+        assert!(cs.contains_key(GATEWAY_ENTRY_NAME));
         assert!(cs.contains_key("existing"));
         std::fs::remove_file(&path).ok();
     }
@@ -3973,10 +4296,11 @@ command = "npx"
 
     #[test]
     fn whole_app_state_clients_are_lenient() {
-        // claude-code (~/.claude.json) and gemini-cli (~/.gemini/settings.json) hold
-        // the client's entire state, so an unparseable file must never be wiped.
+        // These files hold the client's entire state, so an unparseable file must
+        // never be wiped.
         assert!(config_is_whole_app_state("claude-code"));
         assert!(config_is_whole_app_state("gemini-cli"));
+        assert!(config_is_whole_app_state("qwen-code"));
         assert!(config_is_whole_app_state("opencode"));
         // Single-purpose mcpServers files keep the start-fresh behavior.
         assert!(!config_is_whole_app_state("claude-desktop"));
@@ -3991,6 +4315,90 @@ command = "npx"
         assert!(edit_json_gateway(&path, "mcpServers", true, None, true, "claude-code").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn qwen_round_trip_preserves_settings_and_remote_transports() {
+        let path = temp_path("qwen.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "$version": 4,
+                "model": {"name": "qwen3-coder-plus"},
+                "ui": {"theme": "GitHub"},
+                "mcpServers": {
+                    "old": {"command": "old-command"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let servers = vec![
+            stdio("filesystem"),
+            remote("remote-http", "http"),
+            remote("remote-sse", "sse"),
+        ];
+        write_qwen_json(&path, &servers).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(root["$version"], 4);
+        assert_eq!(root["model"]["name"], "qwen3-coder-plus");
+        assert_eq!(root["ui"]["theme"], "GitHub");
+        assert!(root["mcpServers"].get("old").is_none());
+
+        let http = &root["mcpServers"]["remote-http"];
+        assert_eq!(http["httpUrl"], "https://remote-http.example.com/mcp");
+        assert!(http.get("url").is_none());
+        assert_eq!(http["headers"]["Authorization"], "Bearer fixture");
+        assert!(http.get("env").is_none());
+
+        let sse = &root["mcpServers"]["remote-sse"];
+        assert_eq!(sse["url"], "https://remote-sse.example.com/mcp");
+        assert!(sse.get("httpUrl").is_none());
+        assert_eq!(sse["headers"]["Authorization"], "Bearer fixture");
+
+        let parsed = parse_qwen_json(&content).unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].transport, "stdio");
+        assert_eq!(parsed[1].transport, "http");
+        assert_eq!(parsed[2].transport, "sse");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn qwen_write_never_wipes_unparseable_settings() {
+        let path = temp_path("qwen-bad.json");
+        let garbage = r#"{"model":{"name":"qwen3"},"mcpServers":{broken"#;
+        std::fs::write(&path, garbage).unwrap();
+
+        assert!(write_qwen_json(&path, &[stdio("filesystem")]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn qwen_code_is_registered_with_its_native_transport_format() {
+        let definition = defs()
+            .into_iter()
+            .find(|definition| definition.id == "qwen-code")
+            .unwrap();
+        assert!(matches!(
+            definition.format,
+            Format::JsonQwenMcpServers
+        ));
+        assert!((definition.path)().is_some());
+    }
+
+    #[test]
+    fn grok_build_is_registered_as_toml_mcp_servers() {
+        // Grok Build shares Codex's TOML `[mcp_servers.<name>]` shape, so it reuses the
+        // TomlMcpServers format and just points at ~/.grok/config.toml.
+        let definition = defs().into_iter().find(|d| d.id == "grok").unwrap();
+        assert!(matches!(definition.format, Format::TomlMcpServers));
+        assert!((definition.path)().is_some());
     }
 
     #[test]
@@ -4030,27 +4438,27 @@ command = "npx"
             serde_json::Value::String("keep-me".into())
         );
         assert_eq!(mcp["existing"]["enabled"], false);
-        assert_eq!(mcp["conduit"]["type"], "local");
-        assert_eq!(mcp["conduit"]["enabled"], true);
-        let command = mcp["conduit"]["command"].as_array().unwrap();
+        assert_eq!(mcp[GATEWAY_ENTRY_NAME]["type"], "local");
+        assert_eq!(mcp[GATEWAY_ENTRY_NAME]["enabled"], true);
+        let command = mcp[GATEWAY_ENTRY_NAME]["command"].as_array().unwrap();
         assert_eq!(command.len(), 1);
         assert!(command[0]
             .as_str()
             .unwrap()
             .contains("toolport-gateway"));
         assert_eq!(
-            mcp["conduit"]["environment"]["CONDUIT_CLIENT_ID"],
+            mcp[GATEWAY_ENTRY_NAME]["environment"]["CONDUIT_CLIENT_ID"],
             "opencode"
         );
         assert_eq!(
-            mcp["conduit"]["environment"]["CONDUIT_PROFILE"],
+            mcp[GATEWAY_ENTRY_NAME]["environment"]["CONDUIT_PROFILE"],
             "Work"
         );
 
         edit_opencode_gateway(&path, false, None, "opencode").unwrap();
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(after["mcp"].get("conduit").is_none());
+        assert!(after["mcp"].get(GATEWAY_ENTRY_NAME).is_none());
         assert!(after["mcp"].get("existing").is_some());
         assert_eq!(after["model"], "anthropic/claude-sonnet-4-5");
         std::fs::remove_file(&path).ok();
@@ -4239,12 +4647,15 @@ command = "npx"
         );
         let exts = v.get("extensions").and_then(|x| x.as_mapping()).unwrap();
         assert!(exts.get("fetch").is_some());
-        let conduit = exts.get("conduit").and_then(|x| x.as_mapping()).unwrap();
-        assert_eq!(conduit.get("type").and_then(|x| x.as_str()), Some("stdio"));
-        assert_eq!(conduit.get("enabled").and_then(|x| x.as_bool()), Some(true));
-        assert!(conduit.get("cmd").and_then(|x| x.as_str()).is_some());
+        let gateway = exts
+            .get(GATEWAY_ENTRY_NAME)
+            .and_then(|x| x.as_mapping())
+            .unwrap();
+        assert_eq!(gateway.get("type").and_then(|x| x.as_str()), Some("stdio"));
+        assert_eq!(gateway.get("enabled").and_then(|x| x.as_bool()), Some(true));
+        assert!(gateway.get("cmd").and_then(|x| x.as_str()).is_some());
 
-        // Uninstall removes only conduit.
+        // Uninstall removes only the gateway entry.
         edit_yaml_gateway(&path, false, None, "goose").unwrap();
         let after: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -4252,7 +4663,7 @@ command = "npx"
             .get("extensions")
             .and_then(|x| x.as_mapping())
             .unwrap();
-        assert!(exts2.get("conduit").is_none());
+        assert!(exts2.get(GATEWAY_ENTRY_NAME).is_none());
         assert!(exts2.get("fetch").is_some());
         std::fs::remove_file(&path).ok();
     }
@@ -4310,6 +4721,70 @@ command = "npx"
     }
 
     #[test]
+    fn continue_yaml_round_trip_preserves_config() {
+        let path = temp_path("continue.yaml");
+        std::fs::write(
+            &path,
+            "models:\n  - title: GPT-4o\n    provider: openai\n    model: gpt-4o\nrules:\n  - Keep responses concise\nmcpServers:\n  - name: old-server\n    command: old-command\n",
+        )
+        .unwrap();
+
+        let servers = vec![stdio("filesystem"), stdio("github")];
+        write_continue_yaml_servers(&path, &servers).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed = parse_continue_yaml_servers(&content).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "filesystem");
+        assert_eq!(parsed[0].command.as_deref(), Some("npx"));
+        assert_eq!(
+            parsed[0].args,
+            vec!["-y", "@modelcontextprotocol/server-filesystem"]
+        );
+        assert_eq!(parsed[0].env_keys, vec!["TOKEN".to_string()]);
+        assert_eq!(parsed[1].name, "github");
+
+        let root: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(
+            root.get("models")
+                .and_then(|models| models.as_sequence())
+                .and_then(|models| models.first())
+                .and_then(|model| model.get("title"))
+                .and_then(|title| title.as_str()),
+            Some("GPT-4o")
+        );
+        assert_eq!(
+            root.get("rules")
+                .and_then(|rules| rules.as_sequence())
+                .and_then(|rules| rules.first())
+                .and_then(|rule| rule.as_str()),
+            Some("Keep responses concise")
+        );
+        assert!(content.contains("plain-value"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn continue_yaml_write_never_wipes_unparseable() {
+        let path = temp_path("continue-bad.yaml");
+        let garbage = "models:\n  - title: GPT-4o\nmcpServers: [unbalanced\n";
+        std::fs::write(&path, garbage).unwrap();
+
+        assert!(write_continue_yaml_servers(&path, &[stdio("github")]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn continue_is_registered_as_yaml_mcp_servers_list() {
+        let d = defs().into_iter().find(|d| d.id == "continue").unwrap();
+        assert!(matches!(d.format, Format::YamlMcpServersList));
+        assert!((d.path)().is_some());
+    }
+
+    #[test]
     fn hermes_yaml_round_trip_preserves_config() {
         let path = temp_path("hermes.yaml");
         // A real config.yaml has model settings AND mcp_servers; touch neither but ours.
@@ -4342,10 +4817,13 @@ command = "npx"
         );
         let servers = v.get("mcp_servers").and_then(|x| x.as_mapping()).unwrap();
         assert!(servers.get("zread").is_some());
-        let conduit = servers.get("conduit").and_then(|x| x.as_mapping()).unwrap();
-        assert!(conduit.get("command").and_then(|x| x.as_str()).is_some());
+        let gateway = servers
+            .get(GATEWAY_ENTRY_NAME)
+            .and_then(|x| x.as_mapping())
+            .unwrap();
+        assert!(gateway.get("command").and_then(|x| x.as_str()).is_some());
 
-        // Uninstall removes only conduit.
+        // Uninstall removes only the gateway entry.
         edit_hermes_yaml_gateway(&path, false, None, "hermes").unwrap();
         let after: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -4353,7 +4831,7 @@ command = "npx"
             .get("mcp_servers")
             .and_then(|x| x.as_mapping())
             .unwrap();
-        assert!(servers2.get("conduit").is_none());
+        assert!(servers2.get(GATEWAY_ENTRY_NAME).is_none());
         assert!(servers2.get("zread").is_some());
         std::fs::remove_file(&path).ok();
     }
@@ -4523,8 +5001,15 @@ command = "npx"
     fn client_config_paths_are_stable_across_platforms() {
         let cases: &[(&str, fn(&Path, Platform) -> PathBuf)] = &[
             ("cursor", |home, _| home.join(".cursor").join("mcp.json")),
+            ("grok", |home, _| home.join(".grok").join("config.toml")),
             ("opencode", |home, _| {
                 home.join(".config").join("opencode").join("opencode.json")
+            }),
+            ("qwen-code", |home, _| {
+                home.join(".qwen").join("settings.json")
+            }),
+            ("continue", |home, _| {
+                home.join(".continue").join("config.yaml")
             }),
             ("pi", |home, _| {
                 home.join(".pi").join("agent").join("mcp.json")
@@ -4984,6 +5469,80 @@ DEBUG = true
             .collect();
         assert_eq!(vals.get("PORT"), Some(&"3000"));
         assert_eq!(vals.get("DEBUG"), Some(&"true"));
+    }
+
+    #[test]
+    fn parse_non_string_json_arg_values() {
+        let json = r#"{"mcpServers":{"srv":{"command":"npx","args":["server.js",8080,true]}}}"#;
+        let servers = parse_snippet(json).unwrap();
+        assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(servers[0].args, vec!["server.js", "8080", "true"]);
+    }
+
+    #[test]
+    fn parse_non_string_toml_arg_values() {
+        let toml = r#"
+        [mcp_servers.srv]
+        command = "npx"
+        args = ["server.js",8080,true]
+        "#;
+        let servers = parse_snippet(toml).unwrap();
+        assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(servers[0].args, vec!["server.js", "8080", "true"]);
+    }
+
+    #[test]
+    fn parse_non_string_goose_yaml_arg_values() {
+        let yaml = r#"
+        extensions:
+        srv:
+            enabled: true
+            type: stdio
+            cmd: npx
+            args:
+            - "server.js"
+            - 8080
+            - true
+        "#;
+        let servers = parse_snippet(yaml).unwrap();
+        assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(servers[0].args, vec!["server.js", "8080", "true"]);
+    }
+
+    #[test]
+    fn parse_non_string_continue_yaml_arg_values() {
+        // Continue's list form is indentation-sensitive, so this fixture stays
+        // flush against the left margin rather than matching the block above.
+        let yaml = r#"
+mcpServers:
+  - name: fetch
+    command: uvx
+    args:
+      - mcp-server-fetch
+      - 8080
+      - true
+"#;
+        let servers = parse_snippet(yaml).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(servers[0].args, vec!["mcp-server-fetch", "8080", "true"]);
+    }
+
+    #[test]
+    fn parse_non_string_hermes_yaml_arg_values() {
+        let yaml = r#"
+        mcp_servers:
+         my-server:
+            command: npx
+            args:
+              - "-y"
+              - 8080
+              - true
+        "#;
+        let servers = parse_snippet(yaml).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(servers[0].args, vec!["-y", "8080", "true"]);
     }
 
     #[test]

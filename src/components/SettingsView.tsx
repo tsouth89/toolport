@@ -934,7 +934,12 @@ export function SettingsView({ registry, onRegistryChange }: Props) {
                   className="flex items-center gap-2 text-xs"
                 >
                   <span className="min-w-0 truncate font-mono">{q.tool}</span>
-                  <span className="shrink-0 text-muted-foreground">{q.reason}</span>
+                  <span
+                    className="min-w-0 truncate text-muted-foreground"
+                    title={q.detail || q.reason}
+                  >
+                    {q.detail ? q.detail : q.reason}
+                  </span>
                   <button
                     type="button"
                     onClick={() => reapprove(q)}

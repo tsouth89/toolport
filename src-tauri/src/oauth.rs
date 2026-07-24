@@ -321,6 +321,33 @@ pub fn host_is_private(host: &str) -> bool {
     }
 }
 
+/// True only when `host` can be POSITIVELY confirmed local: `localhost`, a literal
+/// private IP, or a name that RESOLVES and whose every address is private. Unlike
+/// [`host_is_private`] (which fails closed, returning true for an unresolvable host so it
+/// is safe for REFUSING), this fails to `false` on an empty/unparseable/unresolvable host,
+/// and on any host with even one public address. It is the safe input for GRANTING local
+/// trust: an attacker who serves NXDOMAIN for their own domain cannot get it classified as
+/// local and thereby switch off the SSRF endpoint guard. See issue #422.
+pub fn host_is_definitely_private(host: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let h = host.trim().to_ascii_lowercase();
+    if h.is_empty() {
+        return false;
+    }
+    if h == "localhost" || h.ends_with(".localhost") {
+        return true;
+    }
+    match (h.as_str(), 0u16).to_socket_addrs() {
+        // Confirmed local ONLY if it resolved to at least one address and every one is
+        // private. A mix of private + public is not confirmed-local (fail safe: guard on).
+        Ok(addrs) => {
+            let ips: Vec<_> = addrs.map(|sa| sa.ip()).collect();
+            !ips.is_empty() && ips.iter().all(ip_is_private)
+        }
+        Err(_) => false,
+    }
+}
+
 /// True only if `host` resolves to a link-local / cloud-metadata address (169.254.0.0/16,
 /// fe80::/10, the AWS metadata form). Unlike `host_is_private`, loopback and RFC1918 are
 /// NOT link-local. Fails OPEN (false on an empty/unresolvable host) so the stricter
@@ -364,7 +391,12 @@ pub fn discover(mcp_url: &str) -> Result<Endpoints, String> {
     // expected and allowed; if it's public, its metadata must not redirect us at a
     // private/loopback host (SSRF). This is a stable property of the URL the user
     // configured, so it also drives the resolver's rebind-safe `block_private`.
-    let server_local = host_of_url(mcp_url).map(|h| host_is_private(&h)).unwrap_or(false);
+    // Positive determination only (#422): an unresolvable host must NOT be treated as
+    // local, or a server that serves NXDOMAIN for its own domain gets the SSRF guard
+    // switched off and can redirect the token POST at the internal network.
+    let server_local = host_of_url(mcp_url)
+        .map(|h| host_is_definitely_private(&h))
+        .unwrap_or(false);
     let block_private = !server_local;
     let issuer = match get_json::<ProtectedResource>(
         &format!("{origin}/.well-known/oauth-protected-resource"),
@@ -710,8 +742,11 @@ fn write_callback_page(stream: &mut std::net::TcpStream, message: &str) {
 pub fn authenticate(mcp_url: &str) -> Result<AuthResult, String> {
     debug_log(&format!("=== oauth start: {mcp_url} ==="));
     // Same provenance rule as discover(): a public configured server must not have
-    // its DCR / token POST reach a private/loopback host, even via a DNS rebind.
-    let block_private = !host_of_url(mcp_url).map(|h| host_is_private(&h)).unwrap_or(false);
+    // its DCR / token POST reach a private/loopback host, even via a DNS rebind. Use the
+    // positive-determination predicate so an unresolvable host stays screened (#422).
+    let block_private = !host_of_url(mcp_url)
+        .map(|h| host_is_definitely_private(&h))
+        .unwrap_or(false);
     let endpoints = discover(mcp_url)?;
     debug_log(&format!(
         "endpoints: authz={} token={} reg={:?} scope={:?}",
@@ -919,6 +954,47 @@ mod tests {
         assert!(host_is_private("10.1.2.3"));
         assert!(host_is_private("")); // fail closed
         assert!(!host_is_private("8.8.8.8"));
+    }
+
+    #[test]
+    fn host_is_definitely_private_requires_positive_confirmation() {
+        // Positively local: localhost and literal private IPs (no DNS needed).
+        assert!(host_is_definitely_private("localhost"));
+        assert!(host_is_definitely_private("foo.localhost"));
+        assert!(host_is_definitely_private("127.0.0.1"));
+        assert!(host_is_definitely_private("10.1.2.3"));
+        assert!(host_is_definitely_private("192.168.1.10"));
+
+        // NOT confirmable, so NOT local: empty, public, and (the #422 fix) unresolvable.
+        // `.invalid` is guaranteed non-resolvable (RFC 2606), so this needs no network.
+        assert!(!host_is_definitely_private(""));
+        assert!(!host_is_definitely_private("8.8.8.8"));
+        assert!(!host_is_definitely_private("no-such-host-422.invalid"));
+
+        // The contrast that is the whole bug: host_is_private treats an unresolvable
+        // host as private (fail closed, for refusing), but that must NOT grant local trust.
+        assert!(host_is_private("no-such-host-422.invalid"));
+        assert!(!host_is_definitely_private("no-such-host-422.invalid"));
+    }
+
+    #[test]
+    fn unresolvable_server_host_does_not_disable_the_ssrf_guard() {
+        // The end-to-end shape of #422: server_local is derived from the configured MCP
+        // host. When that host is unresolvable, the OLD code (host_is_private) returned
+        // true and made guard_endpoint a no-op, so a metadata doc pointing at 127.0.0.1
+        // was accepted. With host_is_definitely_private it's false, so the guard still
+        // refuses the internal endpoint.
+        let server_local = host_is_definitely_private("no-such-host-422.invalid");
+        assert!(!server_local, "an unresolvable server host is not local");
+        assert!(
+            guard_endpoint("http://127.0.0.1:9999/token", server_local, "token").is_err(),
+            "the token endpoint must still be refused for an unresolvable (public-provenance) server"
+        );
+
+        // A genuinely local server (literal private IP) still gets its local endpoints.
+        let local = host_is_definitely_private("192.168.1.10");
+        assert!(local);
+        assert!(guard_endpoint("http://127.0.0.1:9999/token", local, "token").is_ok());
     }
 
     #[test]
