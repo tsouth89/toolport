@@ -20,6 +20,27 @@ export function fmtTokens(n: number): string {
 }
 
 /**
+ * Stable React keys for a newest-first list whose entries have no unique id.
+ * Each key is the item's identity plus, on collision, an occurrence counter
+ * counted from the END of the array, so prepending new entries never changes
+ * the key of an existing row (an index-based suffix shifts on every prepend
+ * and remounts each row, resetting its expand/collapse state). Identities can
+ * collide (e.g. two calls to the same tool in the same millisecond), so the
+ * counter keeps keys unique deterministically.
+ */
+export function stableListKeys<T>(items: T[], identity: (item: T) => string): string[] {
+  const seen = new Map<string, number>();
+  const keys = new Array<string>(items.length);
+  for (let i = items.length - 1; i >= 0; i--) {
+    const id = identity(items[i]);
+    const n = seen.get(id) ?? 0;
+    seen.set(id, n + 1);
+    keys[i] = n === 0 ? id : `${id}#${n}`;
+  }
+  return keys;
+}
+
+/**
  * Format a ratio as a percent with the same adaptive precision everywhere.
  * When `floorNonZero` is true, tiny positive rates render as "<0.1%" instead
  * of rounding down to a misleading "0%".

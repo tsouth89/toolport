@@ -18,7 +18,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import { fmtPercent, fmtTokens, fmtTs } from "@/lib/utils";
+import { fmtPercent, fmtTokens, fmtTs, stableListKeys } from "@/lib/utils";
 import { toastError } from "@/lib/toast";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Input } from "@/components/ui/input";
@@ -1022,8 +1022,8 @@ function DiscoveryTraces({ refreshKey }: { refreshKey: number }) {
             Local and bounded: tool names only, never arguments or results.
           </p>
           <div className="flex flex-col gap-1">
-            {entries.map((t, i) => (
-              <DiscoveryRow key={`${t.ts}-${i}`} t={t} />
+            {stableListKeys(entries, (t) => `${t.ts}-${t.query}`).map((key, i) => (
+              <DiscoveryRow key={key} t={entries[i]} />
             ))}
           </div>
         </>
@@ -1331,9 +1331,11 @@ function LiveInspector({ refreshKey }: { refreshKey: number }) {
             </p>
           ) : (
             <div className="flex flex-col gap-1">
-              {entries.map((e, i) => (
-                <InspectRow key={`${e.ts}-${e.server}-${e.tool}-${i}`} e={e} />
-              ))}
+              {stableListKeys(entries, (e) => `${e.ts}-${e.server}-${e.tool}`).map(
+                (key, i) => (
+                  <InspectRow key={key} e={entries[i]} />
+                ),
+              )}
             </div>
           )}
         </>
@@ -1660,9 +1662,9 @@ export function ActivityView({
                 )}
               </div>
             ) : (
-              visible.map((e, i) => (
-                <CallRow key={`${e.ts}-${e.server}-${e.tool}-${i}`} e={e} />
-              ))
+              stableListKeys(visible, (e) => `${e.ts}-${e.server}-${e.tool}`).map(
+                (key, i) => <CallRow key={key} e={visible[i]} />,
+              )
             )}
           </div>
         </>
