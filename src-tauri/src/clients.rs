@@ -213,6 +213,7 @@ fn resolve_client_config_path(
             .join("windsurf")
             .join("mcp_config.json"),
         "opencode" => home.join(".config").join("opencode").join("opencode.json"),
+        "grok" => home.join(".grok").join("config.toml"),
         "codex" => home.join(".codex").join("config.toml"),
         "claude-code" => home.join(".claude.json"),
         "gemini-cli" => home.join(".gemini").join("settings.json"),
@@ -313,6 +314,7 @@ fn resolve_client_config_path_linux(client_id: &str, home: &std::path::Path) -> 
         // OpenCode documents this literal home-relative path on every platform;
         // unlike most Linux clients it does not follow XDG_CONFIG_HOME here.
         "opencode" => home.join(".config").join("opencode").join("opencode.json"),
+        "grok" => home.join(".grok").join("config.toml"),
         "codex" => home.join(".codex").join("config.toml"),
         "claude-code" => home.join(".claude.json"),
         "gemini-cli" => home.join(".gemini").join("settings.json"),
@@ -514,6 +516,16 @@ fn windsurf_path() -> Option<PathBuf> {
 
 fn codex_path() -> Option<PathBuf> {
     client_config_path("codex")
+}
+
+/// Grok Build (xAI's terminal coding agent) stores MCP servers in
+/// `~/.grok/config.toml` under `[mcp_servers.<name>]` - the same TOML shape as
+/// Codex, so it shares the `TomlMcpServers` format. It also reads Claude Code's
+/// config as a fallback, but writing our own explicit entry is what makes the
+/// gateway reliably visible (`grok mcp list` doesn't surface the Claude-config
+/// pickup).
+fn grok_path() -> Option<PathBuf> {
+    client_config_path("grok")
 }
 
 fn claude_code_path() -> Option<PathBuf> {
@@ -772,6 +784,16 @@ fn defs() -> Vec<ClientDef> {
             format: Format::JsonOpenCodeMcp,
             uses_connectors: false,
             path: opencode_path,
+            plugin_scan: None,
+        },
+        ClientDef {
+            // Grok Build (xAI's terminal coding agent): ~/.grok/config.toml,
+            // [mcp_servers.<name>] - same TOML shape as Codex.
+            id: "grok",
+            name: "Grok Build",
+            format: Format::TomlMcpServers,
+            uses_connectors: false,
+            path: grok_path,
             plugin_scan: None,
         },
         ClientDef {
@@ -4282,6 +4304,15 @@ command = "npx"
     }
 
     #[test]
+    fn grok_build_is_registered_as_toml_mcp_servers() {
+        // Grok Build shares Codex's TOML `[mcp_servers.<name>]` shape, so it reuses the
+        // TomlMcpServers format and just points at ~/.grok/config.toml.
+        let definition = defs().into_iter().find(|d| d.id == "grok").unwrap();
+        assert!(matches!(definition.format, Format::TomlMcpServers));
+        assert!((definition.path)().is_some());
+    }
+
+    #[test]
     fn opencode_round_trip_preserves_other_settings() {
         let path = temp_path("opencode.json");
         std::fs::write(
@@ -4875,6 +4906,7 @@ command = "npx"
     fn client_config_paths_are_stable_across_platforms() {
         let cases: &[(&str, fn(&Path, Platform) -> PathBuf)] = &[
             ("cursor", |home, _| home.join(".cursor").join("mcp.json")),
+            ("grok", |home, _| home.join(".grok").join("config.toml")),
             ("opencode", |home, _| {
                 home.join(".config").join("opencode").join("opencode.json")
             }),
