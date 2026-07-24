@@ -459,6 +459,7 @@ fn resolve_mode_from(
         return match v.trim().to_ascii_lowercase().as_str() {
             "lazy" => (DiscoveryMode::Lazy,None),
             "grouped" => (DiscoveryMode::Grouped, None),
+            "full" => (DiscoveryMode::Full, None),
             _ => (
                     DiscoveryMode::Full,
                     Some(format!(
@@ -10910,6 +10911,7 @@ mod tests {
 
     fn assert_mode(actual: (DiscoveryMode, Option<String>), expected: DiscoveryMode,) {
         assert_eq!(actual.0, expected);
+        assert!(actual.1.is_none());
     }
 
     #[test]
@@ -10958,7 +10960,7 @@ mod tests {
 
         // BACK-COMPAT: no env, no override anywhere resolves to exactly the old bool.
         assert_mode(resolve_mode_from(None, None, None, true), Lazy);
-        assert_mode(resolve_mode_from(None, None, None, false),Full);
+        assert_mode(resolve_mode_from(None, None, None, false), Full);
     }
 
     #[test]
