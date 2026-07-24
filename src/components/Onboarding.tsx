@@ -29,6 +29,7 @@ import {
   teamJoinPoll,
 } from "@/lib/api";
 import { ClientLogo } from "@/components/ClientLogo";
+import { clientRestartHint } from "@/lib/clientConnect";
 import { teamUrlError } from "@/lib/teamUrl";
 import { Input } from "@/components/ui/input";
 import {
@@ -710,7 +711,12 @@ function ConnectClients({
       await installGateway(client.id);
       setDone((prev) => new Set(prev).add(client.id));
       onConnected();
-      toast.success(`Connected Toolport to ${client.name}`);
+      // Same trap as ClientDetail (SOU-317): config is written now, but the client
+      // usually only loads it on restart. Verify step also says this; put it on the
+      // success toast so it is not delayed until that step.
+      toast.success(`Connected Toolport to ${client.name}`, {
+        description: clientRestartHint(client.name),
+      });
     } catch (e) {
       toastError(`Couldn't connect: ${e}`);
     } finally {

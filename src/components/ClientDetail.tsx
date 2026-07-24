@@ -49,6 +49,7 @@ import {
 import { TransportPill } from "@/components/TransportPill";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ImportReviewDialog } from "@/components/ImportReviewDialog";
+import { clientRestartHint, connectSuccessDescription } from "@/lib/clientConnect";
 
 interface Props {
   client: DetectedClient;
@@ -164,10 +165,13 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
     setBusy(true);
     try {
       await installGateway(client.id, profile || undefined);
+      // Rescope rewrites the client's MCP config the same way Connect does; without a
+      // restart hint the change is invisible until the next cold start (SOU-317).
       toast.success(
         profile
           ? `${client.name} scoped to "${profile}".`
           : `${client.name} now uses all enabled servers.`,
+        { description: clientRestartHint(client.name) },
       );
       onChanged();
     } catch (e) {
@@ -302,12 +306,13 @@ export function ClientDetail({ client, registry, onChanged, onRegistryChange }: 
         toast.success(`Disconnected Toolport from ${client.name}`);
       } else {
         const outcome = await installGateway(client.id, profile || undefined);
+        // Restart is the load-bearing line (SOU-317): MCP clients typically do not
+        // pick up a new gateway entry until relaunch. Scope/backup are secondary.
         toast.success(`Connected Toolport to ${client.name}`, {
-          description: profile
-            ? `Scoped to the "${profile}" profile.`
-            : outcome.backup
-              ? "Previous config backed up."
-              : undefined,
+          description: connectSuccessDescription(client.name, [
+            profile ? `Scoped to the "${profile}" profile.` : null,
+            !profile && outcome.backup ? "Previous config backed up." : null,
+          ]),
         });
       }
       onChanged();
