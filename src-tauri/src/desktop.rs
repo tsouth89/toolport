@@ -431,6 +431,7 @@ fn server_from_detected(server: &clients::McpServer, client_id: &str) -> ServerE
         source: Some(format!("imported:{client_id}")),
         disabled_tools: vec![],
         cwd: None,
+        client_credentials: None,
         unknown_fields: serde_json::Map::new(),
     }
 }
@@ -1072,6 +1073,140 @@ fn delete_secret(
         Ok(())
     })?;
     Ok(reg)
+}
+
+/// Configure the headless OAuth client-credentials flow for an HTTP server
+/// (SBS-524).
+///
+/// The secret goes to the keychain; only the non-secret client id, auth method
+/// and scopes are written to the registry. Deliberately not routed through
+/// [`set_secret`], which records an env var: this credential is not an env var,
+/// and surfacing it as one would put it in the server's environment listing.
+#[tauri::command]
+fn set_client_credentials(
+    state: State<RegistryState>,
+    server_id: String,
+    client_id: String,
+    client_secret: Option<String>,
+    token_endpoint_auth_method: Option<String>,
+    scope: Option<String>,
+) -> Result<Registry, String> {
+    let client_id = client_id.trim().to_string();
+    if client_id.is_empty() {
+        return Err("a client id is required for client-credentials auth".into());
+    }
+    // Trim at the boundary, not just in the UI. `ClientAuthMethod::parse` trims
+    // before matching, so an untrimmed method would validate here and then be
+    // persisted with the whitespace still on it; scope is sent to the token
+    // endpoint verbatim, where padding can be rejected.
+    let blank_to_none = |v: Option<String>| {
+        v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    };
+    let token_endpoint_auth_method = blank_to_none(token_endpoint_auth_method);
+    let scope = blank_to_none(scope);
+    // Reject an unknown method here rather than at connect time, so a typo is a
+    // dialog error instead of a failed connection later.
+    if let Some(method) = token_endpoint_auth_method.as_deref() {
+        if oauth::ClientAuthMethod::parse(method).is_none() {
+            return Err(format!(
+                "unknown token endpoint auth method {method:?}; expected \
+                 client_secret_basic, client_secret_post, or private_key_jwt"
+            ));
+        }
+    }
+    // Validate the id BEFORE touching the keychain. Writing first and erroring
+    // afterwards would leave an orphaned secret with nothing referencing it and
+    // no path to clean it up. The closure below re-checks under the lock, which
+    // is what actually guarantees consistency; this is purely so the common
+    // typo case cannot leave a credential behind.
+    {
+        let reg = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !reg.servers.iter().any(|s| s.id == server_id) {
+            return Err(format!("no server with id {server_id:?}"));
+        }
+    }
+    // An empty secret means "keep the vaulted one", so editing scopes does not
+    // require re-entering the credential. Resolve it here but do not write yet.
+    let secret_to_store = client_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if secret_to_store.is_none()
+        && secrets::get_secret(&server_id, secrets::CLIENT_SECRET_KEY).is_none()
+    {
+        return Err("no client secret is stored for this server yet; enter one".into());
+    }
+    // Any config change invalidates a token minted under the old settings.
+    remote::reset_client_credentials(&server_id)?;
+
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        // Fail loudly on an unknown id. The keychain write above already happened,
+        // so silently skipping the registry half would leave a stored secret with
+        // no configuration pointing at it, and report success.
+        let Some(server) = reg.servers.iter_mut().find(|s| s.id == server_id) else {
+            return Err(format!("no server with id {server_id:?}"));
+        };
+        let existing = server.client_credentials.take().unwrap_or_default();
+        server.client_credentials = Some(registry::ClientCredentials {
+            client_id: client_id.clone(),
+            token_endpoint_auth_method: token_endpoint_auth_method.clone(),
+            scope: scope.clone(),
+            // Preserve fields a newer build wrote, same contract as elsewhere.
+            unknown_fields: existing.unknown_fields,
+        });
+        reg.secrets_generation = reg.secrets_generation.wrapping_add(1);
+        Ok(())
+    })?;
+    // Secret LAST, so no earlier failure can leave one vaulted with nothing
+    // referencing it and no way to reach it from the UI. If this write is the
+    // thing that fails, the config exists without a secret, which surfaces at
+    // connect as "no client secret is vaulted" and can simply be retried -- a
+    // visible, recoverable state rather than an invisible orphan.
+    if let Some(secret) = secret_to_store {
+        secrets::set_secret(&server_id, secrets::CLIENT_SECRET_KEY, &secret)?;
+    }
+    Ok(reg)
+}
+
+/// Remove client-credentials auth from a server: the vaulted secret, the minted
+/// access token, and the registry config.
+#[tauri::command]
+fn clear_client_credentials(
+    state: State<RegistryState>,
+    server_id: String,
+) -> Result<Registry, String> {
+    // Reset first, so a failure here preserves the credential and the removal can
+    // be retried.
+    remote::reset_client_credentials(&server_id)?;
+    // Then the config, and only then the secret. This is the OPPOSITE order to
+    // `set_client_credentials`, deliberately: there, a stranded secret is one the
+    // user still has in hand, so failing visibly is the better trade. Here the
+    // secret may be unrecoverable -- it is never shown again and may have to be
+    // re-issued by the authorization server -- so it must not be destroyed until
+    // the config is durably gone. If the delete is what fails, the result is a
+    // stale keychain entry with nothing pointing at it, and Remove can be run
+    // again; that is strictly better than losing a credential the user cannot get
+    // back.
+    let (reg, _) = write_registry(state.inner(), |reg| {
+        let Some(server) = reg.servers.iter_mut().find(|s| s.id == server_id) else {
+            return Err(format!("no server with id {server_id:?}"));
+        };
+        server.client_credentials = None;
+        reg.secrets_generation = reg.secrets_generation.wrapping_add(1);
+        Ok(())
+    })?;
+    secrets::delete_secret(&server_id, secrets::CLIENT_SECRET_KEY)?;
+    Ok(reg)
+}
+
+/// Whether a client secret is vaulted for this server, so the UI can show
+/// "configured" without ever reading the value back.
+#[tauri::command]
+fn has_client_secret(server_id: String) -> bool {
+    secrets::get_secret(&server_id, secrets::CLIENT_SECRET_KEY).is_some()
 }
 
 /// The most recent tool-call audit entries (newest first).
@@ -3445,6 +3580,9 @@ pub fn run() {
             migrate_client,
             set_secret,
             delete_secret,
+            set_client_credentials,
+            clear_client_credentials,
+            has_client_secret,
             secret_status,
             get_audit_log,
             audit_stats,
@@ -3836,6 +3974,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         }
     }
@@ -3869,6 +4008,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         }
     }
@@ -4236,6 +4376,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         });
 
@@ -4299,6 +4440,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         });
         let doc = build_export(&reg, None, None, None);
@@ -4339,6 +4481,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         });
         let doc = build_export(&reg, None, None, None);
@@ -4371,6 +4514,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         });
         let json = serde_json::to_string(&build_export(&reg, None, None, None)).unwrap();
@@ -4484,6 +4628,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         });
         reg.add_server(ServerEntry {
@@ -4497,6 +4642,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         });
 

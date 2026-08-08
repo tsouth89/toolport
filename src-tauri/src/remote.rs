@@ -136,12 +136,200 @@ fn issuer_bound_token_endpoint<'a>(
 /// manually pasted bearer token. Otherwise stale vaulted state could silently
 /// recreate a credential the user explicitly removed.
 pub fn clear_oauth_state(server_id: &str) -> Result<(), String> {
-    secrets::delete_secret(server_id, STATE_KEY)
+    // Attempt both, then surface the first failure. Swallowing the
+    // client-credentials delete would leave state that silently reacquires with
+    // the long-lived secret after the user believed they had cleared auth; only
+    // attempting the second on success would leave the other key behind.
+    let headless = secrets::delete_secret(server_id, CC_STATE_KEY);
+    let interactive = secrets::delete_secret(server_id, STATE_KEY);
+    headless.and(interactive)
+}
+
+// ── Client-credentials flow (SBS-524) ──────────────────────────────────────
+
+const CC_STATE_KEY: &str = "__oauth_cc_state__";
+
+/// What a later reacquisition needs, resolved once at connect time.
+///
+/// The reacquire seam (`refresh_token_with_expiry`) is reached from the request
+/// path with only a server id, so everything needed to mint another token is
+/// captured here rather than looked up from the registry again. That also means a
+/// reacquisition uses the same issuer and method the first one did, instead of
+/// silently following a metadata document that changed underneath it.
+///
+/// Holds no secret: the client secret stays in the vault under its own key.
+#[derive(Serialize, Deserialize)]
+struct ClientCredentialsState {
+    issuer: String,
+    token_endpoint: String,
+    client_id: String,
+    /// The negotiated `token_endpoint_auth_method` identifier.
+    method: String,
+    #[serde(default)]
+    scope: Option<String>,
+    /// RFC 8707 resource indicator (the MCP server URL).
+    resource: String,
+    #[serde(default)]
+    expires_at: Option<u64>,
+}
+
+/// Discover, negotiate an auth method, and mint an access token for a headless
+/// server. Vaults the token and the state a later reacquisition needs.
+///
+/// Fails closed rather than falling back to the interactive flow: a server that
+/// silently opened a browser would be unusable in the environment this exists for.
+fn acquire_client_credentials(
+    server_id: &str,
+    resource: &str,
+    config: &crate::registry::ClientCredentials,
+) -> Result<RefreshedToken, String> {
+    let secret = secrets::get_secret(server_id, secrets::CLIENT_SECRET_KEY).ok_or(
+        "no client secret is vaulted for this server; add one before connecting \
+         (client-credentials auth never falls back to a browser sign-in)",
+    )?;
+    let configured = match config.token_endpoint_auth_method.as_deref() {
+        Some(raw) => Some(oauth::ClientAuthMethod::parse(raw).ok_or_else(|| {
+            format!("unknown token_endpoint_auth_method {raw:?} configured for this server")
+        })?),
+        None => None,
+    };
+
+    let endpoints = oauth::discover(resource)?;
+    let method = oauth::select_client_auth_method(
+        configured,
+        endpoints.token_endpoint_auth_methods_supported.as_deref(),
+    )?;
+    // Prefer the user's explicit scopes; otherwise take what discovery advertises
+    // for this protected resource, matching the interactive flow.
+    let scope = config.scope.clone().or_else(|| endpoints.scope.clone());
+
+    let block_private = oauth::host_of_url(&endpoints.token_endpoint)
+        .map(|h| !oauth::host_is_definitely_private(&h))
+        .unwrap_or(true);
+    let tokens = oauth::client_credentials_token(
+        &endpoints.token_endpoint,
+        &config.client_id,
+        &secret,
+        method,
+        scope.as_deref(),
+        Some(resource),
+        block_private,
+    )?;
+
+    // State first, then the access token: a failure between the two leaves the
+    // next attempt able to reacquire, where the reverse order could strand a
+    // token with no way to mint its successor. Same ordering as the refresh path.
+    let state = ClientCredentialsState {
+        issuer: endpoints.issuer,
+        token_endpoint: endpoints.token_endpoint,
+        client_id: config.client_id.clone(),
+        method: method.as_str().to_string(),
+        scope,
+        resource: resource.to_string(),
+        expires_at: tokens.expires_at,
+    };
+    let json = serde_json::to_string(&state).map_err(|e| e.to_string())?;
+    secrets::set_secret(server_id, CC_STATE_KEY, &json)?;
+    secrets::set_secret(server_id, secrets::HTTP_AUTH_KEY, &tokens.access_token)?;
+    Ok(RefreshedToken {
+        access_token: tokens.access_token,
+        expires_at: tokens.expires_at,
+    })
+}
+
+/// Mint a replacement token from vaulted client-credentials state.
+///
+/// There is no refresh token to redeem (RFC 6749 §4.4.3), so this re-runs the
+/// grant. It reuses the recorded token endpoint and method rather than
+/// rediscovering, and re-verifies the issuer when it does discover, so a resource
+/// that changed authorization server fails closed instead of sending the secret
+/// somewhere new.
+fn reacquire_client_credentials(server_id: &str) -> Result<RefreshedToken, String> {
+    let state: ClientCredentialsState = secrets::get_secret(server_id, CC_STATE_KEY)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .ok_or("no client-credentials state to reacquire from")?;
+    let secret = secrets::get_secret(server_id, secrets::CLIENT_SECRET_KEY)
+        .ok_or("the vaulted client secret is gone; re-add it for this server")?;
+    let method = oauth::ClientAuthMethod::parse(&state.method)
+        .ok_or_else(|| format!("vaulted auth method {:?} is not recognized", state.method))?;
+
+    let endpoints = oauth::discover(&state.resource).map_err(|e| {
+        format!("could not verify the stored OAuth issuer before reusing the client secret: {e}")
+    })?;
+    let token_endpoint = issuer_bound_token_endpoint(&state.issuer, &endpoints)?;
+
+    let block_private = oauth::host_of_url(token_endpoint)
+        .map(|h| !oauth::host_is_definitely_private(&h))
+        .unwrap_or(true);
+    let tokens = oauth::client_credentials_token(
+        token_endpoint,
+        &state.client_id,
+        &secret,
+        method,
+        state.scope.as_deref(),
+        Some(&state.resource),
+        block_private,
+    )?;
+
+    let next = ClientCredentialsState {
+        token_endpoint: token_endpoint.to_string(),
+        expires_at: tokens.expires_at,
+        ..state
+    };
+    let json = serde_json::to_string(&next).map_err(|e| e.to_string())?;
+    secrets::set_secret(server_id, CC_STATE_KEY, &json)?;
+    secrets::set_secret(server_id, secrets::HTTP_AUTH_KEY, &tokens.access_token)?;
+    Ok(RefreshedToken {
+        access_token: tokens.access_token,
+        expires_at: tokens.expires_at,
+    })
+}
+
+/// Drop vaulted client-credentials state so the next connect re-acquires.
+///
+/// Called whenever the configuration changes. The state records the issuer,
+/// method and scopes resolved at acquisition time, so leaving it in place after
+/// an edit would keep minting tokens against the OLD configuration and the user's
+/// change would appear to do nothing.
+pub fn reset_client_credentials(server_id: &str) -> Result<(), String> {
+    // Errors propagate. A failed delete leaves state that would keep minting
+    // tokens under the OLD configuration, so reporting success here would tell
+    // the user their change had taken effect when it had not. Deleting a key that
+    // is not there is already `Ok` in every backend, so this does not fail on a
+    // server being configured for the first time.
+    secrets::delete_secret(server_id, CC_STATE_KEY)?;
+    // The access token was minted under the previous configuration too.
+    secrets::delete_secret(server_id, secrets::HTTP_AUTH_KEY)
+}
+
+/// Expiry of the vaulted client-credentials token, if this server uses that flow.
+fn client_credentials_expiry(server_id: &str) -> Option<u64> {
+    let state: ClientCredentialsState = secrets::get_secret(server_id, CC_STATE_KEY)
+        .and_then(|s| serde_json::from_str(&s).ok())?;
+    // A server that reports no lifetime keeps the reactive 401/403 behaviour,
+    // matching the interactive flow. Returning 0 here would reacquire on every
+    // single connect.
+    state.expires_at
+}
+
+/// Is this server configured for the headless flow?
+fn uses_client_credentials(server: &ServerEntry) -> bool {
+    server
+        .client_credentials
+        .as_ref()
+        .is_some_and(|c| !c.client_id.trim().is_empty())
 }
 
 /// Use the stored refresh token to mint a fresh access token, vault it, and
 /// return it.
 fn refresh_token_with_expiry(server_id: &str) -> Result<RefreshedToken, String> {
+    // Client-credentials servers have no refresh token by construction, so they
+    // reacquire instead. Checked first because this is the seam BOTH the proactive
+    // pre-expiry path and the reactive 401/403 retry go through; branching here
+    // means neither has to know which flow a server uses.
+    if secrets::get_secret(server_id, CC_STATE_KEY).is_some() {
+        return reacquire_client_credentials(server_id);
+    }
     let state = load_state(server_id).ok_or("no stored OAuth state to refresh")?;
     let rt = state
         .refresh_token
@@ -244,6 +432,17 @@ pub fn refresh_token(server_id: &str) -> Result<String, String> {
 /// no refresh token exists, return an auth-classified error so the existing
 /// per-server "Needs sign-in" UI appears before a failed tool call.
 fn refresh_token_if_needed(server_id: &str) -> Result<Option<String>, String> {
+    // Same pre-expiry rule for the headless flow, minus the "no refresh token"
+    // branch: reacquiring needs no user interaction, so a near-deadline token is
+    // simply replaced rather than surfaced as "needs sign-in".
+    if let Some(expires_at) = client_credentials_expiry(server_id) {
+        if now_epoch_seconds().saturating_add(PROACTIVE_REFRESH_SKEW_SECS) >= expires_at {
+            return Ok(reacquire_client_credentials(server_id)
+                .ok()
+                .map(|t| t.access_token));
+        }
+        return Ok(None);
+    }
     let Some(state) = load_state(server_id) else {
         return Ok(None);
     };
@@ -391,6 +590,16 @@ fn authed_transport(
     // blocked only for untrusted-provenance servers.
     let mut transport = HttpTransport::guarded(url, token, refresh, block_private);
     transport.set_scope_reauthorize(scope_reauthorize);
+    // Declared per request only while the flow is actually in use, which is what
+    // the extension requires. Keyed off vaulted state rather than registry config
+    // so it is true of the credential actually being sent: a server configured for
+    // the flow but not yet provisioned has nothing to declare.
+    if secrets::get_secret(server_id, CC_STATE_KEY).is_some() {
+        transport.declare_extension(
+            crate::downstream::OAUTH_CLIENT_CREDENTIALS_EXTENSION,
+            serde_json::json!({}),
+        );
+    }
     Ok(transport)
 }
 
@@ -487,6 +696,17 @@ pub fn connect_remote_with_handler(
     // Untrusted-provenance servers also get private/loopback refused at the resolver,
     // matching `guard_connect_target`'s pre-check but closing the DNS-rebind TOCTOU.
     let block_private = is_untrusted_source(server.source.as_deref());
+    // First connect for a headless server: mint a token now. Only this path has the
+    // registry config (client id, method, scopes); every later reacquisition runs
+    // from the state vaulted here, which is why it can go through the shared seam
+    // with just a server id.
+    if uses_client_credentials(server) && secrets::get_secret(server_id, CC_STATE_KEY).is_none() {
+        let config = server
+            .client_credentials
+            .as_ref()
+            .expect("uses_client_credentials checked it");
+        acquire_client_credentials(server_id, url, config)?;
+    }
     let stored_auth = secrets::get_secret(server_id, secrets::HTTP_AUTH_KEY)
         .or_else(|| first_vaulted_secret(server));
     let auth = match refresh_token_if_needed(server_id)? {
@@ -628,6 +848,7 @@ mod tests {
             scope: None,
             authorization_response_iss_parameter_supported: false,
             client_id_metadata_document_supported: false,
+            token_endpoint_auth_methods_supported: None,
         };
 
         let rotated = endpoints("https://auth.example.com", "https://auth.example.com/token-v2");
@@ -689,6 +910,7 @@ mod tests {
             source: source.map(String::from),
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         }
     }
@@ -715,5 +937,121 @@ mod tests {
     fn guard_allows_public_host_for_any_source() {
         let s = remote_server("https://8.8.8.8/mcp", Some("shared"));
         assert!(guard_connect_target(&s).is_ok());
+    }
+
+    // ----- SBS-524: client-credentials wiring ---------------------------------
+
+    fn cc(client_id: &str) -> crate::registry::ClientCredentials {
+        crate::registry::ClientCredentials {
+            client_id: client_id.into(),
+            ..Default::default()
+        }
+    }
+
+    fn http_server(id: &str, cc: Option<crate::registry::ClientCredentials>) -> ServerEntry {
+        let mut s = remote_server("https://mcp.example.com/mcp", None);
+        s.id = id.into();
+        s.client_credentials = cc;
+        s
+    }
+
+    /// The registry file, its backups and its exports must never carry the client
+    /// secret. Only the vault does. This asserts the shape rather than trusting
+    /// that no one adds a `clientSecret` field later.
+    #[test]
+    fn client_credentials_config_serializes_without_any_secret() {
+        let mut config = cc("client-abc");
+        config.token_endpoint_auth_method = Some("client_secret_basic".into());
+        config.scope = Some("mcp:read mcp:write".into());
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"clientId\":\"client-abc\""), "{json}");
+        assert!(
+            json.contains("\"tokenEndpointAuthMethod\":\"client_secret_basic\""),
+            "{json}"
+        );
+        assert!(
+            !json.to_ascii_lowercase().contains("secret\":"),
+            "the registry must not carry a client secret: {json}"
+        );
+
+        let back: crate::registry::ClientCredentials = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    /// A newer build's fields survive a round-trip through this one, same contract
+    /// as the rest of the registry.
+    #[test]
+    fn client_credentials_config_preserves_unknown_fields() {
+        let json = r#"{"clientId":"c","somethingNewer":{"a":1}}"#;
+        let parsed: crate::registry::ClientCredentials = serde_json::from_str(json).unwrap();
+        let out = serde_json::to_string(&parsed).unwrap();
+        assert!(out.contains("somethingNewer"), "{out}");
+    }
+
+    /// The flow is selected by configuration, and a blank client id does not
+    /// select it: an empty block would otherwise send every connect down the
+    /// headless path and fail with "no client secret vaulted".
+    #[test]
+    fn client_credentials_flow_requires_a_non_empty_client_id() {
+        assert!(uses_client_credentials(&http_server("a", Some(cc("client-abc")))));
+        assert!(!uses_client_credentials(&http_server("b", Some(cc("   ")))));
+        assert!(!uses_client_credentials(&http_server("c", Some(cc("")))));
+        assert!(!uses_client_credentials(&http_server("d", None)));
+    }
+
+    #[test]
+    fn client_credentials_state_round_trips_and_tolerates_older_vaulted_shapes() {
+        let state = ClientCredentialsState {
+            issuer: "https://auth.example.com".into(),
+            token_endpoint: "https://auth.example.com/token".into(),
+            client_id: "client-abc".into(),
+            method: "client_secret_basic".into(),
+            scope: Some("mcp:read".into()),
+            resource: "https://mcp.example.com/mcp".into(),
+            expires_at: Some(1_700_000_000),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        // Assert the exact key set rather than grepping for "secret": the auth
+        // METHOD is legitimately named `client_secret_basic`, so a substring check
+        // both false-positives here and would miss a field named anything else.
+        let keys: std::collections::BTreeSet<String> =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+        assert_eq!(
+            keys,
+            [
+                "issuer",
+                "token_endpoint",
+                "client_id",
+                "method",
+                "scope",
+                "resource",
+                "expires_at"
+            ]
+            .iter()
+            .map(|k| k.to_string())
+            .collect::<std::collections::BTreeSet<_>>(),
+            "vaulted state grew a field; make sure it is not a credential: {json}"
+        );
+        let back: ClientCredentialsState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.issuer, state.issuer);
+        assert_eq!(back.method, state.method);
+        assert_eq!(back.expires_at, state.expires_at);
+
+        // A provider that reports no lifetime keeps the reactive 401/403 path.
+        let minimal: ClientCredentialsState = serde_json::from_str(
+            r#"{"issuer":"https://a","tokenEndpoint":"https://a/t","clientId":"c",
+                "method":"client_secret_post","resource":"https://r"}"#
+                .replace("tokenEndpoint", "token_endpoint")
+                .replace("clientId", "client_id")
+                .as_str(),
+        )
+        .unwrap();
+        assert_eq!(minimal.expires_at, None);
+        assert_eq!(minimal.scope, None);
     }
 }

@@ -14192,6 +14192,7 @@ mod tests {
                 source: None,
                 disabled_tools: vec![],
                 cwd: None,
+                client_credentials: None,
                 unknown_fields: serde_json::Map::new(),
             });
         }
@@ -14228,6 +14229,7 @@ mod tests {
                 source: None,
                 disabled_tools: vec![],
                 cwd: None,
+                client_credentials: None,
                 unknown_fields: serde_json::Map::new(),
             });
             reg.set_server_enabled("default", id, true).unwrap();
@@ -14263,6 +14265,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         });
         reg.set_server_enabled("default", "github", true).unwrap();
@@ -17572,6 +17575,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         });
         reg.set_server_enabled("default", &id, true).unwrap();

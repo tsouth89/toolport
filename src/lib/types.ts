@@ -318,6 +318,21 @@ export interface ServerEntry {
   /** Working directory for a stdio server. Unset = inherit the gateway's cwd.
    * `~` and `${VAR}` are expanded. Lets a server run in a project dir (#239). */
   cwd?: string | null;
+  /** Headless outbound OAuth (SBS-524). Present = this server uses the
+   * client-credentials flow instead of the interactive browser one. */
+  clientCredentials?: ClientCredentials | null;
+}
+
+/** Non-secret client-credentials config. The client SECRET is never here: it
+ * lives in the OS keychain, because this object is written to registry.json and
+ * included in config backups and exports. */
+export interface ClientCredentials {
+  clientId: string;
+  /** `client_secret_basic` | `client_secret_post` | `private_key_jwt`.
+   * Unset = negotiate from what the authorization server advertises. */
+  tokenEndpointAuthMethod?: string | null;
+  /** Space-delimited scopes. Unset = use what discovery advertises. */
+  scope?: string | null;
 }
 
 export interface Profile {

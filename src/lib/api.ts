@@ -599,6 +599,38 @@ export function authenticateOauth(serverId: string, url: string): Promise<void> 
   return invoke<void>("authenticate_oauth", { serverId, url });
 }
 
+/** Configure the headless OAuth client-credentials flow for an http server.
+ *
+ * The secret goes straight to the OS keychain; only the client id, auth method
+ * and scopes are written to the registry. Pass an empty `clientSecret` to keep
+ * the stored one, so editing scopes does not require re-entering it. */
+export function setClientCredentials(
+  serverId: string,
+  clientId: string,
+  clientSecret: string,
+  tokenEndpointAuthMethod: string | null,
+  scope: string | null,
+): Promise<Registry> {
+  return invoke<Registry>("set_client_credentials", {
+    serverId,
+    clientId,
+    clientSecret,
+    tokenEndpointAuthMethod,
+    scope,
+  });
+}
+
+/** Remove client-credentials auth: vaulted secret, minted token, and config. */
+export function clearClientCredentials(serverId: string): Promise<Registry> {
+  return invoke<Registry>("clear_client_credentials", { serverId });
+}
+
+/** Whether a client secret is vaulted, so the UI can show "configured" without
+ * ever reading the value back. */
+export function hasClientSecret(serverId: string): Promise<boolean> {
+  return invoke<boolean>("has_client_secret", { serverId });
+}
+
 /** Detect what a remote server needs to connect (none/oauth/token) + guidance. */
 export function probeAuth(url: string): Promise<AuthInfo> {
   return invoke<AuthInfo>("probe_auth", { url });

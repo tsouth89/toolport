@@ -701,6 +701,40 @@ fn protocol_meta_for(version: &str) -> Value {
     })
 }
 
+/// Extension identifier for the headless OAuth flow (SBS-524).
+pub const OAUTH_CLIENT_CREDENTIALS_EXTENSION: &str =
+    "io.modelcontextprotocol/oauth-client-credentials";
+
+/// Merge Toolport's own extension declarations into a per-request `_meta`.
+///
+/// Kept separate from `protocol_meta` because [`Transport::set_protocol_meta`]
+/// replaces that wholesale after version negotiation, which would otherwise
+/// silently drop a declaration made at connect time. Re-merging on every set is
+/// what makes the declaration survive.
+fn merge_declared_extensions(meta: &mut Value, declared: &serde_json::Map<String, Value>) {
+    if declared.is_empty() {
+        return;
+    }
+    let Some(obj) = meta.as_object_mut() else {
+        return;
+    };
+    let capabilities = obj
+        .entry("io.modelcontextprotocol/clientCapabilities")
+        .or_insert_with(|| json!({}));
+    let Some(capabilities) = capabilities.as_object_mut() else {
+        return;
+    };
+    let extensions = capabilities
+        .entry("extensions")
+        .or_insert_with(|| json!({}));
+    let Some(extensions) = extensions.as_object_mut() else {
+        return;
+    };
+    for (name, settings) in declared {
+        extensions.insert(name.clone(), settings.clone());
+    }
+}
+
 const MCP_APPS_EXTENSION: &str = "io.modelcontextprotocol/ui";
 const MCP_APP_HTML_MIME: &str = "text/html;profile=mcp-app";
 
@@ -3190,6 +3224,10 @@ pub struct HttpTransport {
     /// drops its response on the next frame/keepalive, closing the old POST.
     listener_generation: Arc<AtomicU64>,
     subscription_listener_id: Option<i64>,
+    /// Extensions Toolport declares on this connection. Held apart from
+    /// `protocol_meta` because that is replaced wholesale after version
+    /// negotiation; see `merge_declared_extensions`.
+    declared_extensions: serde_json::Map<String, Value>,
 }
 
 struct PendingHttpMrtr {
@@ -3249,11 +3287,29 @@ impl HttpTransport {
             change_dirty: None,
             listener_generation: Arc::new(AtomicU64::new(0)),
             subscription_listener_id: None,
+            declared_extensions: serde_json::Map::new(),
         }
     }
 
     pub fn set_scope_reauthorize(&mut self, callback: Option<ScopeReauthorizeFn>) {
         self.scope_reauthorize = callback.map(|callback| Arc::new(Mutex::new(callback)));
+    }
+
+    /// Declare an extension Toolport supports on this connection.
+    ///
+    /// Declared per connection rather than globally: an extension is a statement
+    /// about *this* server, and claiming one on a server that does not use it
+    /// invites callbacks or semantics the gateway cannot service. Same reasoning
+    /// as the MCP Apps declaration on catalog fetches.
+    ///
+    /// A legacy (pre-2026-07-28) connection has no per-request `_meta`, so there
+    /// is nowhere to put this. The declaration is recorded and applied if the
+    /// connection is later negotiated up; the flow itself does not depend on it.
+    pub fn declare_extension(&mut self, name: &str, settings: Value) {
+        self.declared_extensions.insert(name.to_string(), settings);
+        if let Some(meta) = self.protocol_meta.as_mut() {
+            merge_declared_extensions(meta, &self.declared_extensions);
+        }
     }
 
     /// Wire the gateway sink for `notifications/resources/updated` seen on SSE
@@ -3817,6 +3873,9 @@ impl Transport for HttpTransport {
 
     fn set_protocol_meta(&mut self, meta: Option<Value>) {
         self.protocol_meta = meta;
+        if let Some(meta) = self.protocol_meta.as_mut() {
+            merge_declared_extensions(meta, &self.declared_extensions);
+        }
         if self.protocol_meta.is_some() {
             self.session_id = None;
         }
@@ -5078,7 +5137,8 @@ mod tests {
         resolve_root_token, screen_resolved_addrs, screen_spawn_command, screen_spawn_env,
         validate_cwd, CacheHint, CancelRegistry, DownstreamServer, MrtrRequest, ServerRequestAction,
         ServerRequestHandler, Transport, TransportError, MODERN_PROTOCOL_VERSION,
-        fetch_paginated_list,
+        fetch_paginated_list, protocol_meta_for, HttpTransport,
+        OAUTH_CLIENT_CREDENTIALS_EXTENSION,
     };
     use serde_json::{json, Value};
     use std::collections::{HashMap, VecDeque};
@@ -8639,5 +8699,56 @@ mod tests {
             }
             other => panic!("expected Retry or Fatal, got {other:?}"),
         }
+    }
+
+    /// SBS-524: a declared extension must survive `set_protocol_meta`.
+    ///
+    /// Version negotiation replaces `protocol_meta` wholesale, and the declaration
+    /// is made at connect time, before negotiation. Storing it only inside
+    /// `protocol_meta` would drop it on the first modern handshake and the server
+    /// would never learn the flow was in use -- with nothing failing to say so.
+    #[test]
+    fn declared_extensions_survive_protocol_meta_replacement() {
+        let mut transport = HttpTransport::guarded("https://mcp.example.com/mcp", None, None, true);
+        transport.declare_extension(OAUTH_CLIENT_CREDENTIALS_EXTENSION, json!({}));
+
+        // Declared before there is any protocol meta: nothing to merge into yet.
+        assert!(transport.protocol_meta.is_none());
+
+        transport.set_protocol_meta(Some(protocol_meta_for("2026-07-28")));
+        let extensions = transport
+            .protocol_meta
+            .as_ref()
+            .and_then(|m| m.get("io.modelcontextprotocol/clientCapabilities"))
+            .and_then(|c| c.get("extensions"))
+            .and_then(Value::as_object)
+            .expect("modern meta must carry a clientCapabilities.extensions map");
+        assert!(
+            extensions.contains_key(OAUTH_CLIENT_CREDENTIALS_EXTENSION),
+            "the declaration was dropped by version negotiation: {extensions:?}"
+        );
+
+        // Re-negotiating (a second handshake on the same transport) keeps it.
+        transport.set_protocol_meta(Some(protocol_meta_for("2026-07-28")));
+        assert!(transport
+            .protocol_meta
+            .as_ref()
+            .and_then(|m| m.get("io.modelcontextprotocol/clientCapabilities"))
+            .and_then(|c| c.get("extensions"))
+            .and_then(Value::as_object)
+            .is_some_and(|e| e.contains_key(OAUTH_CLIENT_CREDENTIALS_EXTENSION)));
+    }
+
+    /// A connection that never declares anything must send exactly what it always
+    /// did, so this cannot leak an empty `extensions` map onto every server.
+    #[test]
+    fn undeclared_connections_send_unchanged_meta() {
+        let mut transport = HttpTransport::guarded("https://mcp.example.com/mcp", None, None, true);
+        transport.set_protocol_meta(Some(protocol_meta_for("2026-07-28")));
+        assert_eq!(
+            transport.protocol_meta.as_ref().unwrap(),
+            &protocol_meta_for("2026-07-28"),
+            "declaring nothing must not alter the standard per-request meta"
+        );
     }
 }

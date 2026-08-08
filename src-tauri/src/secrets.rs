@@ -12,6 +12,14 @@ const TASK_HANDLE_KEY: &str = "__task_handle_key__";
 /// the OAuth flow stores its access token).
 pub const HTTP_AUTH_KEY: &str = "__http_auth__";
 
+/// Reserved secret key for the OAuth client-credentials client secret (SBS-524).
+///
+/// Separate from [`HTTP_AUTH_KEY`], which holds the short-lived *access* token.
+/// This is the long-lived credential used to mint those, so it must never be
+/// written to `registry.json`, config backups, or exports; only the non-secret
+/// `clientId` / scopes / auth method live there.
+pub const CLIENT_SECRET_KEY: &str = "__oauth_client_secret__";
+
 fn account(server_id: &str, key: &str) -> String {
     format!("{server_id}::{key}")
 }

@@ -3931,6 +3931,7 @@ fn gateway_entry(profile: Option<&str>, client_id: &str) -> Result<ServerEntry, 
         source: Some("toolport".to_string()),
         disabled_tools: Vec::new(),
         cwd: None,
+        client_credentials: None,
         unknown_fields: serde_json::Map::new(),
     })
 }
@@ -3995,6 +3996,7 @@ pub fn gateway_entry_shared_http(
             source: Some("toolport".into()),
             disabled_tools: Vec::new(),
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         }
     } else {
@@ -4027,6 +4029,7 @@ pub fn gateway_entry_shared_http(
             source: Some("toolport".into()),
             disabled_tools: Vec::new(),
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         }
     }
@@ -4616,6 +4619,7 @@ mod tests {
             source: Some("toolport".into()),
             disabled_tools: Vec::new(),
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         }
     }
@@ -4713,6 +4717,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         }
     }
@@ -4733,6 +4738,7 @@ mod tests {
             source: None,
             disabled_tools: vec![],
             cwd: None,
+            client_credentials: None,
             unknown_fields: serde_json::Map::new(),
         }
     }

@@ -55,6 +55,121 @@ pub struct Endpoints {
     pub scope: Option<String>,
     pub authorization_response_iss_parameter_supported: bool,
     pub client_id_metadata_document_supported: bool,
+    /// RFC 8414 `token_endpoint_auth_methods_supported`. `None` when the server
+    /// omits it, which per RFC 8414 means `client_secret_basic` only.
+    pub token_endpoint_auth_methods_supported: Option<Vec<String>>,
+}
+
+/// How the client authenticates itself to the token endpoint.
+///
+/// Only relevant to the headless client-credentials flow (SBS-524). The
+/// interactive authorization-code flow uses a public client with PKCE and sends
+/// no client secret at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientAuthMethod {
+    /// Credentials in the form body (RFC 6749 §2.3.1, the `client_secret_post`
+    /// alternative).
+    ClientSecretPost,
+    /// Credentials in an HTTP Basic header (RFC 6749 §2.3.1, the default that
+    /// RFC 8414 assumes when a server advertises nothing).
+    ClientSecretBasic,
+    /// RFC 7523 private-key JWT assertion. Recognized and configurable, but not
+    /// implemented: it needs an asymmetric signing dependency the crate does not
+    /// have. Tracked in SBS-599. Selecting it fails closed rather than silently
+    /// downgrading to a shared secret, which would be a security regression.
+    PrivateKeyJwt,
+}
+
+impl ClientAuthMethod {
+    /// The RFC 8414 `token_endpoint_auth_method` identifier.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientSecretPost => "client_secret_post",
+            Self::ClientSecretBasic => "client_secret_basic",
+            Self::PrivateKeyJwt => "private_key_jwt",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "client_secret_post" => Some(Self::ClientSecretPost),
+            "client_secret_basic" => Some(Self::ClientSecretBasic),
+            "private_key_jwt" => Some(Self::PrivateKeyJwt),
+            _ => None,
+        }
+    }
+
+    /// Does this method authenticate with a shared secret Toolport can send today?
+    fn is_implemented(self) -> bool {
+        matches!(self, Self::ClientSecretPost | Self::ClientSecretBasic)
+    }
+}
+
+/// Choose the token-endpoint auth method for a client-credentials connection.
+///
+/// `configured` is the user's explicit choice, if any. `advertised` is the
+/// server's `token_endpoint_auth_methods_supported`.
+///
+/// Fails closed in every ambiguous case rather than guessing. Sending a client
+/// secret by a method the server did not advertise leaks it to an endpoint that
+/// may log or reject it, and silently substituting a different method than the
+/// user configured is exactly the kind of downgrade this flow exists to avoid.
+pub fn select_client_auth_method(
+    configured: Option<ClientAuthMethod>,
+    advertised: Option<&[String]>,
+) -> Result<ClientAuthMethod, String> {
+    // RFC 8414: when the server omits the field, `client_secret_basic` is the
+    // assumed default. Treat an empty list the same way rather than concluding
+    // that nothing is supported.
+    let supported: Option<Vec<ClientAuthMethod>> = advertised
+        .filter(|list| !list.is_empty())
+        .map(|list| list.iter().filter_map(|m| ClientAuthMethod::parse(m)).collect());
+
+    if let Some(method) = configured {
+        if !method.is_implemented() {
+            return Err(format!(
+                "{} is not supported yet (it needs asymmetric signing; tracked in \
+                 SBS-599). Configure client_secret_post or client_secret_basic.",
+                method.as_str()
+            ));
+        }
+        if let Some(ref supported) = supported {
+            if !supported.contains(&method) {
+                return Err(format!(
+                    "the authorization server does not accept {}; it advertises: {}",
+                    method.as_str(),
+                    advertised.map(|l| l.join(", ")).unwrap_or_default()
+                ));
+            }
+        }
+        return Ok(method);
+    }
+
+    let Some(supported) = supported else {
+        // Nothing advertised: RFC 8414's default.
+        return Ok(ClientAuthMethod::ClientSecretBasic);
+    };
+    // Prefer basic, then post, among what we can actually do. `private_key_jwt`
+    // is deliberately not auto-selected: it is unimplemented, and picking it
+    // here would fail every connection on servers that advertise it alongside a
+    // secret-based method we can use.
+    supported
+        .iter()
+        .copied()
+        .find(|m| *m == ClientAuthMethod::ClientSecretBasic)
+        .or_else(|| {
+            supported
+                .iter()
+                .copied()
+                .find(|m| *m == ClientAuthMethod::ClientSecretPost)
+        })
+        .ok_or_else(|| {
+            format!(
+                "the authorization server advertises no token-endpoint auth method \
+                 Toolport can use ({}). private_key_jwt is tracked in SBS-599.",
+                advertised.map(|l| l.join(", ")).unwrap_or_default()
+            )
+        })
 }
 
 fn base64url(data: &[u8]) -> String {
@@ -247,6 +362,10 @@ struct AsMeta {
     authorization_response_iss_parameter_supported: bool,
     #[serde(default)]
     client_id_metadata_document_supported: bool,
+    /// RFC 8414. Absent means `client_secret_basic` per the spec, so this stays
+    /// `Option` rather than defaulting to an empty list, which would instead read
+    /// as "the server supports nothing".
+    token_endpoint_auth_methods_supported: Option<Vec<String>>,
 }
 
 enum ClientRegistration<'a> {
@@ -878,6 +997,8 @@ pub fn discover(mcp_url: &str) -> Result<Endpoints, String> {
                     .authorization_response_iss_parameter_supported,
                 client_id_metadata_document_supported: meta
                     .client_id_metadata_document_supported,
+                token_endpoint_auth_methods_supported: meta
+                    .token_endpoint_auth_methods_supported,
             });
         }
     }
@@ -1048,6 +1169,107 @@ pub fn refresh(
         resp.expires_in
     ));
     Ok(resp.into_tokens(now_epoch_seconds()))
+}
+
+/// Mint an access token with the RFC 6749 client-credentials grant (SBS-524).
+///
+/// This is the headless path: no browser, no user consent, no refresh token. The
+/// authorization server issues a token to the *client* rather than on behalf of a
+/// user, so when it expires the correct move is to ask for another one, not to
+/// redeem a refresh token. Servers are told not to issue one for this grant.
+///
+/// Deliberately fails closed rather than falling back to the interactive flow. A
+/// headless connection that silently opened a browser would be a surprising and
+/// unusable behaviour on a server, which is the environment this exists for.
+///
+/// `resource` rides as the RFC 8707 resource indicator so the token stays bound to
+/// the MCP server it was minted for, matching [`exchange_code`] and [`refresh`].
+pub fn client_credentials_token(
+    token_endpoint: &str,
+    client_id: &str,
+    client_secret: &str,
+    method: ClientAuthMethod,
+    scope: Option<&str>,
+    resource: Option<&str>,
+    block_private: bool,
+) -> Result<Tokens, String> {
+    if !method.is_implemented() {
+        return Err(format!(
+            "{} is not supported yet (tracked in SBS-599)",
+            method.as_str()
+        ));
+    }
+    // The secret rides in this request, so the transport must be encrypted. Same
+    // rule as every other credential-bearing call here; loopback is exempt for
+    // local development only.
+    require_https(token_endpoint, "token endpoint")?;
+
+    let mut form: Vec<(&str, &str)> = vec![("grant_type", "client_credentials")];
+    if let Some(s) = scope {
+        form.push(("scope", s));
+    }
+    if let Some(r) = resource {
+        form.push(("resource", r));
+    }
+
+    // `agent_no_redirect`: a 302 on a credential-bearing POST could hand the
+    // client secret to a host named by an attacker-influenceable metadata
+    // document. Same reasoning as the code exchange and refresh.
+    let request = agent_no_redirect(block_private).post(token_endpoint);
+    let response = match method {
+        ClientAuthMethod::ClientSecretBasic => {
+            // RFC 6749 §2.3.1: client_id and secret are form-urlencoded before
+            // base64, not sent raw. Skipping that corrupts any secret containing
+            // a `+`, `:` or `/`, which is common in generated credentials.
+            let credentials = format!(
+                "{}:{}",
+                urlencoding::encode(client_id),
+                urlencoding::encode(client_secret)
+            );
+            let header = format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes())
+            );
+            request.set("Authorization", &header).send_form(&form)
+        }
+        ClientAuthMethod::ClientSecretPost => {
+            let mut form = form.clone();
+            form.push(("client_id", client_id));
+            form.push(("client_secret", client_secret));
+            request.send_form(&form)
+        }
+        ClientAuthMethod::PrivateKeyJwt => unreachable!("rejected above"),
+    };
+
+    let resp: TokenResponse = response
+        .map_err(|e| redact_secret(&e.to_string(), client_secret))?
+        .into_json()
+        .map_err(|e| redact_secret(&e.to_string(), client_secret))?;
+    debug_log(&format!(
+        "client_credentials response: method={} expires_in={:?} refresh_token={}",
+        method.as_str(),
+        resp.expires_in,
+        resp.refresh_token.is_some()
+    ));
+    let mut tokens = resp.into_tokens(now_epoch_seconds());
+    // RFC 6749 §4.4.3: a refresh token SHOULD NOT be issued for this grant. If a
+    // server sends one anyway, drop it rather than vault it: keeping it would let
+    // the reacquire path silently become a refresh path, and the whole point of
+    // this flow is that re-authentication is cheap and non-interactive.
+    tokens.refresh_token = None;
+    Ok(tokens)
+}
+
+/// Strip a credential out of text that is about to be surfaced or logged.
+///
+/// Transport errors can quote the request, and this flow puts the secret in the
+/// body for `client_secret_post`. Redacting at the boundary is cheaper to keep
+/// right than auditing every downstream sink.
+fn redact_secret(text: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        return text.to_string();
+    }
+    text.replace(secret, "***")
 }
 
 fn open_browser(url: &str) {
@@ -2186,6 +2408,7 @@ mod tests {
             scope: None,
             authorization_response_iss_parameter_supported: false,
             client_id_metadata_document_supported: cimd,
+            token_endpoint_auth_methods_supported: None,
         };
 
         assert!(matches!(
@@ -2223,5 +2446,162 @@ mod tests {
         }))
         .unwrap();
         assert!(metadata.client_id_metadata_document_supported);
+    }
+
+    // ----- SBS-524: client-credentials auth-method selection ------------------
+
+    fn methods(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// RFC 8414: a server that omits `token_endpoint_auth_methods_supported` is
+    /// declaring `client_secret_basic`, not declaring nothing.
+    #[test]
+    fn absent_or_empty_advertisement_means_client_secret_basic() {
+        assert_eq!(
+            select_client_auth_method(None, None).unwrap(),
+            ClientAuthMethod::ClientSecretBasic
+        );
+        // An empty list is treated the same rather than as "supports nothing",
+        // which would make such a server unusable for no good reason.
+        assert_eq!(
+            select_client_auth_method(None, Some(&[])).unwrap(),
+            ClientAuthMethod::ClientSecretBasic
+        );
+    }
+
+    #[test]
+    fn auto_selection_picks_a_method_we_can_actually_perform() {
+        assert_eq!(
+            select_client_auth_method(None, Some(&methods(&["client_secret_post"]))).unwrap(),
+            ClientAuthMethod::ClientSecretPost
+        );
+        assert_eq!(
+            select_client_auth_method(
+                None,
+                Some(&methods(&["client_secret_post", "client_secret_basic"]))
+            )
+            .unwrap(),
+            ClientAuthMethod::ClientSecretBasic
+        );
+    }
+
+    /// `private_key_jwt` must never be auto-selected while it is unimplemented:
+    /// picking it would fail every connection to a server that also offers a
+    /// secret-based method we can use.
+    #[test]
+    fn auto_selection_skips_private_key_jwt_but_uses_a_usable_sibling() {
+        assert_eq!(
+            select_client_auth_method(
+                None,
+                Some(&methods(&["private_key_jwt", "client_secret_post"]))
+            )
+            .unwrap(),
+            ClientAuthMethod::ClientSecretPost
+        );
+    }
+
+    #[test]
+    fn auto_selection_fails_closed_when_nothing_is_usable() {
+        let err = select_client_auth_method(
+            None,
+            Some(&methods(&["private_key_jwt", "tls_client_auth"])),
+        )
+        .unwrap_err();
+        assert!(err.contains("SBS-599"), "error should point at the follow-up: {err}");
+    }
+
+    /// Configuring an unimplemented method fails rather than quietly downgrading
+    /// to a shared secret, which would be a security regression.
+    #[test]
+    fn configured_private_key_jwt_fails_closed_rather_than_downgrading() {
+        let err = select_client_auth_method(
+            Some(ClientAuthMethod::PrivateKeyJwt),
+            Some(&methods(&["private_key_jwt", "client_secret_basic"])),
+        )
+        .unwrap_err();
+        assert!(err.contains("not supported yet"), "{err}");
+        assert!(err.contains("SBS-599"), "{err}");
+    }
+
+    /// Never send a secret by a method the server did not advertise.
+    #[test]
+    fn configured_method_must_be_advertised() {
+        let err = select_client_auth_method(
+            Some(ClientAuthMethod::ClientSecretPost),
+            Some(&methods(&["client_secret_basic"])),
+        )
+        .unwrap_err();
+        assert!(err.contains("does not accept client_secret_post"), "{err}");
+
+        // But an explicit choice is honoured when the server says nothing, since
+        // there is no advertisement to contradict it.
+        assert_eq!(
+            select_client_auth_method(Some(ClientAuthMethod::ClientSecretPost), None).unwrap(),
+            ClientAuthMethod::ClientSecretPost
+        );
+    }
+
+    #[test]
+    fn auth_method_identifiers_round_trip() {
+        for m in [
+            ClientAuthMethod::ClientSecretPost,
+            ClientAuthMethod::ClientSecretBasic,
+            ClientAuthMethod::PrivateKeyJwt,
+        ] {
+            assert_eq!(ClientAuthMethod::parse(m.as_str()), Some(m));
+        }
+        assert_eq!(ClientAuthMethod::parse("none"), None);
+        assert_eq!(ClientAuthMethod::parse("tls_client_auth"), None);
+    }
+
+    /// The token endpoint receives the secret, so cleartext is refused outright
+    /// before any request is made.
+    #[test]
+    fn client_credentials_refuses_a_cleartext_token_endpoint() {
+        // `unwrap_err` would require `Tokens: Debug`, and `Tokens` deliberately
+        // does not derive it: a Debug impl on a struct holding an access token is
+        // one stray `{:?}` away from logging the credential.
+        let err = match client_credentials_token(
+            "http://auth.example.com/token",
+            "client",
+            "s3cret",
+            ClientAuthMethod::ClientSecretBasic,
+            None,
+            None,
+            true,
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("a cleartext token endpoint must be refused"),
+        };
+        assert!(err.contains("must use https"), "{err}");
+    }
+
+    #[test]
+    fn client_credentials_rejects_private_key_jwt_before_any_request() {
+        let err = match client_credentials_token(
+            "https://auth.example.com/token",
+            "client",
+            "",
+            ClientAuthMethod::PrivateKeyJwt,
+            None,
+            None,
+            true,
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("private_key_jwt must be refused before any request"),
+        };
+        assert!(err.contains("SBS-599"), "{err}");
+    }
+
+    /// A secret can appear in a transport error that quotes the request body.
+    #[test]
+    fn secrets_are_redacted_from_surfaced_text() {
+        assert_eq!(
+            redact_secret("POST failed: client_secret=hunter2&x=1", "hunter2"),
+            "POST failed: client_secret=***&x=1"
+        );
+        // An empty secret must not turn every character into a redaction.
+        assert_eq!(redact_secret("nothing to hide", ""), "nothing to hide");
     }
 }
