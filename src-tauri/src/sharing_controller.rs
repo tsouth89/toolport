@@ -49,9 +49,6 @@ pub(crate) fn build_export(
             if let Some(url) = server.url.as_deref() {
                 server.url = Some(registry::redact_url_userinfo(url));
             }
-            if server.transport == "stdio" || server.command.is_some() {
-                server.request_timeout_ms = None;
-            }
             server
         })
         .collect::<Vec<ServerEntry>>();
@@ -101,9 +98,7 @@ pub(crate) fn apply_import_selected(
         {
             continue;
         }
-        if server.transport == "stdio" || server.command.is_some() {
-            server.request_timeout_ms = None;
-        } else if let Some(milliseconds) = server.request_timeout_ms {
+        if let Some(milliseconds) = server.request_timeout_ms {
             registry::validate_request_timeout_ms(milliseconds).map_err(|error| {
                 format!("Invalid request timeout for '{}': {error}", server.name)
             })?;
@@ -366,33 +361,35 @@ mod controller_tests {
     }
 
     #[test]
-    fn shared_import_and_export_clear_timeouts_for_local_commands() {
+    fn shared_import_and_export_round_trip_timeouts_for_local_commands() {
         let mut registry = Registry::default();
         let json = serde_json::json!({ "servers": [
             {
                 "name": "Local",
                 "transport": "stdio",
                 "command": "local-server",
-                "requestTimeoutMs": 0
+                "requestTimeoutMs": 90_000
             },
             {
                 "name": "Local wrapper",
                 "transport": "http",
                 "command": "local-server",
-                "requestTimeoutMs": registry::MAX_REQUEST_TIMEOUT_MS + 1
+                "requestTimeoutMs": 120_000
             }
         ]});
 
         assert_eq!(apply_import(&mut registry, &json.to_string()).unwrap(), 2);
-        assert!(registry
-            .servers
-            .iter()
-            .all(|server| server.request_timeout_ms.is_none()));
+        assert_eq!(
+            registry.servers[0].request_timeout_ms,
+            Some(90_000)
+        );
+        assert_eq!(
+            registry.servers[1].request_timeout_ms,
+            Some(120_000)
+        );
         let exported = build_export(&registry, None, None, None);
-        assert!(exported["servers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|server| server["requestTimeoutMs"].is_null()));
+        let servers = exported["servers"].as_array().unwrap();
+        assert_eq!(servers[0]["requestTimeoutMs"], 90_000);
+        assert_eq!(servers[1]["requestTimeoutMs"], 120_000);
     }
 }

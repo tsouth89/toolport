@@ -9240,8 +9240,17 @@ fn connect_one(
         Ok(mut ds) => {
             ds.set_server_request_handler(server_handler);
             // Only the gateway needs resources/prompts (to proxy them); fetch
-            // them here, off the health-probe path.
+            // them here, off the health-probe path. These initial catalog reads
+            // intentionally run at the bounded STDIO_READ_TIMEOUT — the widened
+            // live-call timeout is applied after, so a server with a large
+            // requestTimeoutMs cannot stall startup.
             ds.load_resources_prompts();
+            // Per-server `requestTimeoutMs` widens only this server's live-call
+            // read deadline; connect budgets stay bounded. Clamped to >=1ms so a
+            // zero entry cannot become an instant timeout on every call.
+            if let Some(ms) = server.request_timeout_ms {
+                ds.set_call_timeout(Duration::from_millis(ms.max(1)));
+            }
             let msg = format!("connected '{}' ({} tools)", server.id, ds.tools.len());
             eprintln!("toolport: {msg}");
             glog(&msg);

@@ -5364,6 +5364,11 @@ pub struct DownstreamServer {
     /// Desired per-resource notification set carried by the modern listener.
     /// Legacy servers keep using resources/subscribe and resources/unsubscribe.
     modern_resource_subscriptions: HashSet<String>,
+    /// Live-call read deadline. Starts at STDIO_READ_TIMEOUT; a per-server
+    /// `requestTimeoutMs` widens it through `set_call_timeout`. Connect,
+    /// handshake, and probe budgets are never widened, so a hung server still
+    /// fails fast.
+    call_timeout: Duration,
     /// Existing legacy server-to-client request bridge. Modern downstream
     /// `input_required` results use it as a compatibility shim when the upstream
     /// client predates MRTR.
@@ -5615,8 +5620,18 @@ impl DownstreamServer {
             era,
             modern_http,
             modern_resource_subscriptions: std::collections::HashSet::new(),
+            call_timeout: STDIO_READ_TIMEOUT,
             server_handler: None,
         })
+    }
+
+    /// Widen the live-call read deadline for this server (per-server
+    /// `requestTimeoutMs`). Post-handshake requests only: connect, handshake,
+    /// and probe budgets keep their tighter bounds so a hung server still fails
+    /// fast, and a zero/near-zero configured value is clamped by the caller.
+    pub fn set_call_timeout(&mut self, timeout: Duration) {
+        self.call_timeout = timeout;
+        self.transport.set_read_timeout(timeout);
     }
 
     /// Install the upstream request bridge on both this server wrapper and its
@@ -5867,7 +5882,7 @@ impl DownstreamServer {
                 );
             }
         }
-        self.transport.set_read_timeout(STDIO_READ_TIMEOUT);
+        self.transport.set_read_timeout(self.call_timeout);
     }
 
     /// Re-fetch the resource list on the existing connection after the server
@@ -5957,7 +5972,7 @@ impl DownstreamServer {
                 );
             }
         }
-        self.transport.set_read_timeout(STDIO_READ_TIMEOUT);
+        self.transport.set_read_timeout(self.call_timeout);
     }
 
     /// Re-fetch the prompt list on the existing connection after the server
@@ -6006,7 +6021,7 @@ impl DownstreamServer {
                 );
             }
         }
-        self.transport.set_read_timeout(STDIO_READ_TIMEOUT);
+        self.transport.set_read_timeout(self.call_timeout);
     }
 
     /// Fetch the resources, resource templates, and prompts the server advertised.
@@ -6862,6 +6877,7 @@ mod tests {
             },
             modern_http: false,
             modern_resource_subscriptions: std::collections::HashSet::new(),
+            call_timeout: super::STDIO_READ_TIMEOUT,
             server_handler: None,
         };
         server.refresh_tools();
@@ -6897,6 +6913,7 @@ mod tests {
             },
             modern_http: false,
             modern_resource_subscriptions: std::collections::HashSet::new(),
+            call_timeout: super::STDIO_READ_TIMEOUT,
             server_handler: None,
         };
         server.refresh_tools();
@@ -6938,6 +6955,7 @@ mod tests {
             },
             modern_http: false,
             modern_resource_subscriptions: std::collections::HashSet::new(),
+            call_timeout: super::STDIO_READ_TIMEOUT,
             server_handler: None,
         };
         server.refresh_tools();
@@ -6979,6 +6997,7 @@ mod tests {
             },
             modern_http: false,
             modern_resource_subscriptions: std::collections::HashSet::new(),
+            call_timeout: super::STDIO_READ_TIMEOUT,
             server_handler: None,
         };
         server.refresh_tools();
@@ -7017,6 +7036,7 @@ mod tests {
             },
             modern_http: false,
             modern_resource_subscriptions: std::collections::HashSet::new(),
+            call_timeout: super::STDIO_READ_TIMEOUT,
             server_handler: None,
         };
         server.refresh_resources();
@@ -7064,6 +7084,7 @@ mod tests {
             },
             modern_http: false,
             modern_resource_subscriptions: std::collections::HashSet::new(),
+            call_timeout: super::STDIO_READ_TIMEOUT,
             server_handler: None,
         };
         server.refresh_resources();

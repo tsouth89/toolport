@@ -501,9 +501,10 @@ pub struct ServerEntry {
     /// interactive OAuth and pasted-token behaviour exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_credentials: Option<ClientCredentials>,
-    /// Total deadline for each HTTP request to this server, in milliseconds.
+    /// Total deadline for each request to this server, in milliseconds.
     /// Valid values are 1 through 86,400,000 (24 hours). Unset preserves the
-    /// historical 30-second default. Only applies to HTTP/SSE.
+    /// historical 30-second default. Applies to both HTTP/SSE and stdio
+    /// transports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_ms: Option<u64>,
     /// Per-server fields written by a newer build that this binary doesn't know
