@@ -17,6 +17,7 @@ import {
   X,
   XCircle,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import {
   fmtDollars,
@@ -1092,21 +1093,86 @@ function DiscoveryRow({ t }: { t: SearchTrace }) {
  * Lists recent toolport_search_tools calls with what matched and the exact per-turn
  * tool-definition token overhead. Self-hides until something has searched. Always-on,
  * local, bounded. */
+/** Loading placeholder for a self-contained Activity panel, shown only while its
+ * first fetch is in flight (never once real rows exist — a live refresh should not
+ * flash this over last-known data). */
+function PanelLoadingNotice({ label, icon: Icon }: { label: string; icon: LucideIcon }) {
+  return (
+    <div
+      role="status"
+      className="mb-6 flex items-center gap-2 rounded-lg border border-border/60 bg-muted/20 p-4 text-xs text-muted-foreground"
+    >
+      <Icon className="size-4 shrink-0" />
+      <span>Loading {label.toLowerCase()}…</span>
+    </div>
+  );
+}
+
+/** A failed load for a self-contained Activity panel. Distinguishes "couldn't check"
+ * from "nothing to show" with an explicit retry, so a backend failure never collapses
+ * into the same wording as a genuinely empty panel (#728). */
+function PanelErrorNotice({ label, onRetry }: { label: string; onRetry: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="mb-6 flex items-center gap-3 rounded-lg border border-warning/40 bg-warning/5 p-4 text-xs"
+    >
+      <AlertTriangle className="size-4 shrink-0 text-warning" />
+      <span className="text-muted-foreground">
+        <span className="font-medium text-foreground">
+          Couldn't load {label.toLowerCase()}.
+        </span>{" "}
+        This isn't necessarily empty — Toolport couldn't check.
+      </span>
+      <button
+        type="button"
+        onClick={onRetry}
+        aria-label={`Retry loading ${label.toLowerCase()}`}
+        className="ml-auto shrink-0 rounded-md border px-2.5 py-1 font-medium text-foreground transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
+
 function DiscoveryTraces({ refreshKey }: { refreshKey: number }) {
   const [entries, setEntries] = useState<SearchTrace[]>([]);
   // Collapsed by default: this is glanceable telemetry, not an alert, and the list can run
   // to 100 rows. Leading with it open was a big part of the Activity tab feeling busy.
   const [open, setOpen] = useState(false);
+  // Distinguishes a load failure from a genuinely empty result (#728): both leave
+  // `entries` empty, but only one should show "Nothing searched yet."
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [retryTick, setRetryTick] = useState(0);
 
   useEffect(() => {
     let alive = true;
+    setStatus((s) => (s === "error" ? "loading" : s));
     getSearchTraces(100)
-      .then((e) => alive && setEntries(e))
-      .catch(() => alive && setEntries([]));
+      .then((e) => {
+        if (!alive) return;
+        setEntries(e);
+        setStatus("ready");
+      })
+      .catch(() => {
+        if (!alive) return;
+        setStatus("error");
+      });
     return () => {
       alive = false;
     };
-  }, [refreshKey]);
+  }, [refreshKey, retryTick]);
+
+  if (status === "loading" && entries.length === 0) {
+    return <PanelLoadingNotice label="Discovery" icon={Search} />;
+  }
+
+  if (status === "error") {
+    return (
+      <PanelErrorNotice label="Discovery" onRetry={() => setRetryTick((t) => t + 1)} />
+    );
+  }
 
   if (entries.length === 0)
     return (
@@ -1292,16 +1358,28 @@ function ToolIdentities({ refreshKey }: { refreshKey: number }) {
   const [rows, setRows] = useState<ToolIdentity[]>([]);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  // Distinguishes a load failure from a genuinely empty result (#728): both leave
+  // `rows` empty, but only one should hide the panel.
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [retryTick, setRetryTick] = useState(0);
 
   useEffect(() => {
     let alive = true;
+    setStatus((s) => (s === "error" ? "loading" : s));
     getToolIdentities()
-      .then((r) => alive && setRows(r))
-      .catch(() => alive && setRows([]));
+      .then((r) => {
+        if (!alive) return;
+        setRows(r);
+        setStatus("ready");
+      })
+      .catch(() => {
+        if (!alive) return;
+        setStatus("error");
+      });
     return () => {
       alive = false;
     };
-  }, [refreshKey]);
+  }, [refreshKey, retryTick]);
 
   const q = query.trim().toLowerCase();
 
@@ -1335,6 +1413,19 @@ function ToolIdentities({ refreshKey }: { refreshKey: number }) {
       })
       .filter(([, items]) => items.length > 0);
   }, [groups, q]);
+
+  if (status === "loading" && rows.length === 0) {
+    return <PanelLoadingNotice label="Tool identities" icon={Fingerprint} />;
+  }
+
+  if (status === "error") {
+    return (
+      <PanelErrorNotice
+        label="Tool identities"
+        onRetry={() => setRetryTick((t) => t + 1)}
+      />
+    );
+  }
 
   if (rows.length === 0) return null;
 
@@ -1414,16 +1505,28 @@ function ToolIdentities({ refreshKey }: { refreshKey: number }) {
 function LiveInspector({ refreshKey }: { refreshKey: number }) {
   const [entries, setEntries] = useState<InspectEntry[]>([]);
   const [open, setOpen] = useState(true);
+  // Distinguishes a load failure from a genuinely empty buffer (#728): both leave
+  // `entries` empty, but only one should say "run a tool and it'll show here."
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [retryTick, setRetryTick] = useState(0);
 
   useEffect(() => {
     let alive = true;
+    setStatus((s) => (s === "error" ? "loading" : s));
     getInspectLog(50)
-      .then((e) => alive && setEntries(e))
-      .catch(() => alive && setEntries([]));
+      .then((e) => {
+        if (!alive) return;
+        setEntries(e);
+        setStatus("ready");
+      })
+      .catch(() => {
+        if (!alive) return;
+        setStatus("error");
+      });
     return () => {
       alive = false;
     };
-  }, [refreshKey]);
+  }, [refreshKey, retryTick]);
 
   return (
     <div className="mb-6 rounded-lg border border-info/30 bg-info/[0.04] p-4">
@@ -1451,7 +1554,16 @@ function LiveInspector({ refreshKey }: { refreshKey: number }) {
             is separate from the audit log, never leaves your machine, and clears when you
             turn inspection off or restart the gateway.
           </p>
-          {entries.length === 0 ? (
+          {status === "loading" && entries.length === 0 ? (
+            <p role="status" className="py-6 text-center text-sm text-muted-foreground">
+              Checking for captured calls…
+            </p>
+          ) : status === "error" ? (
+            <PanelErrorNotice
+              label="Live inspector"
+              onRetry={() => setRetryTick((t) => t + 1)}
+            />
+          ) : entries.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
               No calls captured yet. Run a tool through Toolport and it'll show here.
             </p>

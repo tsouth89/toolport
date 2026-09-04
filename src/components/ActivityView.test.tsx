@@ -7,6 +7,8 @@ import type { AuditEntry, SearchTrace } from "@/lib/types";
 const getAuditLog = vi.fn();
 const getSearchTraces = vi.fn();
 const getSecurityEvents = vi.fn();
+const getToolIdentities = vi.fn();
+const getInspectLog = vi.fn();
 
 const clearActivityLogs = vi.fn();
 
@@ -15,11 +17,11 @@ vi.mock("@/lib/api", () => ({
   exportAuditToPath: vi.fn(),
   getAuditLog: (...a: unknown[]) => getAuditLog(...a),
   getAuditStats: vi.fn(() => Promise.resolve(null)),
-  getInspectLog: vi.fn(() => Promise.resolve([])),
+  getInspectLog: (...a: unknown[]) => getInspectLog(...a),
   getSavingsSummary: vi.fn(() => Promise.resolve(null)),
   getSearchTraces: (...a: unknown[]) => getSearchTraces(...a),
   getSecurityEvents: (...a: unknown[]) => getSecurityEvents(...a),
-  getToolIdentities: vi.fn(() => Promise.resolve([])),
+  getToolIdentities: (...a: unknown[]) => getToolIdentities(...a),
 }));
 
 vi.mock("sonner", () => ({
@@ -56,6 +58,8 @@ beforeEach(() => {
   getAuditLog.mockResolvedValue(initialLog);
   getSearchTraces.mockResolvedValue([]);
   getSecurityEvents.mockResolvedValue([]);
+  getToolIdentities.mockResolvedValue([]);
+  getInspectLog.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -325,6 +329,23 @@ describe("ActivityView recent calls", () => {
 });
 
 describe("ActivityView discovery", () => {
+  it("shows an error with retry instead of a false empty state when discovery traces fail to load (#728)", async () => {
+    const user = userEvent.setup({
+      advanceTimers: (ms) => vi.advanceTimersByTime(ms),
+    });
+    getSearchTraces.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce([]);
+
+    render(<ActivityView refreshKey={0} registry={null} />);
+    await act(async () => {});
+
+    expect(screen.getByText("Couldn't load discovery.")).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing searched yet/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Retry loading discovery" }));
+    await act(async () => {});
+    expect(screen.getByText(/Nothing searched yet/)).toBeInTheDocument();
+  });
+
   it("shows a tiny nonzero saving without rounding it down to zero", async () => {
     const user = userEvent.setup({
       advanceTimers: (ms) => vi.advanceTimersByTime(ms),
@@ -352,5 +373,51 @@ describe("ActivityView discovery", () => {
 
     expect(row.parentElement).toHaveTextContent(/<0\.1% less this turn\)\./);
     expect(row.parentElement).not.toHaveTextContent(/\(0% less this turn\)\./);
+  });
+});
+
+describe("ActivityView tool identities", () => {
+  it("shows an error with retry instead of hiding the panel when identities fail to load (#728)", async () => {
+    const user = userEvent.setup({
+      advanceTimers: (ms) => vi.advanceTimersByTime(ms),
+    });
+    getToolIdentities
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce([]);
+
+    render(<ActivityView refreshKey={0} registry={null} />);
+    await act(async () => {});
+
+    expect(screen.getByText("Couldn't load tool identities.")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Retry loading tool identities" }),
+    );
+    await act(async () => {});
+    expect(screen.queryByText("Couldn't load tool identities.")).not.toBeInTheDocument();
+  });
+});
+
+describe("ActivityView live inspector", () => {
+  it("shows an error with retry instead of a false empty state when the inspect log fails to load (#728)", async () => {
+    const user = userEvent.setup({
+      advanceTimers: (ms) => vi.advanceTimersByTime(ms),
+    });
+    getInspectLog.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce([]);
+
+    // LiveInspector only mounts while live inspection is on (ActivityView.tsx:1772).
+    render(<ActivityView refreshKey={0} registry={{ liveInspect: true } as never} />);
+    await act(async () => {});
+
+    expect(screen.getByText("Couldn't load live inspector.")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/No calls captured yet\. Run a tool/),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Retry loading live inspector" }),
+    );
+    await act(async () => {});
+    expect(screen.getByText(/No calls captured yet\. Run a tool/)).toBeInTheDocument();
   });
 });
