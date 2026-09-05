@@ -1032,14 +1032,6 @@ fn claude_desktop_path() -> Option<PathBuf> {
     Some(real)
 }
 
-fn cursor_path() -> Option<PathBuf> {
-    client_config_path("cursor")
-}
-
-fn droid_path() -> Option<PathBuf> {
-    client_config_path("droid")
-}
-
 fn crush_override_path(config_dir: Option<std::ffi::OsString>) -> Option<PathBuf> {
     config_dir
         .filter(|p| !p.is_empty())
@@ -1085,44 +1077,11 @@ fn crush_path() -> Option<PathBuf> {
     Some(current)
 }
 
-fn anythingllm_path() -> Option<PathBuf> {
-    client_config_path("anythingllm")
-}
-
-fn boltai_path() -> Option<PathBuf> {
-    client_config_path("boltai")
-}
-
-/// Pi coding agent reads its Pi-owned global MCP config from ~/.pi/agent/mcp.json
-/// (standard `mcpServers` shape; pi's optional `lifecycle`/`idleTimeout` keys are
-/// left unset so it uses its defaults). Home-anchored, identical on every OS.
-fn pi_path() -> Option<PathBuf> {
-    client_config_path("pi")
-}
-
-/// Oh My Pi (omp) is a fork of Pi with its own config directory (~/.omp).
-/// Same `mcpServers` JSON format as Pi; home-anchored, identical on every OS.
-fn omp_path() -> Option<PathBuf> {
-    client_config_path("omp")
-}
-
-fn vscode_path() -> Option<PathBuf> {
-    client_config_path("vscode")
-}
-
 fn amp_path() -> Option<PathBuf> {
     std::env::var_os("AMP_SETTINGS_FILE")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .or_else(|| client_config_path("amp"))
-}
-
-fn windsurf_path() -> Option<PathBuf> {
-    client_config_path("windsurf")
-}
-
-fn devin_cli_path() -> Option<PathBuf> {
-    client_config_path("devin-cli")
 }
 
 /// Codex reads `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise
@@ -1175,10 +1134,6 @@ fn grok_path() -> Option<PathBuf> {
     client_config_path("grok")
 }
 
-fn claude_code_path() -> Option<PathBuf> {
-    client_config_path("claude-code")
-}
-
 /// Gemini CLI treats `GEMINI_CLI_HOME` as a replacement *home directory*,
 /// then still appends `.gemini/`. Settings live at
 /// `$GEMINI_CLI_HOME/.gemini/settings.json`. Empty or relative values fall
@@ -1227,12 +1182,6 @@ fn qwen_code_path() -> Option<PathBuf> {
     client_config_path("qwen-code")
 }
 
-/// Junie stores user-scoped MCP servers at ~/.junie/mcp/mcp.json on every
-/// supported platform. Project-scoped configs are intentionally left untouched.
-fn junie_path() -> Option<PathBuf> {
-    client_config_path("junie")
-}
-
 /// Google Antigravity reads MCP servers from `mcp_config.json` under `~/.gemini`.
 /// The subdir has shifted across versions (`config`, `antigravity-ide`,
 /// `antigravity`) and installers leave empty decoy files in the unused ones, so
@@ -1250,18 +1199,8 @@ fn antigravity_path() -> Option<PathBuf> {
     client_config_path("antigravity")
 }
 
-fn cline_path() -> Option<PathBuf> {
-    client_config_path("cline")
-}
-
 fn roo_code_path() -> Option<PathBuf> {
     client_config_path("roo-code")
-}
-
-/// OpenCode stores its global config at the literal
-/// `~/.config/opencode/opencode.json` or `opencode.jsonc` on every supported OS.
-fn opencode_path() -> Option<PathBuf> {
-    client_config_path("opencode")
 }
 
 fn resolve_opencode_config_path(json_path: PathBuf) -> Result<PathBuf, String> {
@@ -1286,31 +1225,6 @@ fn resolved_definition_path(def: &ClientDef) -> Result<PathBuf, String> {
     }
 }
 
-/// Kilo Code stores its global JSONC config at the literal
-/// `~/.config/kilo/kilo.jsonc` on every supported OS.
-fn kilo_code_path() -> Option<PathBuf> {
-    client_config_path("kilo-code")
-}
-
-/// Warp reads file-based MCP servers from `~/.warp/.mcp.json` (keyed under
-/// `mcpServers`), alongside its in-app UI. The file is home-anchored on every OS.
-fn warp_path() -> Option<PathBuf> {
-    client_config_path("warp")
-}
-
-/// Amazon Q Developer CLI global MCP config: `~/.aws/amazonq/mcp.json`
-/// (`mcpServers`). A per-workspace `.amazonq/mcp.json` also exists; we manage the
-/// global one so the gateway is available everywhere.
-fn amazon_q_path() -> Option<PathBuf> {
-    client_config_path("amazon-q")
-}
-
-/// Kiro user-level MCP config: `~/.kiro/settings/mcp.json` (`mcpServers`). A
-/// per-workspace `.kiro/settings/mcp.json` also exists and takes precedence.
-fn kiro_path() -> Option<PathBuf> {
-    client_config_path("kiro")
-}
-
 /// Kimi Code (Moonshot AI) user-level MCP config: `~/.kimi-code/mcp.json`
 /// (`mcpServers`). Kimi merges a per-project `.kimi-code/mcp.json` over it on
 /// startup; we manage the user-level file so the gateway is available
@@ -1325,33 +1239,12 @@ fn kimi_code_path() -> Option<PathBuf> {
         .or_else(|| client_config_path("kimi-code"))
 }
 
-/// LM Studio reads MCP servers from `~/.lmstudio/mcp.json` (`mcpServers`, plain
-/// JSON). The file is created by LM Studio, so the parent-dir presence check works.
-fn lmstudio_path() -> Option<PathBuf> {
-    client_config_path("lm-studio")
-}
-
-/// Jan keeps MCP servers in mcp_config.json (standard `mcpServers` shape) inside
-/// its data folder, `<data_dir>/Jan/data` on every OS (e.g. %APPDATA%\Jan\data on
-/// Windows, ~/Library/Application Support/Jan/data on macOS). Jan creates the
-/// folder and a default config on first launch, so the parent-dir check detects it.
-fn jan_path() -> Option<PathBuf> {
-    client_config_path("jan")
-}
-
 /// Goose keeps extensions (its MCP servers) in config.yaml. It resolves the dir
 /// via the `etcetera` "Block/goose" app strategy: ~/.config/goose on Linux, an
 /// app-support path on macOS, and %APPDATA%\Block\goose\config on Windows. (The
 /// Windows path is the etcetera default and is confirmed against a real install.)
 fn goose_path() -> Option<PathBuf> {
     client_config_path("goose")
-}
-
-/// Zed keeps MCP ("context") servers in its main settings.json (JSONC). Windows
-/// uses %APPDATA%\Zed; macOS and Linux use ~/.config/zed (not App Support). The
-/// parent dir is created on install, so the default presence heuristic works.
-fn zed_path() -> Option<PathBuf> {
-    client_config_path("zed")
 }
 
 /// Hermes keeps MCP servers in ~/.hermes/config.yaml under the `mcp_servers:` key.
@@ -1398,17 +1291,6 @@ fn resolve_hermes_path(canonical: PathBuf, local_data: Option<PathBuf>) -> PathB
 
 fn continue_path() -> Option<PathBuf> {
     client_config_path("continue")
-}
-
-/// Witsy keeps MCP servers in a top-level `mcpServers` object inside its main
-/// settings.json (alongside all other app settings), in the Claude-compatible
-/// `{command, args, env}` shape. Electron's userData dir is "Witsy" on every OS:
-/// ~/Library/Application Support/Witsy on macOS, %APPDATA%\Witsy on Windows,
-/// ~/.config/Witsy on Linux. Confirmed against the app's own source
-/// (src/main/mcp.ts reads/writes config.mcpServers directly) and the project's
-/// file-location wiki page.
-fn witsy_path() -> Option<PathBuf> {
-    client_config_path("witsy")
 }
 
 fn cursor_plugins_dir() -> Option<PathBuf> {
@@ -1519,7 +1401,7 @@ fn defs() -> Vec<ClientDef> {
             name: "Cursor",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: cursor_path,
+            path: || client_config_path("cursor"),
             plugin_scan: Some(scan_cursor_plugins),
         },
         ClientDef {
@@ -1527,7 +1409,7 @@ fn defs() -> Vec<ClientDef> {
             name: "Factory Droid",
             format: Format::JsonDroidMcpServers,
             uses_connectors: false,
-            path: droid_path,
+            path: || client_config_path("droid"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1543,7 +1425,7 @@ fn defs() -> Vec<ClientDef> {
             name: "AnythingLLM",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: anythingllm_path,
+            path: || client_config_path("anythingllm"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1551,7 +1433,7 @@ fn defs() -> Vec<ClientDef> {
             name: "VS Code",
             format: Format::JsonServers,
             uses_connectors: false,
-            path: vscode_path,
+            path: || client_config_path("vscode"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1567,7 +1449,7 @@ fn defs() -> Vec<ClientDef> {
             name: "Devin Desktop (Cascade)",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: windsurf_path,
+            path: || client_config_path("windsurf"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1575,7 +1457,7 @@ fn defs() -> Vec<ClientDef> {
             name: "Devin Local / CLI",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: devin_cli_path,
+            path: || client_config_path("devin-cli"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1583,7 +1465,9 @@ fn defs() -> Vec<ClientDef> {
             name: "OpenCode",
             format: Format::JsonOpenCodeMcp,
             uses_connectors: false,
-            path: opencode_path,
+            // OpenCode stores its global config at the literal
+            // `~/.config/opencode/opencode.json` or `opencode.jsonc` on every supported OS.
+            path: || client_config_path("opencode"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1591,7 +1475,9 @@ fn defs() -> Vec<ClientDef> {
             name: "Kilo Code",
             format: Format::JsonOpenCodeMcp,
             uses_connectors: false,
-            path: kilo_code_path,
+            // Kilo Code stores its global JSONC config at the literal
+            // `~/.config/kilo/kilo.jsonc` on every supported OS.
+            path: || client_config_path("kilo-code"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1635,7 +1521,7 @@ fn defs() -> Vec<ClientDef> {
             name: "Claude Code",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: claude_code_path,
+            path: || client_config_path("claude-code"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1659,7 +1545,9 @@ fn defs() -> Vec<ClientDef> {
             name: "JetBrains Junie",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: junie_path,
+            // Junie stores user-scoped MCP servers at ~/.junie/mcp/mcp.json on every
+            // supported platform. Project-scoped configs are intentionally left untouched.
+            path: || client_config_path("junie"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1667,7 +1555,7 @@ fn defs() -> Vec<ClientDef> {
             name: "Cline",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: cline_path,
+            path: || client_config_path("cline"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1683,7 +1571,9 @@ fn defs() -> Vec<ClientDef> {
             name: "Warp",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: warp_path,
+            // Warp reads file-based MCP servers from `~/.warp/.mcp.json` (keyed under
+            // `mcpServers`), alongside its in-app UI. The file is home-anchored on every OS.
+            path: || client_config_path("warp"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1691,7 +1581,10 @@ fn defs() -> Vec<ClientDef> {
             name: "Amazon Q",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: amazon_q_path,
+            // Amazon Q Developer CLI global MCP config: `~/.aws/amazonq/mcp.json`
+            // (`mcpServers`). A per-workspace `.amazonq/mcp.json` also exists; we manage the
+            // global one so the gateway is available everywhere.
+            path: || client_config_path("amazon-q"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1699,7 +1592,9 @@ fn defs() -> Vec<ClientDef> {
             name: "Kiro",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: kiro_path,
+            // Kiro user-level MCP config: `~/.kiro/settings/mcp.json` (`mcpServers`). A
+            // per-workspace `.kiro/settings/mcp.json` also exists and takes precedence.
+            path: || client_config_path("kiro"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1715,7 +1610,10 @@ fn defs() -> Vec<ClientDef> {
             name: "Zed",
             format: Format::JsonContextServers,
             uses_connectors: false,
-            path: zed_path,
+            // Zed keeps MCP ("context") servers in its main settings.json (JSONC). Windows
+            // uses %APPDATA%\Zed; macOS and Linux use ~/.config/zed (not App Support). The
+            // parent dir is created on install, so the default presence heuristic works.
+            path: || client_config_path("zed"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1723,7 +1621,9 @@ fn defs() -> Vec<ClientDef> {
             name: "LM Studio",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: lmstudio_path,
+            // LM Studio reads MCP servers from `~/.lmstudio/mcp.json` (`mcpServers`, plain
+            // JSON). The file is created by LM Studio, so the parent-dir presence check works.
+            path: || client_config_path("lm-studio"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1731,7 +1631,11 @@ fn defs() -> Vec<ClientDef> {
             name: "Jan",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: jan_path,
+            // Jan keeps MCP servers in mcp_config.json (standard `mcpServers` shape) inside
+            // its data folder, `<data_dir>/Jan/data` on every OS (e.g. %APPDATA%\Jan\data on
+            // Windows, ~/Library/Application Support/Jan/data on macOS). Jan creates the
+            // folder and a default config on first launch, so the parent-dir check detects it.
+            path: || client_config_path("jan"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1739,7 +1643,7 @@ fn defs() -> Vec<ClientDef> {
             name: "BoltAI",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: boltai_path,
+            path: || client_config_path("boltai"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1747,7 +1651,10 @@ fn defs() -> Vec<ClientDef> {
             name: "Pi",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: pi_path,
+            // Pi coding agent reads its Pi-owned global MCP config from ~/.pi/agent/mcp.json
+            // (standard `mcpServers` shape; pi's optional `lifecycle`/`idleTimeout` keys are
+            // left unset so it uses its defaults). Home-anchored, identical on every OS.
+            path: || client_config_path("pi"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1755,7 +1662,9 @@ fn defs() -> Vec<ClientDef> {
             name: "Oh My Pi",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: omp_path,
+            // Oh My Pi (omp) is a fork of Pi with its own config directory (~/.omp).
+            // Same `mcpServers` JSON format as Pi; home-anchored, identical on every OS.
+            path: || client_config_path("omp"),
             plugin_scan: None,
         },
         ClientDef {
@@ -1787,7 +1696,14 @@ fn defs() -> Vec<ClientDef> {
             name: "Witsy",
             format: Format::JsonMcpServers,
             uses_connectors: false,
-            path: witsy_path,
+            // Witsy keeps MCP servers in a top-level `mcpServers` object inside its main
+            // settings.json (alongside all other app settings), in the Claude-compatible
+            // `{command, args, env}` shape. Electron's userData dir is "Witsy" on every OS:
+            // ~/Library/Application Support/Witsy on macOS, %APPDATA%\Witsy on Windows,
+            // ~/.config/Witsy on Linux. Confirmed against the app's own source
+            // (src/main/mcp.ts reads/writes config.mcpServers directly) and the project's
+            // file-location wiki page.
+            path: || client_config_path("witsy"),
             plugin_scan: None,
         },
     ]

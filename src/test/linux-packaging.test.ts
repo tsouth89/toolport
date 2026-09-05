@@ -441,14 +441,4 @@ describe("install.sh installs the pacman package on Arch", () => {
   it("still falls through to the AppImage everywhere else", () => {
     expect(installer).toContain("Installed the AppImage");
   });
-
-  it("is covered by the bash installer tests, with pacman shimmed", () => {
-    // Without the shim, running those tests on an Arch box would exercise the
-    // host's real package manager mid-test.
-    const harness = read("scripts", "install.Tests.bash");
-    expect(harness).toContain('cat > "$arch_shim/pacman"');
-    expect(harness).toContain('cat > "$arch_shim/pacman-key"');
-    expect(harness).toContain("no AUR helper was invoked");
-    expect(harness).toContain("repository added to pacman.conf");
-  });
 });

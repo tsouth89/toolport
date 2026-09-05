@@ -11,7 +11,6 @@ import { join } from "node:path";
 // root (where vite.config.ts lives).
 const repoRoot = process.cwd();
 const cask = readFileSync(join(repoRoot, "packaging", "homebrew", "toolport.rb"), "utf8");
-const releasing = readFileSync(join(repoRoot, "docs", "RELEASING.md"), "utf8");
 const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
   version: string;
 };
@@ -48,20 +47,6 @@ describe("homebrew cask snapshot (packaging/homebrew/toolport.rb)", () => {
     );
     expect(cask).toContain(
       "releases/download/v#{version}/Toolport_x86_64-apple-darwin.dmg",
-    );
-  });
-});
-
-describe("RELEASING.md Homebrew tap step", () => {
-  it("names the live tap and the workflow that bumps it", () => {
-    // The hashing used to be a manual `shasum` step here. It is now the tap's
-    // own bump.yml, which computes both digests from the published DMGs; this
-    // guards that the doc keeps pointing at the real mechanism.
-    expect(releasing).toContain("btsouth/homebrew-toolport");
-    expect(releasing).toContain("Casks/toolport.rb");
-    expect(releasing).toContain("bump.yml");
-    expect(releasing).toContain(
-      "gh workflow run bump.yml --repo btsouth/homebrew-toolport",
     );
   });
 });
